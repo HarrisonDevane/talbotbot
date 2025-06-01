@@ -1,37 +1,69 @@
 #!/usr/bin/env py
 
 import tkinter as tk
-import os
-import chess.engine
+import argparse
 from gui import ChessGUI
 from game_controller import GameController
-from players import HumanPlayer, StockfishPlayer, LeelaPlayer  # assuming you have these player classes
+from players import HumanPlayer, StockfishPlayer, LeelaPlayer
+
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Talbot Chess Engine")
+
+    parser.add_argument('--white', choices=['human', 'stockfish', 'leela'], default='human',
+                        help="Type of player for white")
+    parser.add_argument('--black', choices=['human', 'stockfish', 'leela'], default='stockfish',
+                        help="Type of player for black")
+    parser.add_argument('--gui', action='store_true',
+                        help="Flag for a GUI to be displayed")
+    
+    parser.add_argument('--num_games', type=int, default = 5,
+                    help="Number of games played")
+    
+    return parser.parse_args()
 
 def main():
-    # Create players (could be HumanPlayer, StockfishPlayer, or your CNNPlayer)
-    white_player = StockfishPlayer()          # human plays white
-    black_player = LeelaPlayer(time_limit=2)  # engine plays black
+    args = parse_args()
+
+    if args.white == "human":
+        white_player = HumanPlayer()
+    elif args.white == "stockfish":
+        white_player = StockfishPlayer()
+    elif args.white == "leela":
+        white_player = LeelaPlayer()
+
+    if args.black == "human":
+        black_player = HumanPlayer()
+    elif args.black == "stockfish":
+        black_player = StockfishPlayer()
+    elif args.black == "leela":
+        black_player = LeelaPlayer()
 
     # Create root window and GUI
-    root = tk.Tk()
-    gui = ChessGUI(root)
+
+    if args.gui:
+        root = tk.Tk()
+        gui = ChessGUI(root)
+    else:
+        gui = None
 
     # Create game controller with optional eval engine (can be None)
     controller = GameController(
         white_player=white_player,
         black_player=black_player,
-        eval_engine=None,  # or some EvalEngine object
-        gui=gui
+        num_games=args.num_games,
+        gui=gui,
+        eval_engine=None
     )
 
-    # Optionally bind GUI input to controller so human moves get pushed properly:
-    gui.set_controller(controller)
-    controller.start_game()
-    # Run the GUI main loop, but game controller handles the moves
-    root.mainloop()
+    if args.gui:
+        gui.set_controller(controller)
 
-    # Cleanup engine after GUI closes
-    # stockfish_engine.quit()
+    controller.start_game()
+
+    if args.gui:
+        root.mainloop()
 
 if __name__ == "__main__":
     main()

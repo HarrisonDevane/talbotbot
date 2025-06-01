@@ -3,7 +3,7 @@ import threading
 import time
 
 class GameController:
-    def __init__(self, white_player, black_player, gui=None, eval_engine=None):
+    def __init__(self, white_player, black_player, num_games, gui, eval_engine):
         self.board = chess.Board()
         self.players = {
             chess.WHITE: white_player,
@@ -14,6 +14,11 @@ class GameController:
         self.current_turn = chess.WHITE
         self.game_over = False
 
+        self.num_games = num_games
+        self.current_game = 1
+        self.white_score = 0
+        self.black_score = 0
+
         self.selected_square = None
         self.legal_targets = []
         self.last_move = None
@@ -22,7 +27,7 @@ class GameController:
             self.gui.set_controller(self)
 
     def start_game(self):
-        print("Starting game...")
+        print(f"Starting game {self.current_game}")
         self.game_over = False
         self.current_turn = chess.WHITE
         self.board.reset()
@@ -31,8 +36,11 @@ class GameController:
         self.last_move = None
         self.update_gui()
 
-        threading.Thread(target=self.game_loop, daemon=True).start()
-        print("Game thread started")
+        if self.gui:
+            threading.Thread(target=self.game_loop, daemon=True).start()
+        else:
+            self.game_loop()
+
 
 
     def game_loop(self):
@@ -99,9 +107,25 @@ class GameController:
     def check_game_over(self):
         if self.board.is_game_over():
             self.game_over = True
-            print("Game over:", self.board.result())
-            if self.gui:
-                self.gui.show_game_over(self.board.result())
+            result = self.board.result()
+            print("Game over:", result)
+
+            if result == "1-0":
+                self.white_score += 1
+            elif result == "0-1":
+                self.black_score += 1
+            elif result == "1/2-1/2":
+                self.white_score += 0.5
+                self.black_score += 0.5
+
+            print(f"Score — White: {self.white_score}, Black: {self.black_score}")
+
+            if self.current_game < self.num_games:
+                self.current_game += 1
+                if self.gui:
+                    threading.Timer(1.0, self.start_game).start()
+                else:
+                    self.start_game()
 
     def shutdown(self):
         self.game_over = True

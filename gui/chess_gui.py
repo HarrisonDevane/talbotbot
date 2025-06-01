@@ -94,11 +94,6 @@ class ChessGUI:
                 if img:
                     canvas.create_image(48, 48, image=img)
 
-    def show_game_over(self, result):
-        print(f"Game over: {result}")  # Optional: print or log the result
-
-        # After 2 seconds, restart the game automatically
-        self.root.after(2000, self.controller.start_game)
 
     def on_close(self):
         if self.controller:

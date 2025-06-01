@@ -3,6 +3,9 @@
 env/
 venv/
 
+# Binaries
+engine/
+
 # Python cache files
 __pycache__/
 *.py[cod]
