@@ -1,1 +1,0 @@
-from .chess_gui import ChessGUI
