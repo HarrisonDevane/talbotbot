@@ -2,11 +2,12 @@ import chess.engine
 import os
 
 class LeelaPlayer:
-    def __init__(self, name="Stockfish", time_limit=0.1):
+    def __init__(self, name="Leela", time_limit=0.1):
         self.name = name
         self.time_limit = time_limit
         self.engine = chess.engine.SimpleEngine.popen_uci(
-            os.path.join(os.path.dirname(__file__), '..', 'engine', 'leela', 'lc0.exe'))
+            os.path.join(os.path.dirname(__file__), '..', 'data/engine', 'leela', 'lc0.exe'))
+        print(self.engine)
 
     def get_move(self, board):
         # Ask Stockfish to find the best move

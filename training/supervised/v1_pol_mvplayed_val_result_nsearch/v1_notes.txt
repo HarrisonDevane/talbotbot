@@ -1,0 +1,11 @@
+Talbot V1
+
+- Trained on lichess data, input = 18x8x8 tensor. Output = move played, end result
+- Plateau after ~7 epochs.
+- Inference was surprisingly good! Great proof of concept
+
+Potential future ideas:
+- change val head to stockfish eval for more precision
+- Include search feature
+- More res blocks in model
+- Add historical positions to input

@@ -1,0 +1,2 @@
+Updates from v2:
+- Adding GM games to training dataset (5mil from lichess >2600 + GM classical moves). Total = 44267090
