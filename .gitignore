@@ -4,7 +4,7 @@ env/
 venv/
 
 # Binaries
-engine/
+data/
 
 # Python cache files
 __pycache__/
@@ -52,3 +52,13 @@ coverage.xml
 
 # Windows thumbnail cache
 Thumbs.db
+
+# Model paths
+training/supervised/v1_pol_mvplayed_val_result_nsearch/model/
+training/supervised/v2_pol_mvplayed_val_sfeval/model/
+training/supervised/v3_hqgames_mcts/model/
+
+# Training data
+training/supervised/v1_pol_mvplayed_val_result_nsearch/model/
+training/supervised/v2_pol_mvplayed_val_sfeval/model/
+training/supervised/v3_hqgames_mcts/model/

@@ -1,0 +1,4 @@
+Updates from v2:
+- Adding GM games to training dataset (5mil from lichess >2600 + GM classical moves). Total = 44267090
+- Added l2 reg learning decay (1e-4).
+- Changed scheduling from reduceLR on plateau to cosine annealing.
