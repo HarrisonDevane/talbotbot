@@ -1,83 +1,95 @@
 import tkinter as tk
 import os
-import argparse
+# import argparse # No longer needed for these args
 from chess_gui import ChessGUI
 from game_controller import GameController
 from players import HumanPlayer, StockfishPlayer, LeelaPlayer, TalbotPlayer, TalbotPlayerMCTS
 
-# Current talbot dir
-TALBOT_PATH = "training/supervised/v2_pol_mvplayed_val_sfeval/model/best_chess_ai_model.pth"
+# Import configuration settings from config.py
+import config
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Talbot Chess Engine")
-
-    parser.add_argument('--white', choices=['human', 'stockfish', 'leela', 'talbot'], default='human',
-                        help="Type of player for white")
-    parser.add_argument('--black', choices=['human', 'stockfish', 'leela', 'talbot'], default='stockfish',
-                        help="Type of player for black")
-    parser.add_argument('--gui', action='store_true',
-                        help="Flag for a GUI to be displayed")
-    
-    parser.add_argument('--num_games', type=int, default = 5,
-                    help="Number of games played")
-    
-    parser.add_argument('--fen', type=str, default=None,
-                    help="Initial board state in FEN format. If not provided, starts from standard initial position.")
-    
-    return parser.parse_args()
 
 def main():
-    args = parse_args()
+    # Load settings from config.py
+    white_player_type = config.WHITE_PLAYER_TYPE
+    black_player_type = config.BLACK_PLAYER_TYPE
+    use_gui = config.USE_GUI
+    num_games = config.NUM_GAMES
+    initial_fen = config.INITIAL_FEN
 
-    # Validate FEN if provided
-    initial_fen = None
+    talbot_model_path = os.path.abspath(config.TALBOT_MODEL_PATH)
+    talbot_resblocks = config.TALBOT_RESBLOCKS
+    talbot_timelimit = config.TALBOT_TIMELIMIT
+    talbot_cpuct = config.TALBOT_CPUCT
+    talbot_batchsize = config.TALBOT_BATCHSIZE
 
-    talbot_path = os.path.abspath(os.path.join(os.path.dirname(__file__), TALBOT_PATH))
+    # Initialize players based on config settings
+    match white_player_type:
+        case "human":
+            white_player = HumanPlayer()
+        case "stockfish":
+            white_player = StockfishPlayer()
+        case "leela":
+            white_player = LeelaPlayer()
+        case "talbot":
+            white_player = TalbotPlayer(model_path=talbot_model_path)
+        case "talbotMCTS":
+            white_player = TalbotPlayerMCTS(
+                model_path=talbot_model_path,
+                num_residual_blocks=talbot_resblocks,
+                time_per_move=talbot_timelimit,
+                cpuct=talbot_cpuct,
+                batch_size=talbot_batchsize
+            )
 
-    if args.white == "human":
-        white_player = HumanPlayer()
-    elif args.white == "stockfish":
-        white_player = StockfishPlayer()
-    elif args.white == "leela":
-        white_player = LeelaPlayer()
-    elif args.white == "talbot":
-        white_player = TalbotPlayer(model_path=talbot_path)
-
-    if args.black == "human":
-        black_player = HumanPlayer()
-    elif args.black == "stockfish":
-        black_player = StockfishPlayer()
-    elif args.black == "leela":
-        black_player = LeelaPlayer()
-    elif args.black == "talbot":
-        black_player = TalbotPlayerMCTS(model_path=talbot_path)
+    # Initialize black player using match/case
+    match black_player_type:
+        case "human":
+            black_player = HumanPlayer()
+        case "stockfish":
+            black_player = StockfishPlayer()
+        case "leela":
+            black_player = LeelaPlayer()
+        case "talbot":
+            black_player = TalbotPlayer(model_path=talbot_model_path)
+        case "talbotMCTS":
+            black_player = TalbotPlayerMCTS(
+                model_path=talbot_model_path,
+                num_residual_blocks=talbot_resblocks,
+                time_per_move=talbot_timelimit,
+                cpuct=talbot_cpuct,
+                batch_size=talbot_batchsize
+            )
 
     # Create root window and GUI
-    if args.gui:
+    if use_gui:
         root = tk.Tk()
         gui = ChessGUI(root)
     else:
-        gui = None
-
-    if args.fen:
-        initial_fen = args.fen
+        root = None # Ensure root is None if no GUI
 
     # Create game controller with optional eval engine (can be None)
     controller = GameController(
         white_player=white_player,
         black_player=black_player,
-        num_games=args.num_games,
+        num_games=num_games,
         gui=gui,
         initial_fen=initial_fen
     )
 
-    if args.gui:
+    if use_gui:
         gui.set_controller(controller)
 
     controller.start_game()
 
-    if args.gui:
+    if use_gui:
         root.mainloop()
+    
+    # Close players if they have a close method (important for engine players)
+    if hasattr(white_player, 'close'):
+        white_player.close()
+    if hasattr(black_player, 'close'):
+        black_player.close()
 
 if __name__ == "__main__":
     main()

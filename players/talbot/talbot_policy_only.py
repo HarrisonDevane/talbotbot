@@ -18,7 +18,7 @@ class TalbotPlayer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Initialize the model with the correct number of input planes (18 as per board_to_tensor)
-        self.model = model.ChessAIModel(num_input_planes=18, num_residual_blocks=16, num_filters=128)
+        self.model = model.ChessAIModel(num_input_planes=18, num_residual_blocks=20, num_filters=128)
         
         # Load the entire checkpoint dictionary, then extract the model_state_dict
         # The `map_location` argument is important for loading models trained on GPU onto CPU, or vice versa.

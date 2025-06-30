@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.optim as optim
 import logging
 from torch.utils.data import DataLoader, random_split
+# Only import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR 
 from tqdm import tqdm # For progress bars
 from datetime import datetime
 import os
@@ -34,8 +36,11 @@ def train_model(
     save_interval: int = 5,
     checkpoint_dir: str = "checkpoints",
     validation_split: float = 0.1,
-    # --- NEW PARAMETER FOR RESUMING ---
-    resume_checkpoint_path: str = None 
+    resume_checkpoint_path: str = None,
+    weight_decay: float = 1e-4,
+    # Kept as arguments as requested
+    scheduler_type: str = 'CosineAnnealingLR', 
+    cosine_eta_min: float = 1e-6 
 ):
     # --- 1. Setup Logging ---
     os.makedirs(log_dir, exist_ok=True)
@@ -68,7 +73,7 @@ def train_model(
 
     # --- 3. Dataset and DataLoader ---
     logger.info(f"Loading data from HDF5 file: {hdf5_path}")
-    full_dataset = ChessDataset(hdf5_path=hdf5_path) # Pass hdf5_path
+    full_dataset = ChessDataset(hdf5_path=hdf5_path) 
 
     total_samples = len(full_dataset)
     val_samples = int(total_samples * validation_split)
@@ -78,7 +83,6 @@ def train_model(
     train_dataset, val_dataset = random_split(full_dataset, [train_samples, val_samples],
                                               generator=torch.Generator().manual_seed(42))
 
-    # Determine number of workers. Use 0 for CPU-only systems or if you encounter issues.
     num_workers = os.cpu_count() // 2 if os.cpu_count() else 0 
     if num_workers == 0:
         logger.warning("No CPU cores detected or setting num_workers to 0. Data loading might be slower.")
@@ -89,8 +93,8 @@ def train_model(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        prefetch_factor=4 if num_workers > 0 else None, # prefetch_factor requires num_workers > 0
-        worker_init_fn=_worker_init_fn if num_workers > 0 else None # Pass worker_init_fn only if workers > 0
+        prefetch_factor=4 if num_workers > 0 else None,
+        worker_init_fn=_worker_init_fn if num_workers > 0 else None
     )
     val_loader = DataLoader(
         val_dataset,
@@ -123,8 +127,12 @@ def train_model(
     value_criterion = nn.MSELoss()
 
     # --- 6. Optimizer and Scheduler ---
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    
+    # CosineAnnealingLR is now the only scheduler type, regardless of scheduler_type arg
+    total_training_steps = num_epochs * len(train_loader)
+    scheduler = CosineAnnealingLR(optimizer, T_max=total_training_steps, eta_min=cosine_eta_min)
+    logger.info(f"Using CosineAnnealingLR with T_max={total_training_steps} (steps), eta_min={cosine_eta_min}")
 
     # --- 7. Resume Training Logic (Start Epoch and States) ---
     start_epoch = 0
@@ -133,14 +141,18 @@ def train_model(
     if resume_checkpoint_path:
         if os.path.exists(resume_checkpoint_path):
             logger.info(f"Resuming training from checkpoint: {resume_checkpoint_path}")
-            # Map_location ensures it loads correctly even if devices change (e.g., GPU to CPU)
             checkpoint = torch.load(resume_checkpoint_path, map_location=device)
 
             model.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             
-            # The 'epoch' saved in the checkpoint is the last COMPLETED epoch
+            # Load scheduler state if it exists in checkpoint
+            if 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict'] is not None:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                logger.info("Scheduler state loaded from checkpoint.")
+            else:
+                logger.warning("No scheduler state found in checkpoint. Starting scheduler from scratch.")
+            
             start_epoch = checkpoint['epoch'] + 1 
             
             if 'best_val_loss' in checkpoint:
@@ -197,16 +209,19 @@ def train_model(
             backward_pass_end = time.perf_counter()
 
             optimizer.step()
+            scheduler.step()
 
             running_policy_loss += policy_loss.item()
             running_value_loss += value_loss.item()
             running_total_loss += total_loss.item()
 
             batch_end_time = time.perf_counter()
+            current_lr = optimizer.param_groups[0]['lr']
             pbar_train.set_postfix({
                 'P_Loss': f'{policy_loss.item():.4f}',
                 'V_Loss': f'{value_loss.item():.4f}',
                 'T_Loss': f'{total_loss.item():.4f}',
+                'LR': f'{current_lr:.6f}', # Added LR here
                 'GPU_Xfer_ms': f'{(transfer_to_gpu_end - transfer_to_gpu_start)*1000:.2f}',
                 'FW_ms': f'{(forward_pass_end - forward_pass_start)*1000:.2f}',
                 'BW_ms': f'{(backward_pass_end - backward_pass_start)*1000:.2f}',
@@ -216,6 +231,7 @@ def train_model(
             if batch_idx % log_interval == 0:
                 logger.info(f"Epoch {epoch+1}, Batch {batch_idx}: P_Loss={policy_loss.item():.4f}, "
                             f"V_Loss={value_loss.item():.4f}, T_Loss={total_loss.item():.4f}, "
+                            f"LR={current_lr:.6f}, " # Log current LR
                             f"GPU Xfer: {(transfer_to_gpu_end - transfer_to_gpu_start)*1000:.2f}ms, "
                             f"FW: {(forward_pass_end - forward_pass_start)*1000:.2f}ms, "
                             f"BW: {(backward_pass_end - backward_pass_start)*1000:.2f}ms, "
@@ -230,17 +246,17 @@ def train_model(
         logger.info(f"Average Policy Loss: {avg_policy_loss_train:.4f}")
         logger.info(f"Average Value Loss: {avg_value_loss_train:.4f}")
         logger.info(f"Average Total Loss: {avg_total_loss_train:.4f}")
-        logger.info(f"Current Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
+        logger.info(f"Current Learning Rate: {optimizer.param_groups[0]['lr']:.6f}") # LR after all training batch steps
 
         # --- Validation Phase ---
-        model.eval()
+        model.eval() # Set model to evaluation mode
         running_policy_loss_val = 0.0
         running_value_loss_val = 0.0
         running_total_loss_val = 0.0
 
-        pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} (Val   )", unit="batch")
-        with torch.no_grad():
-            for batch_idx, (board_tensors, policy_indices, value_targets) in enumerate(pbar_val):
+        pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} (Val)", unit="batch")
+        with torch.no_grad(): # Disable gradient calculations during validation
+            for board_tensors, policy_indices, value_targets in pbar_val:
                 board_tensors = board_tensors.to(device, non_blocking=True)
                 policy_indices = policy_indices.to(device, non_blocking=True)
                 value_targets = value_targets.to(device, non_blocking=True)
@@ -248,7 +264,7 @@ def train_model(
                 policy_logits, value_outputs = model(board_tensors)
                 value_outputs = value_outputs.squeeze(1)
 
-                policy_loss = policy_criterion(policy_logits, policy_indices.long()) # Ensure policy_indices is Long
+                policy_loss = policy_criterion(policy_logits, policy_indices.long())
                 value_loss = value_criterion(value_outputs, value_targets)
                 total_loss = (policy_loss * policy_loss_weight) + (value_loss * value_loss_weight)
 
@@ -261,19 +277,17 @@ def train_model(
                     'V_Loss': f'{value_loss.item():.4f}',
                     'T_Loss': f'{total_loss.item():.4f}'
                 })
-
+        
         avg_policy_loss_val = running_policy_loss_val / len(val_loader)
         avg_value_loss_val = running_value_loss_val / len(val_loader)
         avg_total_loss_val = running_total_loss_val / len(val_loader)
 
-        logger.info(f"--- Epoch {epoch+1} Val Summary ---")
+        logger.info(f"--- Epoch {epoch+1} Validation Summary ---")
         logger.info(f"Average Policy Loss: {avg_policy_loss_val:.4f}")
         logger.info(f"Average Value Loss: {avg_value_loss_val:.4f}")
         logger.info(f"Average Total Loss: {avg_total_loss_val:.4f}")
-
-        scheduler.step(avg_total_loss_val) # Scheduler steps based on validation loss
-
-        # Update best_val_loss
+        
+        # Update best_val_loss based on the VALIDATION loss
         if avg_total_loss_val < best_val_loss:
             best_val_loss = avg_total_loss_val
             logger.info(f"New best validation loss: {best_val_loss:.4f}. Saving best model...")
@@ -283,7 +297,7 @@ def train_model(
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(), # Save scheduler state
                 'best_val_loss': best_val_loss,
             }, best_model_path)
 
@@ -295,7 +309,7 @@ def train_model(
                 'epoch': epoch, # This is the epoch that was just COMPLETED 
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(), # Save scheduler state
                 'best_val_loss': best_val_loss, # Save the current best_val_loss too
             }, checkpoint_path)
             logger.info(f"Model checkpoint saved to {checkpoint_path}")
@@ -305,9 +319,10 @@ def train_model(
 if __name__ == "__main__":
     current_script_dir = os.path.dirname(os.path.abspath(__file__))
     
-    hdf5_file_path = os.path.abspath(os.path.join(current_script_dir, "v2_pol_mvplayed_val_sfeval/data/chess_data.h5"))
-    checkpoint_output_dir = os.path.abspath(os.path.join(current_script_dir, "v2_pol_mvplayed_val_sfeval/model"))
-    log_dir_path = os.path.abspath(os.path.join(current_script_dir, "v2_pol_mvplayed_val_sfeval/logs"))
+    # Using the provided paths from your original script
+    hdf5_file_path = os.path.abspath(os.path.join(current_script_dir, "v3_hqgames_mcts/data/all_chess_data.h5"))
+    checkpoint_output_dir = os.path.abspath(os.path.join(current_script_dir, "v3_hqgames_mcts/model"))
+    log_dir_path = os.path.abspath(os.path.join(current_script_dir, "v3_hqgames_mcts/logs"))
 
     os.makedirs(checkpoint_output_dir, exist_ok=True)
 
@@ -315,15 +330,18 @@ if __name__ == "__main__":
         hdf5_path=hdf5_file_path, 
         log_dir=log_dir_path,
         num_input_planes=18,
-        num_residual_blocks=16,
+        num_residual_blocks=20,
         num_filters=128,
         batch_size=512,
         learning_rate=0.001,
-        num_epochs=12,
+        num_epochs=16,
         policy_loss_weight=1.0,
         value_loss_weight=1.0,
         save_interval=1,
         checkpoint_dir=checkpoint_output_dir,
         validation_split=0.02,
-        resume_checkpoint_path=None
+        resume_checkpoint_path=os.path.abspath(os.path.join(current_script_dir, "v3_hqgames_mcts/model/best_chess_ai_model.pth")), # Set to a checkpoint path if you want to resume
+        # Kept as arguments as requested, even if their values aren't conditionally used inside train_model right now
+        scheduler_type='CosineAnnealingLR', 
+        cosine_eta_min=1e-6 
     )
