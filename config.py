@@ -5,7 +5,7 @@ BLACK_PLAYER_TYPE = 'talbotMCTS'
 # Game settings
 USE_GUI = True
 NUM_GAMES = 5
-INITIAL_FEN = 'k1r5/p2R3p/N3p3/4Pp2/6p1/5nP1/P4P1P/5K2 b HAha - 0 1'
+INITIAL_FEN = 'k7/p2R3p/N3p3/4Pp2/6p1/5nP1/P3KP1P/2r5 b - - 0 1'
 
 # Model settings
 TALBOT_MODEL_PATH = "/Users/User/Projects/talbot/training/supervised/v3_hqgames_mcts/model/best_chess_ai_model.pth"

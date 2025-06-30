@@ -397,6 +397,68 @@ def policy_flat_index_to_components(flat_index: int) -> tuple[int, int, int]:
 
 
 
+
+def policy_components_to_flat_index_torch(from_row_tensor: torch.Tensor, 
+                                          from_col_tensor: torch.Tensor, 
+                                          channel_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Converts batched (from_row, from_col, channel) tensors into a single flat integer index tensor.
+    All input tensors must be on the same device.
+
+    Args:
+        from_row_tensor (torch.Tensor): Tensor of rows (e.g., shape [N], values 0-7).
+        from_col_tensor (torch.Tensor): Tensor of columns (e.g., shape [N], values 0-7).
+        channel_tensor (torch.Tensor): Tensor of channels (e.g., shape [N], values 0-72).
+
+    Returns:
+        torch.Tensor: A 1D tensor of unique integer indices.
+    """
+    # Ensure all inputs are long tensors for indexing
+    from_row_tensor = from_row_tensor.long()
+    from_col_tensor = from_col_tensor.long()
+    channel_tensor = channel_tensor.long()
+
+    # Precompute strides
+    col_stride = POLICY_CHANNELS
+    row_stride = BOARD_DIM * POLICY_CHANNELS
+
+    flat_index_tensor = (from_row_tensor * row_stride) + \
+                        (from_col_tensor * col_stride) + \
+                        channel_tensor
+    
+    return flat_index_tensor
+
+
+def policy_flat_index_to_components_torch(flat_index_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Converts a 1D tensor of flat integer indices back into
+    (from_row, from_col, channel) tensors.
+
+    Args:
+        flat_index_tensor (torch.Tensor): A 1D tensor of unique integer indices.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Tensors for from_row, from_col, and channel.
+    """
+    # Ensure input is a long tensor
+    flat_index_tensor = flat_index_tensor.long()
+
+    # Total number of possible policy moves
+    TOTAL_POLICY_MOVES = BOARD_DIM * BOARD_DIM * POLICY_CHANNELS # 8 * 8 * 73 = 4672
+
+    if not torch.all((flat_index_tensor >= 0) & (flat_index_tensor < TOTAL_POLICY_MOVES)):
+        raise ValueError(f"Invalid flat_index_tensor contains values outside 0 to {TOTAL_POLICY_MOVES-1}.")
+
+    channel_tensor = flat_index_tensor % POLICY_CHANNELS
+    
+    remaining_tensor = flat_index_tensor // POLICY_CHANNELS
+    from_col_tensor = remaining_tensor % BOARD_DIM
+    
+    from_row_tensor = remaining_tensor // BOARD_DIM
+    
+    return from_row_tensor, from_col_tensor, channel_tensor
+
+
 def get_win_probability(value_output: torch.Tensor) -> float:
         """
         Converts the raw value_output (from tanh activation, range [-1, 1])
