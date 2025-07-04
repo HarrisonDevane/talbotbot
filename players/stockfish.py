@@ -2,7 +2,7 @@ import chess.engine
 import os
 
 class StockfishPlayer:
-    def __init__(self, name="Stockfish", time_limit=0.0001):
+    def __init__(self, name="Stockfish", time_limit=1):
         self.name = name
         self.time_limit = time_limit
         self.engine = chess.engine.SimpleEngine.popen_uci(

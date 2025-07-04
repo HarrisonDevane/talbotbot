@@ -57,13 +57,20 @@ Thumbs.db
 training/supervised/v1_pol_mvplayed_val_result_nsearch/model/
 training/supervised/v2_pol_mvplayed_val_sfeval/model/
 training/supervised/v3_hqgames_mcts/model/
+training/supervised/v4_hqgames_with_tactics_opmcts/model/
+
+# BUT include best models
+!training/supervised/v3_hqgames_mcts/model/best_chess_ai_model.pth
+!training/supervised/v4_hqgames_with_tactics_opmcts/model/best_chess_ai_model.pth
 
 # Training data
 training/supervised/v1_pol_mvplayed_val_result_nsearch/data/
 training/supervised/v2_pol_mvplayed_val_sfeval/data/
 training/supervised/v3_hqgames_mcts/data/
+training/supervised/v4_hqgames_with_tactics_opmcts/data/
 
 # Logs
 training/supervised/v1_pol_mvplayed_val_result_nsearch/logs/
 training/supervised/v2_pol_mvplayed_val_sfeval/logs/
 training/supervised/v3_hqgames_mcts/logs/
+training/supervised/v4_hqgames_with_tactics_opmcts/logs/
