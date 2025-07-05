@@ -1,13 +1,24 @@
 import tkinter as tk
 import os
-# import argparse # No longer needed for these args
 from chess_gui import ChessGUI
 from game_controller import GameController
-from players import HumanPlayer, StockfishPlayer, LeelaPlayer, TalbotPlayer, TalbotPlayerMCTS
+from players import HumanPlayer, StockfishPlayer, LeelaPlayer, TalbotPlayer
 
 # Import configuration settings from config.py
 import config
+import logging
 
+log_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "players/talbot_engine/logs"))
+log_file_path = os.path.join(log_dir, "talbot_inference.log")
+if os.path.exists(log_file_path): os.remove(log_file_path)
+
+# For detailed step-by-step logs, change level to logging.DEBUG
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filename=log_file_path,
+    filemode='a'
+)
 
 def main():
     # Load settings from config.py
@@ -19,9 +30,15 @@ def main():
 
     talbot_model_path = os.path.abspath(config.TALBOT_MODEL_PATH)
     talbot_resblocks = config.TALBOT_RESBLOCKS
-    talbot_timelimit = config.TALBOT_TIMELIMIT
     talbot_cpuct = config.TALBOT_CPUCT
     talbot_batchsize = config.TALBOT_BATCHSIZE
+
+    time_talbot = config.TALBOT_TIME_PER_MOVE
+    time_stockfish = config.STOCKFISH_TIME_PER_MOVE
+    time_leela = config.LEELA_TIME_PER_MOVE
+
+    white_player_time = None
+    black_player_time = None
 
     # Initialize players based on config settings
     match white_player_type:
@@ -29,18 +46,18 @@ def main():
             white_player = HumanPlayer()
         case "stockfish":
             white_player = StockfishPlayer()
+            white_player_time = time_stockfish
         case "leela":
             white_player = LeelaPlayer()
+            white_player_time = time_leela
         case "talbot":
-            white_player = TalbotPlayer(model_path=talbot_model_path)
-        case "talbotMCTS":
-            white_player = TalbotPlayerMCTS(
+            white_player = TalbotPlayer(
                 model_path=talbot_model_path,
                 num_residual_blocks=talbot_resblocks,
-                time_per_move=talbot_timelimit,
                 cpuct=talbot_cpuct,
                 batch_size=talbot_batchsize
             )
+            white_player_time = time_talbot
 
     # Initialize black player using match/case
     match black_player_type:
@@ -48,18 +65,18 @@ def main():
             black_player = HumanPlayer()
         case "stockfish":
             black_player = StockfishPlayer()
+            black_player_time = time_stockfish
         case "leela":
             black_player = LeelaPlayer()
+            black_player_time = time_leela
         case "talbot":
-            black_player = TalbotPlayer(model_path=talbot_model_path)
-        case "talbotMCTS":
-            black_player = TalbotPlayerMCTS(
+            black_player = TalbotPlayer(
                 model_path=talbot_model_path,
                 num_residual_blocks=talbot_resblocks,
-                time_per_move=talbot_timelimit,
                 cpuct=talbot_cpuct,
                 batch_size=talbot_batchsize
             )
+            black_player_time = time_talbot
 
     # Create root window and GUI
     if use_gui:
@@ -72,6 +89,8 @@ def main():
     controller = GameController(
         white_player=white_player,
         black_player=black_player,
+        white_player_time=white_player_time,
+        black_player_time=black_player_time,
         num_games=num_games,
         gui=gui,
         initial_fen=initial_fen

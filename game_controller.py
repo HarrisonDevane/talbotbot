@@ -1,9 +1,12 @@
 import chess
 import threading
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 class GameController:
-    def __init__(self, white_player, black_player, num_games, gui, initial_fen=None):
+    def __init__(self, white_player, black_player, white_player_time, black_player_time, num_games, gui, initial_fen=None):
         self.initial_fen = initial_fen
         if self.initial_fen:
             self.board = chess.Board(initial_fen)
@@ -15,6 +18,8 @@ class GameController:
             chess.BLACK: black_player,
         }
         self.gui = gui
+        self.white_player_time = white_player_time
+        self.black_player_time = black_player_time
         
         # Determine current turn based on FEN, or default to WHITE if no FEN
         self.current_turn = self.board.turn 
@@ -34,7 +39,7 @@ class GameController:
             self.gui.set_controller(self)
 
     def start_game(self):
-        print(f"Starting game {self.current_game}")
+        logger.info(f"Starting game {self.current_game}")
         # self.game_over = False
         # self.current_turn = chess.WHITE
         # self.board.reset()
@@ -57,12 +62,15 @@ class GameController:
             if player.is_human():
                 time.sleep(0.1)
             else:
-                move = player.get_move(self.board)
+                time_per_move = None
+                if self.board.turn == chess.WHITE:
+                    time_per_move = self.white_player_time
+                else:
+                    time_per_move = self.black_player_time
+                    
+                move = player.get_move(self.board, time_per_move)
                 if move and move in self.board.legal_moves:
                     self.make_move(move)
-                else:
-                    print("Invalid engine move or no move received")
-                    self.game_over = True
 
     def make_move(self, move):
         if move in self.board.legal_moves:
@@ -73,8 +81,6 @@ class GameController:
             self.current_turn = not self.current_turn
             self.update_gui()
             self.check_game_over()
-        else:
-            print("Illegal move attempted:", move)
 
     def handle_gui_click(self, square):
         if (self.current_turn == chess.WHITE and self.players[chess.WHITE].is_human()) or \
@@ -96,7 +102,6 @@ class GameController:
                 if move in self.board.legal_moves:
                     self.make_move(move)
                 else:
-                    print("Invalid move")
                     self.selected_square = None
                     self.legal_targets = []
 
@@ -115,7 +120,7 @@ class GameController:
         if self.board.is_game_over():
             self.game_over = True
             result = self.board.result()
-            print("Game over:", result)
+            logger.info(f"Game over: {result}")
 
             if result == "1-0":
                 self.white_score += 1
@@ -125,7 +130,7 @@ class GameController:
                 self.white_score += 0.5
                 self.black_score += 0.5
 
-            print(f"Score — White: {self.white_score}, Black: {self.black_score}")
+            logger.info(f"Score - White: {self.white_score}, Black: {self.black_score}")
 
             if self.current_game < self.num_games:
                 self.current_game += 1
@@ -136,7 +141,5 @@ class GameController:
 
     def shutdown(self):
         self.game_over = True
-        if hasattr(self.players[chess.WHITE], "engine"):
-            self.players[chess.WHITE].engine.quit()
-        if hasattr(self.players[chess.BLACK], "engine"):
-            self.players[chess.BLACK].engine.quit()
+        self.players[chess.WHITE].close()
+        self.players[chess.BLACK].close()

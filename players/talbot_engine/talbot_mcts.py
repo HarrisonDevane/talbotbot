@@ -17,23 +17,7 @@ sys.path.insert(0, parent_dir)
 import utils
 import training.supervised.model as model
 
-# --- Setting up our logging ---
-log_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", "training/supervised/v3_hqgames_mcts/logs/"))
-print(f"Logging to: {log_dir}")
-os.makedirs(log_dir, exist_ok=True)
-
-log_file_path = os.path.join(log_dir, "mcts_debug.log")
-if os.path.exists(log_file_path): os.remove(log_file_path)
-
-# For detailed step-by-step logs, change level to logging.DEBUG
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    filename=log_file_path,
-    filemode='a'
-)
 logger = logging.getLogger(__name__)
-# --- Logging setup complete ---
 
 
 class MCTSNode:
@@ -79,7 +63,7 @@ class MCTS:
     """
     Our Monte Carlo Tree Search brain for finding the best move.
     """
-    def __init__(self, model_player: 'TalbotPlayerMCTS', cpuct: float = 1.0, batch_size: int = 16):
+    def __init__(self, model_player: 'TalbotMCTSEngine', cpuct: float = 1.0, batch_size: int = 16):
         self.model_player = model_player
         self.cpuct = cpuct
         self.root = None
@@ -108,26 +92,16 @@ class MCTS:
             node_after_our_move = self.root.children[our_last_move]
             if opponent_last_move and opponent_last_move in node_after_our_move.children:
                 new_root = node_after_our_move.children[opponent_last_move]
-                new_root.parent = None  # Detach from the old tree
+                new_root.parent = None
                 
-                # We potentially have many nodes from the old tree.
-                # To simplify and ensure memory management, we can effectively discard
-                # the old root and its unchosen branches by simply replacing the root.
-                # Python's garbage collector will handle the rest if no other references exist.
+                if new_root._board is None:
+                    new_root._board = board.copy()
+                
                 self.root = new_root
-                
-                # Ensure the board is loaded if it was lazy (important for new root)
-                if self.root._board is None:
-                    self.root._board = board.copy()
-                
                 logger.info(f"MCTS root advanced by sequence: {our_last_move.uci()} -> {opponent_last_move.uci()}")
                 new_root_found = True
 
         if not new_root_found:
-            # Either it's the very first move (handled above), or
-            # the opponent played an unexpected move, or our last move wasn't found in the children,
-            # or the branch was pruned, etc.
-            # In any case, we must reset the root to the current board state.
             logger.warning(f"MCTS root reset due to unexpected move, no matching branch, or initial state beyond first move.")
             self.root = MCTSNode(board.copy())
         
@@ -146,8 +120,8 @@ class MCTS:
         # Expand the root if it hasn't been yet to get initial policy and value
         if not self.root.is_expanded and not self.root.is_queued_for_inference:
             board_input = torch.from_numpy(utils.board_to_tensor(self.root.board)).float().to(self.model_player.device)
-            with torch.no_grad():
-                policy_logits, value_output = self.model_player.model(board_input.unsqueeze(0))
+            # CALLING THE NEW get_policy_value METHOD
+            policy_logits, value_output = self.model_player.get_policy_value(board_input.unsqueeze(0))
             policy_probs = F.softmax(policy_logits.squeeze(0), dim=0)
             self.expand(self.root, policy_probs)
             self.backpropagate(self.root, value_output.item())
@@ -175,7 +149,7 @@ class MCTS:
                 sqrt_parent_visits_term = math.sqrt(node.visits) if node.visits > 0 else 0.0
 
                 parent_info = f"Move: {node.move.uci()}" if node.move else "Root"
-                logger.debug(f"     Selecting child from Node ({parent_info}), Parent Visits: {node.visits}, Sqrt Parent Visits Term: {sqrt_parent_visits_term:.4f}")
+                logger.debug(f"     Selecting child from Node ({parent_info}), Parent Visits: {node.visits}, Sqrt Parent Visits Term: {sqrt_parent_visits_term:.4f}")
 
                 for move, child in eligible_children:
                     prior_prob_for_child = child.prior_probability_from_parent
@@ -184,27 +158,22 @@ class MCTS:
                     logger.debug(f'Current move: {move.uci()} with UCT: {uct:.4f}')
 
                     if uct > best_uct_score:
-                        # 1. Finite UCT > Finite best_uct_score
-                        # 2. Inf UCT > Finite best_uct_score (Inf is always > finite)
                         best_uct_score = uct
                         best_prior_for_tie_break = prior_prob_for_child
                         best_child = child
                     elif uct == best_uct_score:
-                        # If UCTs are equal (e.g., both finite and equal, or both infinite),
-                        # use prior_prob_for_child as a tie-breaker.
                         if prior_prob_for_child > best_prior_for_tie_break:
                             best_uct_score = uct
                             best_prior_for_tie_break = prior_prob_for_child
                             best_child = child
                     
-
-                    logger.debug(f'Best move: {best_child.move.uci()} with UCT: {best_uct_score:.4f}')
+                logger.debug(f'Best move: {best_child.move.uci()} with UCT: {best_uct_score:.4f}')
 
                 if best_child is None:
-                    logger.debug("     No eligible child found for selection. Breaking from selection loop.")
+                    logger.debug("     No eligible child found for selection. Breaking from selection loop.")
                     break
 
-                logger.debug(f"     Selected Node: Move: {best_child.move.uci()}, with UCT: {best_uct_score:.4f}, prior probability: {best_child.prior_probability_from_parent:.4f}")
+                logger.debug(f"     Selected Node: Move: {best_child.move.uci()}, with UCT: {best_uct_score:.4f}, prior probability: {best_child.prior_probability_from_parent:.4f}")
 
                 node = best_child
                 path.append(node)
@@ -331,11 +300,11 @@ class MCTS:
             else:
                 value = 0.0
             self.backpropagate(node, value)
-            logger.debug(f"     Simulate: Game over detected. Value: {value:.4f}")
+            logger.debug(f"     Simulate: Game over detected. Value: {value:.4f}")
             return False
 
         if node.is_queued_for_inference:
-            logger.debug("     Simulate: Node already queued for inference. Skipping.")
+            logger.debug("     Simulate: Node already queued for inference. Skipping.")
             return False
 
         board_input = torch.from_numpy(utils.board_to_tensor(node.board)).float().to(self.model_player.device)
@@ -354,7 +323,7 @@ class MCTS:
                     break
             if all_legal_children_queued:
                 node.parent.is_queued_for_inference = True
-                logger.debug(f"     Simulate: Parent node also marked as queued for inference.")
+                logger.debug(f"     Simulate: Parent node also marked as queued for inference.")
 
         return True
 
@@ -363,7 +332,7 @@ class MCTS:
         if not self._inference_batch:
             return
 
-        logger.debug(f"   _perform_batched_inference: Processing batch of size {len(self._inference_batch)}")
+        logger.debug(f"   _perform_batched_inference: Processing batch of size {len(self._inference_batch)}")
         nodes_to_process = []
         board_tensors = []
         while self._inference_batch:
@@ -373,8 +342,8 @@ class MCTS:
 
         batch_input = torch.stack(board_tensors)
 
-        with torch.no_grad():
-            policy_logits_batch, value_output_batch = self.model_player.model(batch_input)
+        # CALLING THE NEW get_policy_value METHOD
+        policy_logits_batch, value_output_batch = self.model_player.get_policy_value(batch_input)
 
         policy_probs_batch = F.softmax(policy_logits_batch, dim=1)
 
@@ -399,7 +368,7 @@ class MCTS:
 
         while current is not None:
             if current.is_queued_for_inference:
-                logger.debug(f"     Resetting is_queued_for_inference for node (in backprop)")
+                logger.debug(f"     Resetting is_queued_for_inference for node (in backprop)")
                 current.is_queued_for_inference = False
 
             current.visits += 1
@@ -412,8 +381,8 @@ class MCTS:
             current = current.parent
 
 
-class TalbotPlayerMCTS:
-    def __init__(self, model_path: str, name="TalbotMCTS", num_residual_blocks: int = 20, time_per_move: float = 3.0, cpuct: float = 1.0, batch_size: int = 16):
+class TalbotMCTSEngine:
+    def __init__(self, model_path: str, name="Talbot", num_residual_blocks: int = 20, cpuct: float = 1.0, batch_size: int = 16):
         self.name = name
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -426,18 +395,18 @@ class TalbotPlayerMCTS:
         self.model.to(self.device)
         self.model.eval()
 
-        self.time_per_move = time_per_move
         self.cpuct = cpuct
         self.batch_size = batch_size
         self._mcts = None 
         self._last_own_move = None
-        self._move_number = 0 # Initialize move number
+        self._move_number = 0
 
-    def set_color(self, color: chess.Color):
-        self.color = color
+    def get_policy_value(self, board_tensor: torch.Tensor):
+        with torch.no_grad():
+            policy_logits, value_output = self.model(board_tensor)
+        return policy_logits, value_output
 
-    def get_move(self, board: chess.Board) -> chess.Move:
-        # Increment move number at the start of each turn
+    def find_best_move(self, board: chess.Board, time_per_move: float = None, depth_limit: int = None) -> chess.Move:
         self._move_number += 1
         logger.info(f"\n{'='*60}\n{' '*20}--- MOVE {self._move_number} STARTED ---\n{'='*60}\n")
 
@@ -445,13 +414,9 @@ class TalbotPlayerMCTS:
             logger.info("Game is already over, no move to make.")
             return None
 
-        # Determine the opponent's last move
         opponent_last_move = None
         if board.move_stack:
             opponent_last_move = board.move_stack[-1]
-
-        # The print(opponent_last_move) was likely for debugging, removing for cleaner production code.
-        # print(opponent_last_move) 
 
         if self._mcts is None:
             self._mcts = MCTS(self, self.cpuct, self.batch_size)
@@ -459,20 +424,13 @@ class TalbotPlayerMCTS:
         else:
             self._mcts.set_new_root(board.copy(), opponent_last_move, self._last_own_move)
 
-        self._mcts.run_simulations(self.time_per_move)
+        # You can add logic here to use depth_limit if provided, e.g.,
+        # self._mcts.run_simulations_by_depth(depth_limit) instead of time_limit
+        self._mcts.run_simulations(time_per_move)
 
         best_move = None
         max_visits = -1
-
-        if not self._mcts.root.children:
-            logger.warning("MCTS couldn't find any good moves. Picking a random legal one.")
-            legal_moves = cython_chess.generate_legal_moves(board, chess.BB_ALL, chess.BB_ALL)
-            if legal_moves:
-                best_move = random.choice(list(legal_moves))
-            else:
-                logger.error("No legal moves available. This shouldn't happen unless the game is over.")
-                return None
-
+        
         for move, child_node in self._mcts.root.children.items():
             if child_node.visits > max_visits:
                 max_visits = child_node.visits
@@ -490,9 +448,3 @@ class TalbotPlayerMCTS:
 
         logger.info(f"MCTS for move {self._move_number} picked move: {best_move.uci()} with {max_visits} visits.")
         return best_move
-
-    def is_human(self):
-        return False
-
-    def close(self):
-        pass
