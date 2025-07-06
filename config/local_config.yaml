@@ -1,0 +1,19 @@
+player_settings:
+  white_player_type: 'talbot'
+  black_player_type: 'human'
+
+game_settings:
+  use_gui: true
+  num_games: 1
+  initial_fen:  Null
+
+talbot:
+  model_path: "/Users/User/Projects/talbot/src/training/supervised/v4_hqgames_with_tactics_opmcts/model/chess_ai_model_epoch_20.pth"
+  resblocks: 20
+  cpuct: 5.0
+  batchsize: 32
+  time_per_move: 1.0
+  
+engine_times:
+  stockfish_time_per_move: 5.0
+  leela_time_per_move: 5.0

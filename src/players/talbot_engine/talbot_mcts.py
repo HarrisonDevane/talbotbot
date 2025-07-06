@@ -19,7 +19,6 @@ import training.supervised.model as model
 
 logger = logging.getLogger(__name__)
 
-
 class MCTSNode:
     """
     Represents a single state (board position) in our MCTS tree.
@@ -313,17 +312,25 @@ class MCTS:
         node.is_queued_for_inference = True
 
         # If all legal children of the parent are now queued, mark parent too
-        if node.parent:
+        current_node = node.parent
+
+        while current_node is not None:
             all_legal_children_queued = True
-            parent_legal_moves = cython_chess.generate_legal_moves(node.parent.board, chess.BB_ALL, chess.BB_ALL)
+            
+            parent_legal_moves = cython_chess.generate_legal_moves(current_node.board, chess.BB_ALL, chess.BB_ALL)
 
             for move in parent_legal_moves:
-                if move in node.parent.children and not node.parent.children[move].is_queued_for_inference:
+                if move not in current_node.children or not current_node.children[move].is_queued_for_inference:
                     all_legal_children_queued = False
-                    break
+                    break 
+
             if all_legal_children_queued:
-                node.parent.is_queued_for_inference = True
-                logger.debug(f"     Simulate: Parent node also marked as queued for inference.")
+                # If all legal children are queued, mark this parent node too
+                current_node.is_queued_for_inference = True
+                logger.debug(f"    Simulate: Node {current_node.move} (parent of a fully queued subtree) also marked as queued for inference.")
+            
+            # Move up to the next parent to continue the check
+            current_node = current_node.parent
 
         return True
 
@@ -342,7 +349,6 @@ class MCTS:
 
         batch_input = torch.stack(board_tensors)
 
-        # CALLING THE NEW get_policy_value METHOD
         policy_logits_batch, value_output_batch = self.model_player.get_policy_value(batch_input)
 
         policy_probs_batch = F.softmax(policy_logits_batch, dim=1)
@@ -424,8 +430,6 @@ class TalbotMCTSEngine:
         else:
             self._mcts.set_new_root(board.copy(), opponent_last_move, self._last_own_move)
 
-        # You can add logic here to use depth_limit if provided, e.g.,
-        # self._mcts.run_simulations_by_depth(depth_limit) instead of time_limit
         self._mcts.run_simulations(time_per_move)
 
         best_move = None

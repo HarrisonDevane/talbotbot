@@ -1,0 +1,14 @@
+lichess:
+  bot_id: "Talbotbot" 
+  api_token: "placeholder" 
+  accept_variant: "standard" 
+  challenge_time_min: 5 
+  challenge_increment_sec: 5 
+  search_depth: null
+
+talbot:
+  model_path: "/Users/User/Projects/talbot/src/training/supervised/v4_hqgames_with_tactics_opmcts/model/chess_ai_model_epoch_20.pth"
+  resblocks: 20
+  cpuct: 5.0
+  batchsize: 32
+  time_per_move: 5.0

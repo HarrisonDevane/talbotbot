@@ -5,6 +5,7 @@ venv/
 
 # Binaries
 data/
+logs/
 
 # Python cache files
 __pycache__/
@@ -54,23 +55,23 @@ coverage.xml
 Thumbs.db
 
 # Model paths
-training/supervised/v1_pol_mvplayed_val_result_nsearch/model/
-training/supervised/v2_pol_mvplayed_val_sfeval/model/
-training/supervised/v3_hqgames_mcts/model/
-training/supervised/v4_hqgames_with_tactics_opmcts/model/
+src/training/supervised/v1_pol_mvplayed_val_result_nsearch/model/
+src/training/supervised/v2_pol_mvplayed_val_sfeval/model/
+src/training/supervised/v3_hqgames_mcts/model/
+src/training/supervised/v4_hqgames_with_tactics_opmcts/model/
 
 # BUT include best models
-!training/supervised/v3_hqgames_mcts/model/best_chess_ai_model.pth
-!training/supervised/v4_hqgames_with_tactics_opmcts/model/best_chess_ai_model.pth
+!src/training/supervised/v3_hqgames_mcts/model/best_chess_ai_model.pth
+!src/training/supervised/v4_hqgames_with_tactics_opmcts/model/best_chess_ai_model.pth
 
 # Training data
-training/supervised/v1_pol_mvplayed_val_result_nsearch/data/
-training/supervised/v2_pol_mvplayed_val_sfeval/data/
-training/supervised/v3_hqgames_mcts/data/
-training/supervised/v4_hqgames_with_tactics_opmcts/data/
+src/training/supervised/v1_pol_mvplayed_val_result_nsearch/data/
+src/training/supervised/v2_pol_mvplayed_val_sfeval/data/
+src/training/supervised/v3_hqgames_mcts/data/
+src/training/supervised/v4_hqgames_with_tactics_opmcts/data/
 
 # Logs
-training/supervised/v1_pol_mvplayed_val_result_nsearch/logs/
-training/supervised/v2_pol_mvplayed_val_sfeval/logs/
-training/supervised/v3_hqgames_mcts/logs/
-training/supervised/v4_hqgames_with_tactics_opmcts/logs/
+src/training/supervised/v1_pol_mvplayed_val_result_nsearch/logs/
+src/training/supervised/v2_pol_mvplayed_val_sfeval/logs/
+src/training/supervised/v3_hqgames_mcts/logs/
+src/training/supervised/v4_hqgames_with_tactics_opmcts/logs/

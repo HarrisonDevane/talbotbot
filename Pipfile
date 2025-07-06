@@ -14,6 +14,8 @@ chess = "*"
 pillow = "*"
 tqdm = "*"
 h5py = "*"
+pyyaml = "*"
+python-lichess = "*"
 
 [dev-packages]
 

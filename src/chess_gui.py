@@ -32,7 +32,7 @@ class ChessGUI:
     def load_images(self):
         pieces = ['P', 'N', 'B', 'R', 'Q', 'K']
         colors = ['w', 'b']
-        assets_path = os.path.join(os.path.dirname(__file__), 'assets', 'images')
+        assets_path = os.path.join(os.path.dirname(__file__), '../data', 'assets')
 
         for color in colors:
             for piece in pieces:
