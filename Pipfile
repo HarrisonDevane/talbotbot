@@ -16,6 +16,7 @@ tqdm = "*"
 h5py = "*"
 pyyaml = "*"
 python-lichess = "*"
+bs4 = "*"
 
 [dev-packages]
 
