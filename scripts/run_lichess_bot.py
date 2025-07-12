@@ -20,57 +20,82 @@ sys.path.insert(0, config_dir)
 
 from players import TalbotPlayer
 
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-log_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../logs/lichess_inference"))
-os.makedirs(log_dir, exist_ok=True)
-log_file_path = os.path.join(log_dir, f"lichess_bot_run_{timestamp}.log")
+class DummyLogger:
+    def debug(self, *args, **kwargs): pass
+    def info(self, *args, **kwargs): pass
+    def warning(self, *args, **kwargs): pass
+    def error(self, *args, **kwargs): pass
+    def critical(self, *args, **kwargs): pass
+    def exception(self, *args, **kwargs): pass
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    filename=log_file_path,
-    filemode='w'
-)
-
-logger = logging.getLogger(__name__)
 
 class LichessBot:
-    def __init__(self, lichess_config: dict, talbot_player_config: dict, timing_config:dict, challenge_config: dict):
+    def __init__(self, lichess_config: dict, talbot_player_config: dict, timing_config:dict, challenge_config: dict, logging_config: dict):
         self.lichess_config = lichess_config
         self.talbot_player_config = talbot_player_config
         self.timing_config = timing_config
         self.challenge_config = challenge_config
+        self.logging_config = logging_config
 
         self.session = berserk.TokenSession(lichess_config["api_token"])
         self.client = berserk.Client(session=self.session)
 
+        self.games_played = 0
         self.game_threads = {}
         self.stop_event = threading.Event()
 
-        logger.debug(f"Lichess Bot '{lichess_config['bot_id']}' initialized.")
+        # Set up logging dir + lichess logging
+        self.log_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../logs/lichess_inference", datetime.now().strftime("%Y-%m-%d_%H-%M-%S")))
+        os.makedirs(self.log_dir, exist_ok=True)
+
+        self.logger = logging.getLogger("lichess_main")
+        self.logger.setLevel(self.logging_config['lichess_logging_level'])
+
+        if not self.logger.handlers:
+            handler = logging.FileHandler(os.path.join(self.log_dir, "main.log"), mode='w')
+            formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+
+
+
+    def _setup_game_logger(self, game_id):
+        logger = logging.getLogger(f"{game_id}")
+        logger.setLevel(self.logging_config['game_logging_level'])
+
+        if not logger.handlers:
+            handler = logging.FileHandler(os.path.join(self.log_dir, f"game_{self.games_played}_{game_id}.log"), mode='w')
+            formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+
+        return logger
+    
 
     def _challenge_loop(self):
         """
         Runs in a separate thread to periodically attempt to challenge specific bots.
         """
-        logger.debug("Challenge thread started.")
+        self.logger.debug("Challenge thread started.")
         while not self.stop_event.is_set():
+            if self.lichess_config['total_games'] is not None and self.games_played >= self.lichess_config['total_games']:
+                self.logger.info("Challenge thread: Total game limit reached. Stopping challenge loop.")
+                break
+
+            self.logger.info(f"Active games: {len(self.game_threads)}, Active total: {self.lichess_config['threads']}, Games played: {self.games_played}, Games total: {self.lichess_config['total_games']}")
+
 
             # Only attempt to challenge if the bot is not currently in any game
-
-            if len(self.game_threads) < self.lichess_config['threads']:
-                logger.info("Challenge thread: No active games. Attempting periodic challenge...")
+            if len(self.game_threads) < (self.lichess_config['threads'] - 1):
                 self._challenge_specific_bots()
-            else:
-                logger.debug(f"Challenge thread: Bot is currently in {len(self.game_threads)} game(s). Skipping challenge attempt.")
 
             self.stop_event.wait(self.challenge_config['challenge_interval'])
-        logger.debug("Challenge thread stopped.")
+        self.logger.debug("Challenge thread stopped.")
 
 
     def run(self):
-        logger.debug("Connecting to Lichess API (main event stream)...")
+        self.logger.debug("Connecting to Lichess API (main event stream)...")
 
         if self.challenge_config['challenge_bots']:
             self.challenge_thread = threading.Thread(target=self._challenge_loop, name="ChallengeThread")
@@ -78,61 +103,75 @@ class LichessBot:
             self.challenge_thread.start()
 
         event_stream = None
-        while not self.stop_event.is_set():
-            if event_stream is None:
-                try:
-                    event_stream = self.client.bots.stream_incoming_events()
-                    logger.info("Successfully connected to Lichess main event stream.")
-                except Exception as e:
-                    logger.critical(f"Unexpected error during initial main event stream connection: {e}. Retrying in 5 seconds...", exc_info=True)
-                    time.sleep(5)
-                    continue
+        try:
+            while not self.stop_event.is_set():
+                if event_stream is None:
+                    try:
+                        event_stream = self.client.bots.stream_incoming_events()
+                        self.logger.info("Successfully connected to Lichess main event stream.")
+                    except Exception as e:
+                        self.logger.critical(f"Unexpected error during initial main event stream connection: {e}. Retrying in 5 seconds...", exc_info=True)
+                        time.sleep(5)
+                        continue
 
-            event = next(event_stream)
+                event = next(event_stream)
 
-            event_type = event["type"]
-            logger.debug(f"Received main event: {event}")
+                event_type = event["type"]
+                self.logger.debug(f"Received main event: {event}")
 
-            if event_type == "challenge":
-                self._handle_challenge(event["challenge"])
-            elif event_type == "gameStart":
-                game_id = event["game"]["id"]
-                
-                # check how many threads are running
-                if len(self.game_threads) < self.lichess_config['threads']:
+                if event_type == "challenge":
+                    self._handle_challenge(event["challenge"])
+                elif event_type == "gameStart":
+                    game_id = event["game"]["id"]
+                    
+                    # Check if more than total games limit
+                    if self.lichess_config['total_games'] is not None and self.games_played >= self.lichess_config['total_games']:
+                        self.logger.info(f"Game {game_id} ignored: total_games limit ({self.lichess_config['total_games'] }) reached.")
+                        self.client.bots.resign_game(game_id)
+                        continue
 
-                    if game_id not in self.game_threads:
-                        logger.debug(f"Starting new game thread for game {game_id}")
-                        self.game_threads[game_id] = {
-                            "thread": None,
-                            "board": None,
-                            "moves_on_board": 0,
-                            "initial_game_data": event["game"],
-                            "wtime_ms": 0, "btime_ms": 0,
-                            "winc_ms": 0, "binc_ms": 0,
-                            "last_state_update_time": 0,
-                            "thread_lock": False,
-                            "is_over": False
-                        }
-                        game_thread = threading.Thread(target=self._run_game_loop, args=(game_id, event["game"]))
-                        self.game_threads[game_id]["thread"] = game_thread
-                        game_thread.start()
+
+                    # check how many threads are running
+                    if len(self.game_threads) < (self.lichess_config['threads']):
+                        if game_id not in self.game_threads:
+                            self.logger.debug(f"Starting new game thread for game {game_id}")
+                            self.games_played += 1
+                            self.game_threads[game_id] = {
+                                "thread": None,
+                                "board": None,
+                                "moves_on_board": 0,
+                                "initial_game_data": event["game"],
+                                "wtime_ms": 0, "btime_ms": 0,
+                                "winc_ms": 0, "binc_ms": 0,
+                                "last_state_update_time": 0,
+                                "thread_lock": False,
+                                "is_over": False
+                            }
+                            game_thread = threading.Thread(target=self._run_game_loop, args=(game_id, event["game"]))
+                            self.game_threads[game_id]["thread"] = game_thread
+                            game_thread.start()
+                        else:
+                            self.logger.warning(f"Game {game_id} already has a running thread. Ignoring duplicate gameStart event.")
                     else:
-                        logger.warning(f"Game {game_id} already has a running thread. Ignoring duplicate gameStart event.")
-                else:
-                    logger.warning(f"New game {game_id} started exceeding thread count. Resigning.")
-                    self.client.bots.resign_game(game_id)
-            elif event_type == "gameFinish":
-                self._handle_game_finish(game_id, event["game"].get("status", "unknown_status"))
-            elif event_type == "gameFull":
-                game_state = event.get("state")
-                if game_state and game_state.get("type") == "gameState":
-                    logger.debug(f"Processing embedded gameState from gameFull event for game {game_id}")
-                    self._handle_game_state(game_id, game_state, time.time())
-                else:
-                    logger.debug(f"Received gameFull event for {game_id} without a valid gameState. Ignoring.")
+                        self.logger.warning(f"New game {game_id} started exceeding thread count. Resigning.")
+                        self.client.bots.resign_game(game_id)
+                elif event_type == "gameFinish":
+                    self._handle_game_finish(game_id, event["game"].get("status", "unknown_status"))
+                elif event_type == "gameFull":
+                    game_state = event["state"]
+                    if game_state and game_state["type"] == "gameState":
+                        self.logger.debug(f"Processing embedded gameState from gameFull event for game {game_id}")
+                        self._handle_game_state(game_id, game_state, time.time())
+                    else:
+                        self.logger.debug(f"Received gameFull event for {game_id} without a valid gameState. Ignoring.")
+        except KeyboardInterrupt:
+            # Resign all games on c
+            self.logger.info("Ctrl+C detected! Resigning all active games and shutting down...")
+            for game_id in list(self.game_threads.keys()):
+                self._try_resign_game(game_id)
 
-        self._shutdown_bot()
+        finally:
+            self._shutdown_bot()
 
 
     def _run_game_loop(self, game_id, initial_game_data):
@@ -140,18 +179,24 @@ class LichessBot:
         Runs the dedicated stream for a single game, maintaining board state incrementally.
         This is where the TalbotPlayer instance for *this specific game* is created.
         """
-        logger.debug(f"Game loop started for game {game_id}.")
+        self.logger.info(f"Game loop started for game {game_id}.")
+        game_logger = self._setup_game_logger(game_id)
+
 
         player_instance = TalbotPlayer(
             name=self.lichess_config["bot_id"] + "_" + game_id[:4],
-            model_path=self.talbot_player_config.get("model_path"),
-            num_residual_blocks=self.talbot_player_config.get("resblocks"),
-            cpuct=self.talbot_player_config.get("cpuct"),
-            batch_size=self.talbot_player_config.get("batchsize"),
+            model_path=self.talbot_player_config["model_path"],
+            logger=game_logger,
+            num_residual_blocks=self.talbot_player_config["resblocks"],
+            num_input_planes=self.talbot_player_config["input_planes"],
+            num_filters=self.talbot_player_config["filters"],
+            cpuct=self.talbot_player_config["cpuct"],
+            batch_size=self.talbot_player_config["batchsize"],
         )
+
         self.game_threads[game_id]["player_instance"] = player_instance
 
-        full_game_details = self._make_api_call_with_retries(self.client.games.export, game_id)
+        full_game_details = self._make_api_call_with_retries(game_id, self.client.games.export, game_id)
         initial_fen = full_game_details.get('initialFen', chess.STARTING_FEN)
         moves_string = full_game_details.get('moves', '')
 
@@ -168,61 +213,61 @@ class LichessBot:
 
         self.game_threads[game_id]["board"] = current_board
         self.game_threads[game_id]["moves_on_board"] = moves_on_board
-        logger.debug(f"Game {game_id} board initialized. Current FEN: {current_board.fen()} with {moves_on_board} moves.")
+        game_logger.debug(f"Game {game_id} board initialized. Current FEN: {current_board.fen()} with {moves_on_board} moves.")
 
         self.game_threads[game_id]["bot_color_str"] = initial_game_data["color"]
 
         if (current_board.turn == initial_game_data["color"]):
-            logger.debug(f"It's my turn for the initial move in game {game_id}. Thinking of a move...")
+            game_logger.debug(f"It's my turn for the initial move in game {game_id}. Thinking of a move...")
             turn_start_time = time.time()
             self.make_bot_move(game_id, turn_start_time)
         else:
-            logger.debug(f"Game {game_id}: Not my turn for the initial move. Waiting for opponent's move.")
+            game_logger.debug(f"Game {game_id}: Not my turn for the initial move. Waiting for opponent's move.")
 
 
         game_stream = self.client.bots.stream_game_state(game_id)
         for event in game_stream:
             if self.stop_event.is_set():
-                logger.debug(f"Stop event detected for game {game_id}. Exiting game loop.")
+                game_logger.debug(f"Stop event detected for game {game_id}. Exiting game loop.")
                 break
 
             event_type = event["type"]
-            logger.debug(f"Received game {game_id} event: {event}")
+            game_logger.debug(f"Received game {game_id} event: {event}")
 
             if event_type == "gameState":
                 self._handle_game_state(game_id, event, time.time())
             elif event_type == "gameFull":
-                game_state_data_from_full = event.get("state")
-                logger.debug(f"Received gameFull event for {game_id}. Processing full state update.")
+                game_state_data_from_full = event["state"]
+                game_logger.debug(f"Received gameFull event for {game_id}. Processing full state update.")
                 self._handle_game_state(game_id, game_state_data_from_full, time.time())
             else:
-                logger.debug(f"Unhandled game {game_id} event type: {event_type}")
+                game_logger.debug(f"Unhandled game {game_id} event type: {event_type}")
 
 
     def _shutdown_bot(self):
         """Gracefully shuts down all game threads and the player, including the challenge thread."""
-        logger.debug("Setting stop event for all threads...")
+        self.logger.debug("Setting stop event for all threads...")
         self.stop_event.set() # Signal all threads to stop
 
         # First, join the challenge thread to ensure it cleans up
         if self.challenge_thread and self.challenge_thread.is_alive():
-            logger.debug("Waiting for challenge thread to finish...")
+            self.logger.debug("Waiting for challenge thread to finish...")
             self.challenge_thread.join(timeout=5) # Give it 5 seconds to finish
             if self.challenge_thread.is_alive():
-                logger.warning("Challenge thread did not terminate gracefully within timeout.")
+                self.logger.warning("Challenge thread did not terminate gracefully within timeout.")
 
         # Then, join individual game threads
         for game_id, data in list(self.game_threads.items()):
             thread = data["thread"]
             if thread and thread.is_alive(): # Check if thread object exists and is alive
-                logger.debug(f"Waiting for game thread {game_id} to finish...")
+                self.logger.debug(f"Waiting for game thread {game_id} to finish...")
                 thread.join(timeout=5)
                 if thread.is_alive():
-                    logger.warning(f"Game thread {game_id} did not terminate gracefully within timeout.")
+                    self.logger.warning(f"Game thread {game_id} did not terminate gracefully within timeout.")
             # Clear game data regardless of thread termination success
             del self.game_threads[game_id]
 
-        logger.debug("Lichess Bot completely shut down.")
+        self.logger.debug("Lichess Bot completely shut down.")
 
 
     def _handle_challenge(self, challenge_data):
@@ -241,7 +286,7 @@ class LichessBot:
         challenge_time_min = int(challenge_data["timeControl"]["limit"]) / 60
         challenge_increment_sec = challenge_data["timeControl"]["limit"]
 
-        logger.debug(f"Received challenge {challenge_id} from {challenger_id}: Variant={variant}, Rated={rated}, Time={challenge_time_min:.1f}min+{challenge_increment_sec}s")
+        self.logger.debug(f"Received challenge {challenge_id} from {challenger_id}: Variant={variant}, Rated={rated}, Time={challenge_time_min:.1f}min+{challenge_increment_sec}s")
 
         accept = True
         decline_reason = []
@@ -262,18 +307,22 @@ class LichessBot:
             accept = False
             decline_reason.append(f"increment {challenge_increment_sec}s (min {min_increment_sec_config}s required)")
 
-        if len(self.game_threads) > 0:
+        if len(self.game_threads) == self.lichess_config['threads']:
             accept = False
             decline_reason.append(f"bot is already in {len(self.game_threads)} game(s).")
-            logger.info(f"Declining challenge {challenge_id} from {challenger_id} because bot is already busy.")
+            self.logger.info(f"Declining challenge {challenge_id} from {challenger_id} because bot is already busy.")
 
+        if self.lichess_config['total_games'] is not None and self.games_played >= self.lichess_config['total_games']:
+            accept = False
+            decline_reason.append(f"bot has played all games for today")
+            self.logger.info(f"Declining challenge {challenge_id} from {challenger_id} because total games have been played.")
 
         if accept:
             self.client.bots.accept_challenge(challenge_id)
-            logger.debug(f"Accepted challenge {challenge_id}.")
+            self.logger.debug(f"Accepted challenge {challenge_id}.")
         else:
             reason_str = ", ".join(decline_reason)
-            logger.debug(f"Declining challenge {challenge_id} due to criteria mismatch: {reason_str}.")
+            self.logger.debug(f"Declining challenge {challenge_id} due to criteria mismatch: {reason_str}.")
             self.client.bots.decline_challenge(challenge_id)
 
 
@@ -282,10 +331,10 @@ class LichessBot:
             return
 
 
-        game_data = self.game_threads.get(game_id)
+        game_data = self.game_threads[game_id]
 
         if not game_data or game_data["board"] is None:
-            logger.error(f"Board not found for game {game_id} in _handle_game_state. Cannot process game state. Resigning.")
+            self.logger.error(f"Board not found for game {game_id} in _handle_game_state. Cannot process game state. Resigning.")
             self._try_resign_game(game_id)
             return
 
@@ -303,17 +352,17 @@ class LichessBot:
         game_status_name = game_state["status"]
 
         if game_status_name != "started":
-            logger.debug(f"Game {game_id} status: {game_status_name}. No move needed.")
+            self.logger.debug(f"Game {game_id} status: {game_status_name}. No move needed.")
             return
 
         incoming_moves = game_state["moves"].split()
         num_incoming_moves = len(incoming_moves)
 
         if num_incoming_moves <= moves_on_board:
-            logger.debug(f"Game {game_id}: No new moves to apply. Current FEN: {current_board.fen()}")
+            self.logger.debug(f"Game {game_id}: No new moves to apply. Current FEN: {current_board.fen()}")
         else:
             new_moves_to_apply = incoming_moves[moves_on_board:]
-            logger.debug(f"Game {game_id}: Applying {len(new_moves_to_apply)} new moves.")
+            self.logger.debug(f"Game {game_id}: Applying {len(new_moves_to_apply)} new moves.")
             for move_str in new_moves_to_apply:
                 if not move_str:
                     continue
@@ -321,20 +370,20 @@ class LichessBot:
                 move = current_board.parse_san(move_str)
                 current_board.push(move)
                 moves_on_board += 1
-                logger.debug(f"Applied new move: {move_str}. Current FEN: {current_board.fen()}")
+                self.logger.debug(f"Applied new move: {move_str}. Current FEN: {current_board.fen()}")
 
             game_data["moves_on_board"] = moves_on_board
 
-        logger.debug(f"Game {game_id} state updated. Current FEN: {current_board.fen()}")
+        self.logger.debug(f"Game {game_id} state updated. Current FEN: {current_board.fen()}")
 
         # Determine if it's the bot's turn
         bot_color_in_game = chess.WHITE if game_data["initial_game_data"]["color"] == 'white' else chess.BLACK
 
         if(current_board.turn == bot_color_in_game):
-            logger.debug(f"It's my turn in game {game_id}. Thinking of a move...")
+            self.logger.debug(f"It's my turn in game {game_id}. Thinking of a move...")
             self.make_bot_move(game_id, event_receive_time)
         else:
-            logger.debug(f"Game {game_id}: Not my turn.")
+            self.logger.debug(f"Game {game_id}: Not my turn.")
 
 
     def _calculate_thinking_time(self, game_id):
@@ -343,8 +392,8 @@ class LichessBot:
         Prioritizes increment, uses faster thinking for early moves, and a percentage of
         remaining time for later moves.
         """
-        game_data = self.game_threads.get(game_id)
-        initial_game_data = game_data.get("initial_game_data")
+        game_data = self.game_threads[game_id]
+        initial_game_data = game_data["initial_game_data"]
 
         bot_color_str = initial_game_data["color"]
         bot_color = chess.WHITE if bot_color_str == 'white' else chess.BLACK
@@ -373,7 +422,7 @@ class LichessBot:
         if move_number <= self.timing_config["mid_game_threshold"]:
 
             calculated_time = self.timing_config["early_game_movetime"]
-            logger.debug(f"Game {game_id} (Move {move_number}): Early game strategy. Base calculated time: {calculated_time:.2f}s")
+            self.logger.debug(f"Game {game_id} (Move {move_number}): Early game strategy. Base calculated time: {calculated_time:.2f}s")
 
         # Mid game -> calculated
         elif move_number <= self.timing_config["late_game_threshold"]:
@@ -381,7 +430,7 @@ class LichessBot:
             cap = remaining_time_sec * self.timing_config["mid_game_cap_factor"]
             calculated_time = min(base_time, cap)
 
-            logger.debug(f"Game {game_id} (Move {move_number}): Mid/Late game strategy. Base calculated time: {calculated_time:.2f}s")
+            self.logger.debug(f"Game {game_id} (Move {move_number}): Mid/Late game strategy. Base calculated time: {calculated_time:.2f}s")
 
         else:
             base_time = remaining_time_sec / self.timing_config["late_game_movetime_factor"] + increment_ms * self.timing_config["late_game_increment_factor"]  # more time late game
@@ -392,11 +441,11 @@ class LichessBot:
         if remaining_time_sec < calculated_time + self.timing_config["buffer_time"]:
             calculated_time = max(remaining_time_sec - self.timing_config["buffer_time"], self.timing_config["minimum_time"])  # min 1 second
 
-        logger.info(f"Game {game_id}: Effective Remaining clock: {remaining_time_sec:.2f}s, Increment: {increment_sec:.2f}s, Move #: {move_number}. Calculated thinking time: {calculated_time:.4f}s")
+        self.logger.debug(f"Game {game_id}: Effective Remaining clock: {remaining_time_sec:.2f}s, Increment: {increment_sec:.2f}s, Move #: {move_number}. Calculated thinking time: {calculated_time:.4f}s")
         return calculated_time
     
 
-    def _make_api_call_with_retries(self, api_call_func, *args, **kwargs):
+    def _make_api_call_with_retries(self, game_id, api_call_func, *args, **kwargs):
         """
         Wrapper to make Lichess API calls with retry logic for connection errors.
         This method will retry on requests.exceptions.ConnectionError and berserk.exceptions.ApiError.
@@ -404,27 +453,31 @@ class LichessBot:
         max_retries = 3
         initial_delay_seconds = 1
         for attempt in range(1, max_retries + 1):
+            if self.game_threads[game_id]["is_over"]:
+                return
+            
             try:
                 result = api_call_func(*args, **kwargs)
                 return result # Success!
             except (requests.exceptions.ConnectionError, berserk.exceptions.ApiError) as e:
-                logger.warning(f"Attempt {attempt}/{max_retries}: Connection error during API call. Error: {e}")
+                self.logger.warning(f"Attempt {attempt}/{max_retries}: Connection error during API call. Error: {e}")
                 if attempt < max_retries:
                     delay = initial_delay_seconds * (2 ** (attempt - 1)) # Exponential backoff
-                    logger.info(f"Retrying in {delay:.2f} seconds...")
+                    self.logger.info(f"Retrying in {delay:.2f} seconds...")
                     time.sleep(delay)
                 else:
-                    logger.error(f"All {max_retries} attempts failed for API call. Giving up.")
+                    self.logger.error(f"All {max_retries} attempts failed for API call. Giving up.")
                     raise # Re-raise the exception if all retries fail
             except Exception as e:
                 # Catch any other unexpected exceptions and re-raise immediately
-                logger.critical(f"An unexpected non-retryable error occurred during API call: {e}", exc_info=True)
+                self.logger.critical(f"An unexpected non-retryable error occurred during API call: {e}", exc_info=True)
                 raise # Re-raise immediately for unhandled exceptions
+
 
     def make_bot_move(self, game_id, turn_start_time):
         game_data = self.game_threads.get(game_id)
         if not game_data or game_data["board"] is None:
-            logger.error(f"Attempted to make a move for game {game_id} but no board found. Resigning.")
+            self.logger.error(f"Attempted to make a move for game {game_id} but no board found. Resigning.")
             self._try_resign_game(game_id)
             return
 
@@ -444,76 +497,29 @@ class LichessBot:
 
             best_move_uci = best_move_obj.uci()
 
-            logger.debug(f"Game {game_id}: Attempting to make move {best_move_uci}")
+            self.logger.debug(f"Game {game_id}: Attempting to make move {best_move_uci}")
 
             # Only make move if game is in play
             if not self.game_threads[game_id]["is_over"]:
-                self._make_api_call_with_retries(self.client.bots.make_move, game_id, best_move_uci)
-                logger.info(f"Successfully sent move {best_move_uci} for game {game_id}.")
+                self._make_api_call_with_retries(game_id, self.client.bots.make_move, game_id, best_move_uci)
+                self.logger.debug(f"Successfully sent move {best_move_uci} for game {game_id}.")
                 current_board.push_uci(best_move_uci)
                 game_data["moves_on_board"] += 1
 
-        except berserk.exceptions.ResponseError as e:
-            error_message = str(e).lower()
-            if "not your turn" in error_message or "too fast" in error_message or "already played" in error_message or "game already over" in error_message:
-                logger.warning(f"Lichess reported '{e.message}' for game {game_id}. This indicates a potential desync. Attempting to resync board and re-evaluate turn.")
-
-                try:
-                    full_game_details = self._make_api_call_with_retries(self.client.games.export, game_id)
-
-                    if not isinstance(full_game_details, dict):
-                        logger.critical(f"FATAL: Lichess game export for {game_id} during error resync returned unexpected type '{type(full_game_details).__name__}'. Content snippet: {str(full_game_details)[:200]}. Resigning.")
-                        self._try_resign_game(game_id)
-                        return
-
-                    initial_fen = full_game_details.get('initialFen', chess.STARTING_FEN)
-                    moves_string = full_game_details.get('moves', '')
-
-                    temp_board = chess.Board(initial_fen)
-                    temp_moves_on_board = 0
-                    for move_str in moves_string.split():
-                        if not move_str: continue
-                        move = temp_board.parse_san(move_str)
-                        temp_board.push(move)
-                        temp_moves_on_board += 1
-
-                    game_data["board"] = temp_board
-                    game_data["moves_on_board"] = temp_moves_on_board
-                    current_board = temp_board
-                    logger.info(f"Game {game_id} board successfully resynced after move error. New FEN: {current_board.fen()}")
-
-                    bot_color_in_game = None
-                    white_player_id = full_game_details.get('players', {}).get('white', {}).get('user', {}).get('id', '').lower()
-                    black_player_id = full_game_details.get('players', {}).get('black', {}).get('user', {}).get('id', '').lower()
-
-                    if white_player_id == self.lichess_config['bot_id'].lower():
-                        bot_color_in_game = chess.WHITE
-                    elif black_player_id == self.lichess_config['bot_id'].lower():
-                        bot_color_in_game = chess.BLACK
-
-                    if bot_color_in_game is not None and current_board.turn == bot_color_in_game:
-                        logger.info(f"After resync, it IS my turn in game {game_id}. Recalculating move...")
-                        self.make_bot_move(game_id, turn_start_time)
-                    else:
-                        logger.info(f"After resync, it is NOT my turn or game is over for {game_id}. Status: {full_game_details.get('status', 'unknown')}. Not making a move.")
-
-                except (requests.exceptions.RequestException, berserk.exceptions.ApiError, ValueError, chess.IllegalMoveError, Exception) as e_resync:
-                    logger.critical(f"FATAL: Resync attempt failed for game {game_id} due to error: {e_resync}. Cannot recover. Resigning.", exc_info=True)
-                    self._try_resign_game(game_id)
-            else:
-                logger.error(f"Unhandled Lichess API error on move for game {game_id}: {e}. Resigning.", exc_info=True)
-                self._try_resign_game(game_id)
         except Exception as e:
-            logger.critical(f"Unexpected error during move generation or sending for game {game_id}: {e}", exc_info=True)
+            self.logger.critical(f"Unexpected error during move generation or sending for game {game_id}: {e}", exc_info=True)
             self._try_resign_game(game_id)
 
 
     def _try_resign_game(self, game_id):
+        game_data = self.game_threads.get(game_id)
+        game_data["is_over"] = True
+
         try:
             self.client.bots.resign_game(game_id)
-            logger.info(f"Successfully sent resign command for game {game_id}.")
+            self.logger.info(f"Successfully sent resign command for game {game_id}.")
         except Exception as e:
-            logger.error(f"Unexpected error during resignation attempt for game {game_id}: {e}", exc_info=True)
+            self.logger.error(f"Unexpected error during resignation attempt for game {game_id}: {e}", exc_info=True)
 
 
     def _handle_game_finish(self, game_id, status_data):
@@ -524,7 +530,7 @@ class LichessBot:
 
         status_name = status_data.get("name")
         if status_name:
-            logger.info(f"Game {game_id} finished with status: {status_name}")
+            self.logger.info(f"Game {game_id} finished with status: {status_name}")
 
         game_data = self.game_threads.get(game_id)
         if not game_data:
@@ -535,12 +541,10 @@ class LichessBot:
 
         def delayed_cleanup():
             # Wait if move calculation is ongoing
-            logger.info(f"In function")
-            while game_data.get("thread_lock"):
-                logger.info(f"In with")
+            while game_data["thread_lock"]:
                 time.sleep(0.05)
             self.game_threads.pop(game_id, None)
-            logger.info(f"Cleaned up and removed game {game_id} from active games. Active games: {len(self.game_threads)}")
+            self.logger.info(f"Cleaned up and removed game {game_id} from active games. Active games: {len(self.game_threads)}")
 
         threading.Thread(target=delayed_cleanup, daemon=True).start()
 
@@ -589,7 +593,7 @@ class LichessBot:
 
         opponent_id = random.choice(TARGET_BOT_IDS)
 
-        logger.info(f"Attempting to challenge bot: {opponent_id}")
+        self.logger.info(f"Attempting to challenge bot: {opponent_id}")
 
         challenge = self.client.challenges.create(
             opponent_id,
@@ -599,7 +603,7 @@ class LichessBot:
             clock_increment=increment_seconds
         )
             
-        logger.info(f"Successfully sent challenge to {opponent_id}. Challenge ID: {challenge['id']}")
+        self.logger.info(f"Successfully sent challenge to {opponent_id}. Challenge ID: {challenge['id']}")
 
 
 if __name__ == "__main__":
@@ -610,5 +614,5 @@ if __name__ == "__main__":
 
     config["lichess"]["api_token"] = os.getenv("LICHESS_API_TOKEN")
 
-    bot = LichessBot(config["lichess"], config["talbot"], config["timing"], config["challenges"])
+    bot = LichessBot(config["lichess"], config["talbot"], config["timing"], config["challenges"], config["logging"])
     bot.run()
