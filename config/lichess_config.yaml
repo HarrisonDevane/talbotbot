@@ -1,20 +1,20 @@
 lichess:
   bot_id: "Talbotbot" 
   api_token: "placeholder" 
-  threads: 2
-  total_games: 2
+  threads: 1
+  total_games: Null
 
 talbot:
-  model_path: "/Users/User/Projects/talbot/src/training/supervised/v4_hqgames_with_tactics_opmcts/model/chess_ai_model_epoch_20.pth"
-  input_planes: 18
+  model_path: "/Users/User/Projects/talbot/src/training/supervised/v5_historic_input_channels/model/best_chess_ai_model.pth"
+  input_planes: 68
   filters: 128
   resblocks: 20
   cpuct: 5.0
   batchsize: 32
 
 timing:
-  early_game_movetime: 3
-  mid_game_threshold: 24
+  early_game_movetime: 6
+  mid_game_threshold: 16
   mid_game_movetime_factor: 25
   mid_game_increment_factor: 0.75
   mid_game_cap_factor: 0.1
@@ -26,13 +26,14 @@ timing:
   minimum_time: 1
 
 challenges:
+  accept_challenges: False
   variant: "standard" 
   min_challenge_time: 3
   min_challenge_increment: 2
   challenge_bots: True
-  challenge_rated: False
+  challenge_rated: True
   challenge_interval: 30
-  challenge_time_min: 5 
+  challenge_time_min: 5
   challenge_increment_sec: 5
 
 logging:

@@ -52,7 +52,7 @@ def convert_coords(rank, file):
     # python-chess files: 0=file a, 7=file h
     return 7 - rank, file # row = 7 - rank, col = file
 
-def board_to_tensor(board: chess.Board) -> np.ndarray:
+def board_to_tensor_18(board: chess.Board) -> np.ndarray:
     """
     Encode a python-chess Board into a (18, 8, 8) numpy float32 tensor.
     Planes:
@@ -95,6 +95,83 @@ def board_to_tensor(board: chess.Board) -> np.ndarray:
         ep_file = chess.square_file(board.ep_square)
         # convert_coords isn't needed here as it's a file-wide plane
         planes[17, :, ep_file] = 1.0
+
+    return planes
+
+def _get_piece_planes(board_state: chess.Board) -> np.ndarray:
+    piece_planes = np.zeros((12, BOARD_DIM, BOARD_DIM), dtype=np.float32)
+    piece_to_plane = {
+        chess.PAWN: 0, chess.KNIGHT: 1, chess.BISHOP: 2,
+        chess.ROOK: 3, chess.QUEEN: 4, chess.KING: 5,
+    }
+
+    for square, piece in board_state.piece_map().items():
+        row, col = convert_coords(chess.square_rank(square), chess.square_file(square))
+        base_plane = 0 if piece.color == chess.WHITE else 6
+        plane_idx = base_plane + piece_to_plane[piece.piece_type]
+        piece_planes[plane_idx, row, col] = 1.0
+    return piece_planes
+
+
+
+def board_to_tensor_68(board: chess.Board) -> np.ndarray:
+    """
+    Encode a python-chess Board into a (68, 8, 8) numpy float32 tensor.
+    Planes:
+      0-5: White pieces [P, N, B, R, Q, K]
+      6-11: Black pieces [p, n, b, r, q, k]
+      12:  White to move (all ones or zeros)
+      13-16: Castling rights (Wk, Wq, Bk, Bq)
+      17: En passant file (1 at file of ep square, else 0)
+      18-65: Last 4 historic half moves (2 full moves) - 4 * 12 = 48 planes
+      66-67: Three move repetition counter (2 planes)
+    """
+    # 18 current planes + 4*12 historical piece planes + 2 repetition planes
+    num_input_planes = 18 + (4 * 12) + 2 # = 68
+    planes = np.zeros((num_input_planes, BOARD_DIM, BOARD_DIM), dtype=np.float32)
+
+    # Current Board State (Planes 0-17)
+    for square, piece in board.piece_map().items():
+        row, col = convert_coords(chess.square_rank(square), chess.square_file(square))
+        base_plane = 0 if piece.color == chess.WHITE else 6
+        plane_idx = base_plane + {
+            chess.PAWN: 0, chess.KNIGHT: 1, chess.BISHOP: 2,
+            chess.ROOK: 3, chess.QUEEN: 4, chess.KING: 5,
+        }[piece.piece_type]
+        planes[plane_idx, row, col] = 1.0
+
+    planes[12, :, :] = 1.0 if board.turn == chess.WHITE else 0.0
+    planes[13, :, :] = 1.0 if board.has_kingside_castling_rights(chess.WHITE) else 0.0
+    planes[14, :, :] = 1.0 if board.has_queenside_castling_rights(chess.WHITE) else 0.0
+    planes[15, :, :] = 1.0 if board.has_kingside_castling_rights(chess.BLACK) else 0.0
+    planes[16, :, :] = 1.0 if board.has_queenside_castling_rights(chess.BLACK) else 0.0
+
+    if board.ep_square is not None:
+        ep_file = chess.square_file(board.ep_square)
+        planes[17, :, ep_file] = 1.0
+
+    # Historical Board States (Planes 18-65) - Last 4 half-moves (2 full moves)
+    temp_board = board.copy()
+    # Loop 4 times for 4 half-moves (2 full moves)
+    for i in range(4):
+        if not temp_board.move_stack: # Check if there are moves to pop
+            break
+        temp_board.pop() # Go back one half-move
+        hist_piece_planes = _get_piece_planes(temp_board)
+        # Calculate start_plane_idx based on current historical plane iteration
+        start_plane_idx = 18 + (i * 12)
+        planes[start_plane_idx : start_plane_idx + 12, :, :] = hist_piece_planes
+
+    # Repetition Channels (Planes 66-67)
+    if board.is_repetition(count=2): # Checks if current position has appeared once before (2-fold)
+        planes[66, :, :] = 1.0
+    if board.is_repetition(count=3): # Checks if current position has appeared twice before (3-fold)
+        planes[67, :, :] = 1.0
+
+
+    if board.turn == chess.BLACK:
+        # Spatially flip ALL 8x8 planes (axis 1 for rows/ranks, axis 2 for columns/files).
+        planes = np.flip(planes, axis=(1, 2)).copy()
 
     return planes
 

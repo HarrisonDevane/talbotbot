@@ -35,12 +35,15 @@ def train_model(
     log_interval: int = 100,
     save_interval: int = 5,
     checkpoint_dir: str = "checkpoints",
-    validation_split: float = 0.5,
+    validation_split: float = 4,
     resume_checkpoint_path: str = None,
     weight_decay: float = 1e-4,
     # Kept as arguments as requested
     scheduler_type: str = 'CosineAnnealingLR',
-    cosine_eta_min: float = 1e-6
+    cosine_eta_min: float = 1e-6,
+    dropout_rate_conv: float = 0.1,
+    dropout_rate_fc: float = 0.2,
+    dropout_conv_start_block: int = 10
 ):
     # --- 1. Setup Logging ---
     os.makedirs(log_dir, exist_ok=True)
@@ -117,7 +120,10 @@ def train_model(
     model = ChessAIModel(
         num_input_planes=num_input_planes,
         num_residual_blocks=num_residual_blocks,
-        num_filters=num_filters
+        num_filters=num_filters,
+        dropout_rate_conv=dropout_rate_conv,
+        dropout_rate_fc=dropout_rate_fc,
+        dropout_conv_start_block=dropout_conv_start_block
     ).to(device)
     logger.info("Model initialized:")
     logger.info(model)
@@ -127,7 +133,7 @@ def train_model(
     value_criterion = nn.MSELoss()
 
     # --- 6. Optimizer and Scheduler ---
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     # CosineAnnealingLR is now the only scheduler type, regardless of scheduler_type arg
     total_training_steps = num_epochs * len(train_loader)
@@ -144,19 +150,19 @@ def train_model(
             checkpoint = torch.load(resume_checkpoint_path, map_location=device)
 
             model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
             # *** MODIFICATION START ***
             # Remove the line that loads the scheduler state:
-            # if 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict'] is not None:
-            #     scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            #     logger.info("Scheduler state loaded from checkpoint.")
-            # else:
-            #     logger.warning("No scheduler state found in checkpoint. Starting scheduler from scratch.")
-            logger.info("Scheduler will be re-initialized from scratch, not loaded from checkpoint.")
+            if 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict'] is not None:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                logger.info("Scheduler state loaded from checkpoint.")
+            else:
+                logger.warning("No scheduler state found in checkpoint. Starting scheduler from scratch.")
+            #  logger.info("Scheduler will be re-initialized from scratch, not loaded from checkpoint.")
             # *** MODIFICATION END ***
 
-            # start_epoch = checkpoint['epoch'] + 1
+            start_epoch = checkpoint['epoch'] + 1
 
             if 'best_val_loss' in checkpoint:
                 best_val_loss = checkpoint['best_val_loss']
@@ -323,28 +329,30 @@ if __name__ == "__main__":
     current_script_dir = os.path.dirname(os.path.abspath(__file__))
 
     # Using the provided paths from your original script
-    hdf5_file_path = os.path.abspath(os.path.join(current_script_dir, "v4_hqgames_with_tactics_opmcts/data/combined_data.h5"))
-    checkpoint_output_dir = os.path.abspath(os.path.join(current_script_dir, "v4_hqgames_with_tactics_opmcts/model"))
-    log_dir_path = os.path.abspath(os.path.join(current_script_dir, "v4_hqgames_with_tactics_opmcts/logs"))
+    hdf5_file_path = os.path.abspath(os.path.join(current_script_dir, "v5_historic_input_channels/data/all_chess_data.h5"))
+    checkpoint_output_dir = os.path.abspath(os.path.join(current_script_dir, "v5_historic_input_channels/model"))
+    log_dir_path = os.path.abspath(os.path.join(current_script_dir, "v5_historic_input_channels/logs"))
 
     os.makedirs(checkpoint_output_dir, exist_ok=True)
 
     train_model(
         hdf5_path=hdf5_file_path,
         log_dir=log_dir_path,
-        num_input_planes=18,
+        num_input_planes=68,
         num_residual_blocks=20,
         num_filters=128,
         batch_size=512,
-        learning_rate=1e-7,
-        num_epochs=20,
+        learning_rate=1.0e-5,
+        num_epochs=16,
         policy_loss_weight=1.0,
         value_loss_weight=5.0,
         save_interval=1,
         checkpoint_dir=checkpoint_output_dir,
-        validation_split=0.5,
-        resume_checkpoint_path=os.path.abspath(os.path.join(current_script_dir, "v4_hqgames_with_tactics_opmcts/model/best_chess_ai_model_v3.pth")), # Set to a checkpoint path if you want to resume
-        # Kept as arguments as requested, even if their values aren't conditionally used inside train_model right now
+        validation_split=0.04,
+        resume_checkpoint_path=os.path.abspath(os.path.join(current_script_dir, "v5_historic_input_channels/model/chess_ai_model_epoch_9.pth")),
         scheduler_type='CosineAnnealingLR',
-        cosine_eta_min=1e-9
+        cosine_eta_min=1e-6,
+        dropout_rate_conv=0.1,
+        dropout_rate_fc=0.25,
+        dropout_conv_start_block=10    
     )

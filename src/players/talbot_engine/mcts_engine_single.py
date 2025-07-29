@@ -39,7 +39,6 @@ class MCTSEngineSingle:
         if self.root is None:
             self.root = MCTSNode(board.copy())
             self.logger.info("MCTS root initialized (first move).")
-            # Clear any stale queues from previous games
             self.inference_batch.clear()
             self.pending_nodes.clear()
             self.force_batch = False
@@ -77,7 +76,7 @@ class MCTSEngineSingle:
         
         # Expand the root if it hasn't been yet to get initial policy and value
         if not self.root.is_expanded and not self.root.is_queued_for_inference:
-            board_input = torch.from_numpy(utils.board_to_tensor(self.root.board)).float().to(self.model_player.device)
+            board_input = torch.from_numpy(utils.board_to_tensor_68(self.root.board)).float().to(self.model_player.device)
             policy_logits, value_output = self.model_player.get_policy_value(board_input.unsqueeze(0))
             policy_probs = F.softmax(policy_logits.squeeze(0), dim=0)
             self.expand(self.root, policy_probs)
@@ -264,7 +263,7 @@ class MCTSEngineSingle:
             self.logger.debug("     Simulate: Node already queued for inference. Skipping.")
             return False
 
-        board_input = torch.from_numpy(utils.board_to_tensor(node.board)).float().to(self.model_player.device)
+        board_input = torch.from_numpy(utils.board_to_tensor_68(node.board)).float().to(self.model_player.device)
         self.inference_batch.append((node, board_input))
         self.pending_nodes.append(node)
         node.is_queued_for_inference = True

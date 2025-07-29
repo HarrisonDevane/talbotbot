@@ -9,7 +9,6 @@ import random
 import time
 import logging
 from .talbot_engine.mcts_engine_single import MCTSEngineSingle
-from .talbot_engine.mcts_engine_batched import MCTSEngineBatched
 
 # Adjust path for internal modules
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -57,7 +56,7 @@ class TalbotPlayer:
             opponent_last_move = board.move_stack[-1]
 
         if self.mcts is None:
-            self.mcts = MCTSEngineBatched(self.logger, self, self.cpuct, self.batch_size)
+            self.mcts = MCTSEngineSingle(self.logger, self, self.cpuct, self.batch_size)
             self.mcts.set_new_root(board.copy(), None, None) 
         else:
             self.mcts.set_new_root(board.copy(), opponent_last_move, self.last_own_move)
