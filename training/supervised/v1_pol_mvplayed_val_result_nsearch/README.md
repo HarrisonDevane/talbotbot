@@ -25,7 +25,7 @@ The hyper paramters used for this iteration are below. No regularization was use
 
 Here is the plot showing the training loss per epoch:
 
-![Training Loss](log/training_loss.png)
+![Training Loss](logs/training_loss.png)
 
 - **V_Loss:**  Value head loss, giving essentially the probability of winning. As this is a single continuous variable [-1,1], the loss is smaller
 - **P_Loss:**  Policy head loss, giving essentially the probability of output moves. Much higher as this is comparing a one-hot encoded value with a distribution
@@ -33,7 +33,7 @@ Here is the plot showing the training loss per epoch:
 
 Here is the plot comparing the average training loss per epoch, with the average validation loss per epoch:
 
-![Training vs Validation Loss](log/training_vs_validation.png)
+![Training vs Validation Loss](logs/training_vs_validation.png)
 
 Due to the small model size, relatively small dataset, and no regularization, we see rapid overfitting. Best model is ~epoch 10.
 
