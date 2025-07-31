@@ -27,9 +27,9 @@ Here is the plot showing the training loss per epoch:
 
 ![Training Loss](logs/training_loss.png)
 
-- **V_Loss:**  Value head loss, giving essentially the probability of winning. As this is a single continuous variable [-1,1], the loss is smaller
-- **P_Loss:**  Policy head loss, giving essentially the probability of output moves. Much higher as this is comparing a one-hot encoded value with a distribution
-- **T_Loss:**  Sum of V_Loss and P_Loss, used for determining best model
+- **V_Loss:**  The value head loss, representing the MSE in predicting the game outcome as a continuous value between -1 and 1 (win/loss/draw). Since it’s a regression on a single scalar, the loss values tend to be smaller.
+- **P_Loss:**  The policy head loss, which measures the cross-entropy error in predicting the probability distribution over possible moves. This loss is typically higher because it compares a one-hot encoded target move against the predicted probability distribution using cross-entropy.
+- **T_Loss:**  The total training loss, calculated as the sum of V_Loss and P_Loss. This combined loss is used to evaluate and select the best model.
 
 Here is the plot comparing the average training loss per epoch, with the average validation loss per epoch:
 
