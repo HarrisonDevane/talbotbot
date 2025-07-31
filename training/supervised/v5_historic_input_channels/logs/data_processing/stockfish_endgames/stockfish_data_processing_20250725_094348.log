@@ -1,0 +1,21 @@
+2025-07-25 09:43:50,643 - INFO - Starting parallel Stockfish full-game data generation.
+2025-07-25 09:43:50,644 - INFO - Stockfish engine path: C:\Users\User\Projects\talbot\src\../data\engine\stockfish\stockfish-windows-x86-64-avx2.exe
+2025-07-25 09:43:50,644 - INFO - Saving ONE HDF5 file per worker in: C:\Users\User\Projects\talbot\src\training\supervised\v5_historic_input_channels\scripts\../data\stockfish_endgames
+2025-07-25 09:43:50,644 - INFO - Using 8 parallel workers.
+2025-07-25 09:43:50,644 - INFO - Each worker will generate approximately 125000 positions (from multiple full games).
+2025-07-25 09:43:50,644 - INFO - Total expected positions: 1000000
+2025-07-25 09:43:50,644 - INFO - Generating games by starting from a random endgame, playing 4 *Stockfish-optimal* legal moves to construct history, and then playing the game to completion using Stockfish's best moves.
+2025-07-25 09:43:50,645 - INFO - Value and Policy targets will be derived from Stockfish evaluations at each step.
+2025-07-25 09:43:50,645 - INFO - MAX_PIECES_FOR_ENDGAME: 7
+2025-07-25 09:43:50,645 - INFO - Piece selection probability: Pawns > Rooks > Bishops/Knights > Queens
+2025-07-25 09:43:50,645 - INFO - Individual piece limits: Pawns: 8/side, Queens: 1/side, others: 2/side
+2025-07-25 09:43:50,645 - INFO - Max engine restarts per worker: 10 with 2s delay.
+2025-07-25 09:43:50,645 - INFO - Stockfish engine configured with Threads=1, Hash=16MB per instance.
+2025-07-25 10:58:29,912 - INFO - Worker 5 completed. Generated 125018 positions.
+2025-07-25 10:58:39,514 - INFO - Worker 2 completed. Generated 125112 positions.
+2025-07-25 10:59:01,592 - INFO - Worker 3 completed. Generated 125009 positions.
+2025-07-25 10:59:06,479 - INFO - Worker 7 completed. Generated 125007 positions.
+2025-07-25 10:59:28,578 - INFO - Worker 4 completed. Generated 125042 positions.
+2025-07-25 11:00:01,756 - INFO - Worker 6 completed. Generated 125001 positions.
+2025-07-25 11:00:14,749 - INFO - Worker 0 completed. Generated 125009 positions.
+2025-07-25 11:01:45,551 - INFO - Worker 1 completed. Generated 125018 positions.

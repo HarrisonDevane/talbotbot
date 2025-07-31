@@ -5,7 +5,6 @@ venv/
 
 # Binaries
 data/
-logs/
 
 # Python cache files
 __pycache__/
@@ -19,7 +18,6 @@ dist/
 .eggs/
 
 # Logs and databases
-*.log
 *.sqlite3
 
 # Installer logs
@@ -75,3 +73,6 @@ training/supervised/v5_historic_input_channels/data/
 
 # RL for now
 training/reinforcement/
+
+# Inference logs
+inference/logs

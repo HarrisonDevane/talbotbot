@@ -1,0 +1,460 @@
+2025-06-12 18:00:52,635 - INFO - Using device: cuda
+2025-06-12 18:00:52,635 - INFO - Is CUDA available? True
+2025-06-12 18:00:52,636 - INFO - CUDA device count: 1
+2025-06-12 18:00:52,637 - INFO - Current CUDA device: 0
+2025-06-12 18:00:52,638 - INFO - CUDA device name: NVIDIA GeForce GTX 1660 SUPER
+2025-06-12 18:00:52,638 - INFO - Loading data from HDF5 file: C:\Users\User\Projects\talbot\data\lichess_elite_db\processed\chess_move_data.h5
+2025-06-12 18:00:52,988 - INFO - Total dataset size: 5000000 samples
+2025-06-12 18:00:52,989 - INFO - Training set size: 4900000 samples (9571 batches)
+2025-06-12 18:00:52,989 - INFO - Validation set size: 100000 samples (196 batches)
+2025-06-12 18:00:52,989 - INFO - Checkpoints will be saved to: C:\Users\User\Projects\talbot\model\checkpoints_supervised
+2025-06-12 18:00:53,176 - INFO - Model initialized:
+2025-06-12 18:00:53,176 - INFO - ChessAIModel(
+  (initial_conv): Conv2d(18, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+  (initial_bn): BatchNorm2d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  (residual_blocks): ModuleList(
+    (0-9): 10 x ResidualBlock(
+      (conv1): Conv2d(128, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn1): BatchNorm2d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (conv2): Conv2d(128, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn2): BatchNorm2d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    )
+  )
+  (policy_conv): Conv2d(128, 2, kernel_size=(1, 1), stride=(1, 1), bias=False)
+  (policy_bn): BatchNorm2d(2, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  (policy_fc): Linear(in_features=128, out_features=4672, bias=True)
+  (value_conv): Conv2d(128, 1, kernel_size=(1, 1), stride=(1, 1), bias=False)
+  (value_bn): BatchNorm2d(1, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  (value_fc1): Linear(in_features=64, out_features=64, bias=True)
+  (value_fc2): Linear(in_features=64, out_features=1, bias=True)
+)
+2025-06-12 18:00:54,297 - INFO - 
+Starting training from epoch 1 for 10 total epochs...
+2025-06-12 18:01:05,011 - INFO - Epoch 1, Batch 0: P_Loss=8.4948, V_Loss=0.9376, T_Loss=9.4324, GPU Xfer: 1.63ms, FW: 485.11ms, BW: 114.91ms, Total Batch Time: 669.88ms
+2025-06-12 18:01:23,069 - INFO - Epoch 1, Batch 100: P_Loss=5.9604, V_Loss=0.9064, T_Loss=6.8668, GPU Xfer: 0.44ms, FW: 37.96ms, BW: 59.90ms, Total Batch Time: 100.91ms
+2025-06-12 18:01:41,807 - INFO - Epoch 1, Batch 200: P_Loss=5.7069, V_Loss=0.9010, T_Loss=6.6079, GPU Xfer: 0.45ms, FW: 38.24ms, BW: 59.89ms, Total Batch Time: 101.62ms
+2025-06-12 18:02:00,983 - INFO - Epoch 1, Batch 300: P_Loss=5.4288, V_Loss=0.8999, T_Loss=6.3287, GPU Xfer: 0.38ms, FW: 38.61ms, BW: 59.97ms, Total Batch Time: 101.59ms
+2025-06-12 18:02:20,883 - INFO - Epoch 1, Batch 400: P_Loss=5.1508, V_Loss=0.8446, T_Loss=5.9954, GPU Xfer: 0.42ms, FW: 39.91ms, BW: 61.20ms, Total Batch Time: 104.78ms
+2025-06-12 18:02:39,457 - INFO - Epoch 1, Batch 500: P_Loss=4.5771, V_Loss=0.8728, T_Loss=5.4499, GPU Xfer: 0.41ms, FW: 40.18ms, BW: 61.84ms, Total Batch Time: 105.18ms
+2025-06-12 18:02:58,184 - INFO - Epoch 1, Batch 600: P_Loss=4.3497, V_Loss=0.8650, T_Loss=5.2147, GPU Xfer: 0.41ms, FW: 42.27ms, BW: 60.75ms, Total Batch Time: 106.07ms
+2025-06-12 18:03:16,874 - INFO - Epoch 1, Batch 700: P_Loss=4.1412, V_Loss=0.8742, T_Loss=5.0154, GPU Xfer: 0.37ms, FW: 41.20ms, BW: 60.36ms, Total Batch Time: 104.94ms
+2025-06-12 18:03:35,435 - INFO - Epoch 1, Batch 800: P_Loss=3.8930, V_Loss=0.8649, T_Loss=4.7579, GPU Xfer: 0.38ms, FW: 41.19ms, BW: 61.25ms, Total Batch Time: 105.92ms
+2025-06-12 18:03:54,076 - INFO - Epoch 1, Batch 900: P_Loss=3.9323, V_Loss=0.8578, T_Loss=4.7901, GPU Xfer: 0.41ms, FW: 41.90ms, BW: 60.24ms, Total Batch Time: 105.21ms
+2025-06-12 18:04:12,742 - INFO - Epoch 1, Batch 1000: P_Loss=3.9374, V_Loss=0.8415, T_Loss=4.7790, GPU Xfer: 0.40ms, FW: 66.55ms, BW: 59.84ms, Total Batch Time: 130.45ms
+2025-06-12 18:04:31,419 - INFO - Epoch 1, Batch 1100: P_Loss=3.3414, V_Loss=0.9093, T_Loss=4.2507, GPU Xfer: 0.40ms, FW: 41.60ms, BW: 61.04ms, Total Batch Time: 105.67ms
+2025-06-12 18:04:50,068 - INFO - Epoch 1, Batch 1200: P_Loss=3.4410, V_Loss=0.8366, T_Loss=4.2776, GPU Xfer: 0.38ms, FW: 42.17ms, BW: 60.39ms, Total Batch Time: 106.02ms
+2025-06-12 18:05:08,646 - INFO - Epoch 1, Batch 1300: P_Loss=3.4442, V_Loss=0.8356, T_Loss=4.2798, GPU Xfer: 0.36ms, FW: 41.98ms, BW: 60.11ms, Total Batch Time: 104.96ms
+2025-06-12 18:05:27,332 - INFO - Epoch 1, Batch 1400: P_Loss=3.4276, V_Loss=0.8584, T_Loss=4.2860, GPU Xfer: 0.37ms, FW: 41.31ms, BW: 61.23ms, Total Batch Time: 105.61ms
+2025-06-12 18:05:45,959 - INFO - Epoch 1, Batch 1500: P_Loss=3.4215, V_Loss=0.8288, T_Loss=4.2503, GPU Xfer: 0.40ms, FW: 41.88ms, BW: 60.21ms, Total Batch Time: 105.59ms
+2025-06-12 18:06:04,570 - INFO - Epoch 1, Batch 1600: P_Loss=3.2141, V_Loss=0.8264, T_Loss=4.0406, GPU Xfer: 0.51ms, FW: 41.45ms, BW: 59.91ms, Total Batch Time: 105.05ms
+2025-06-12 18:06:23,399 - INFO - Epoch 1, Batch 1700: P_Loss=2.9801, V_Loss=0.8223, T_Loss=3.8025, GPU Xfer: 0.38ms, FW: 42.12ms, BW: 60.34ms, Total Batch Time: 105.98ms
+2025-06-12 18:06:42,019 - INFO - Epoch 1, Batch 1800: P_Loss=3.1905, V_Loss=0.8474, T_Loss=4.0379, GPU Xfer: 0.39ms, FW: 41.94ms, BW: 60.41ms, Total Batch Time: 105.14ms
+2025-06-12 18:07:00,607 - INFO - Epoch 1, Batch 1900: P_Loss=3.0634, V_Loss=0.8148, T_Loss=3.8782, GPU Xfer: 0.47ms, FW: 42.38ms, BW: 60.42ms, Total Batch Time: 106.87ms
+2025-06-12 18:07:19,206 - INFO - Epoch 1, Batch 2000: P_Loss=3.0864, V_Loss=0.8608, T_Loss=3.9472, GPU Xfer: 0.38ms, FW: 42.22ms, BW: 60.35ms, Total Batch Time: 105.31ms
+2025-06-12 18:07:37,866 - INFO - Epoch 1, Batch 2100: P_Loss=3.0394, V_Loss=0.8787, T_Loss=3.9181, GPU Xfer: 0.40ms, FW: 41.07ms, BW: 61.60ms, Total Batch Time: 105.59ms
+2025-06-12 18:07:56,438 - INFO - Epoch 1, Batch 2200: P_Loss=2.9739, V_Loss=0.8439, T_Loss=3.8178, GPU Xfer: 0.42ms, FW: 42.99ms, BW: 59.71ms, Total Batch Time: 106.41ms
+2025-06-12 18:08:15,076 - INFO - Epoch 1, Batch 2300: P_Loss=3.0679, V_Loss=0.8451, T_Loss=3.9130, GPU Xfer: 0.37ms, FW: 42.26ms, BW: 60.18ms, Total Batch Time: 105.92ms
+2025-06-12 18:08:33,625 - INFO - Epoch 1, Batch 2400: P_Loss=3.0169, V_Loss=0.8605, T_Loss=3.8774, GPU Xfer: 0.41ms, FW: 40.81ms, BW: 61.20ms, Total Batch Time: 105.51ms
+2025-06-12 18:08:52,198 - INFO - Epoch 1, Batch 2500: P_Loss=2.9707, V_Loss=0.8151, T_Loss=3.7858, GPU Xfer: 0.46ms, FW: 40.72ms, BW: 61.13ms, Total Batch Time: 105.28ms
+2025-06-12 18:09:10,796 - INFO - Epoch 1, Batch 2600: P_Loss=2.9812, V_Loss=0.8363, T_Loss=3.8175, GPU Xfer: 0.39ms, FW: 41.05ms, BW: 60.68ms, Total Batch Time: 104.72ms
+2025-06-12 18:09:29,353 - INFO - Epoch 1, Batch 2700: P_Loss=2.9794, V_Loss=0.8234, T_Loss=3.8028, GPU Xfer: 0.38ms, FW: 41.93ms, BW: 60.30ms, Total Batch Time: 105.68ms
+2025-06-12 18:09:47,943 - INFO - Epoch 1, Batch 2800: P_Loss=2.7262, V_Loss=0.8306, T_Loss=3.5568, GPU Xfer: 0.41ms, FW: 41.77ms, BW: 60.67ms, Total Batch Time: 105.51ms
+2025-06-12 18:10:06,536 - INFO - Epoch 1, Batch 2900: P_Loss=2.9118, V_Loss=0.8141, T_Loss=3.7259, GPU Xfer: 0.40ms, FW: 42.43ms, BW: 60.43ms, Total Batch Time: 105.95ms
+2025-06-12 18:10:25,194 - INFO - Epoch 1, Batch 3000: P_Loss=2.9410, V_Loss=0.8542, T_Loss=3.7952, GPU Xfer: 0.37ms, FW: 41.88ms, BW: 60.77ms, Total Batch Time: 106.31ms
+2025-06-12 18:10:44,056 - INFO - Epoch 1, Batch 3100: P_Loss=2.8485, V_Loss=0.8328, T_Loss=3.6813, GPU Xfer: 0.39ms, FW: 41.87ms, BW: 60.58ms, Total Batch Time: 105.46ms
+2025-06-12 18:11:02,606 - INFO - Epoch 1, Batch 3200: P_Loss=2.8289, V_Loss=0.7850, T_Loss=3.6139, GPU Xfer: 0.41ms, FW: 41.85ms, BW: 60.42ms, Total Batch Time: 105.15ms
+2025-06-12 18:11:21,260 - INFO - Epoch 1, Batch 3300: P_Loss=2.8133, V_Loss=0.8378, T_Loss=3.6511, GPU Xfer: 0.41ms, FW: 42.01ms, BW: 60.28ms, Total Batch Time: 105.96ms
+2025-06-12 18:11:39,833 - INFO - Epoch 1, Batch 3400: P_Loss=2.7584, V_Loss=0.8561, T_Loss=3.6144, GPU Xfer: 0.42ms, FW: 43.45ms, BW: 62.50ms, Total Batch Time: 109.77ms
+2025-06-12 18:11:58,471 - INFO - Epoch 1, Batch 3500: P_Loss=2.8250, V_Loss=0.8208, T_Loss=3.6459, GPU Xfer: 0.41ms, FW: 41.51ms, BW: 60.08ms, Total Batch Time: 104.76ms
+2025-06-12 18:12:17,137 - INFO - Epoch 1, Batch 3600: P_Loss=2.7710, V_Loss=0.8356, T_Loss=3.6066, GPU Xfer: 0.37ms, FW: 40.24ms, BW: 59.74ms, Total Batch Time: 103.19ms
+2025-06-12 18:12:35,584 - INFO - Epoch 1, Batch 3700: P_Loss=2.6749, V_Loss=0.8457, T_Loss=3.5206, GPU Xfer: 0.40ms, FW: 40.19ms, BW: 59.35ms, Total Batch Time: 102.64ms
+2025-06-12 18:12:53,900 - INFO - Epoch 1, Batch 3800: P_Loss=2.7447, V_Loss=0.8473, T_Loss=3.5921, GPU Xfer: 0.42ms, FW: 39.41ms, BW: 60.27ms, Total Batch Time: 103.33ms
+2025-06-12 18:13:12,275 - INFO - Epoch 1, Batch 3900: P_Loss=2.8290, V_Loss=0.8235, T_Loss=3.6525, GPU Xfer: 0.45ms, FW: 39.29ms, BW: 60.51ms, Total Batch Time: 103.05ms
+2025-06-12 18:13:30,819 - INFO - Epoch 1, Batch 4000: P_Loss=2.6071, V_Loss=0.8139, T_Loss=3.4210, GPU Xfer: 0.37ms, FW: 39.93ms, BW: 59.81ms, Total Batch Time: 103.21ms
+2025-06-12 18:13:49,119 - INFO - Epoch 1, Batch 4100: P_Loss=2.6850, V_Loss=0.8238, T_Loss=3.5088, GPU Xfer: 0.41ms, FW: 39.99ms, BW: 60.39ms, Total Batch Time: 103.63ms
+2025-06-12 18:14:07,433 - INFO - Epoch 1, Batch 4200: P_Loss=2.5429, V_Loss=0.8308, T_Loss=3.3737, GPU Xfer: 0.44ms, FW: 39.63ms, BW: 60.17ms, Total Batch Time: 103.62ms
+2025-06-12 18:14:25,764 - INFO - Epoch 1, Batch 4300: P_Loss=2.8263, V_Loss=0.8439, T_Loss=3.6702, GPU Xfer: 0.38ms, FW: 39.83ms, BW: 59.91ms, Total Batch Time: 102.62ms
+2025-06-12 18:14:44,083 - INFO - Epoch 1, Batch 4400: P_Loss=2.6344, V_Loss=0.8109, T_Loss=3.4453, GPU Xfer: 0.37ms, FW: 40.23ms, BW: 59.95ms, Total Batch Time: 103.23ms
+2025-06-12 18:15:02,484 - INFO - Epoch 1, Batch 4500: P_Loss=2.5072, V_Loss=0.8081, T_Loss=3.3153, GPU Xfer: 0.38ms, FW: 39.91ms, BW: 60.14ms, Total Batch Time: 103.70ms
+2025-06-12 18:15:20,782 - INFO - Epoch 1, Batch 4600: P_Loss=2.5873, V_Loss=0.7985, T_Loss=3.3858, GPU Xfer: 0.37ms, FW: 39.41ms, BW: 60.61ms, Total Batch Time: 102.88ms
+2025-06-12 18:15:39,115 - INFO - Epoch 1, Batch 4700: P_Loss=2.5815, V_Loss=0.8183, T_Loss=3.3998, GPU Xfer: 0.37ms, FW: 40.13ms, BW: 59.49ms, Total Batch Time: 102.71ms
+2025-06-12 18:15:57,423 - INFO - Epoch 1, Batch 4800: P_Loss=2.6536, V_Loss=0.8122, T_Loss=3.4658, GPU Xfer: 0.44ms, FW: 39.43ms, BW: 60.11ms, Total Batch Time: 102.45ms
+2025-06-12 18:16:15,757 - INFO - Epoch 1, Batch 4900: P_Loss=2.5391, V_Loss=0.8398, T_Loss=3.3788, GPU Xfer: 0.42ms, FW: 40.24ms, BW: 59.74ms, Total Batch Time: 102.90ms
+2025-06-12 18:16:34,167 - INFO - Epoch 1, Batch 5000: P_Loss=2.8073, V_Loss=0.8162, T_Loss=3.6235, GPU Xfer: 0.37ms, FW: 39.91ms, BW: 59.66ms, Total Batch Time: 102.38ms
+2025-06-12 18:16:52,534 - INFO - Epoch 1, Batch 5100: P_Loss=2.5535, V_Loss=0.8314, T_Loss=3.3849, GPU Xfer: 0.45ms, FW: 40.01ms, BW: 59.22ms, Total Batch Time: 102.44ms
+2025-06-12 18:17:10,837 - INFO - Epoch 1, Batch 5200: P_Loss=2.5880, V_Loss=0.8324, T_Loss=3.4204, GPU Xfer: 0.38ms, FW: 39.56ms, BW: 60.03ms, Total Batch Time: 102.62ms
+2025-06-12 18:17:29,157 - INFO - Epoch 1, Batch 5300: P_Loss=2.5050, V_Loss=0.8758, T_Loss=3.3807, GPU Xfer: 0.36ms, FW: 40.02ms, BW: 59.51ms, Total Batch Time: 102.41ms
+2025-06-12 18:17:47,636 - INFO - Epoch 1, Batch 5400: P_Loss=2.4683, V_Loss=0.8377, T_Loss=3.3060, GPU Xfer: 0.37ms, FW: 39.78ms, BW: 59.47ms, Total Batch Time: 103.06ms
+2025-06-12 18:18:05,911 - INFO - Epoch 1, Batch 5500: P_Loss=2.5905, V_Loss=0.7889, T_Loss=3.3794, GPU Xfer: 0.52ms, FW: 40.06ms, BW: 59.93ms, Total Batch Time: 103.63ms
+2025-06-12 18:18:24,249 - INFO - Epoch 1, Batch 5600: P_Loss=2.5377, V_Loss=0.7902, T_Loss=3.3279, GPU Xfer: 0.50ms, FW: 40.79ms, BW: 59.30ms, Total Batch Time: 103.96ms
+2025-06-12 18:18:42,577 - INFO - Epoch 1, Batch 5700: P_Loss=2.6231, V_Loss=0.8036, T_Loss=3.4266, GPU Xfer: 0.38ms, FW: 39.58ms, BW: 60.08ms, Total Batch Time: 102.51ms
+2025-06-12 18:19:00,877 - INFO - Epoch 1, Batch 5800: P_Loss=2.4734, V_Loss=0.8054, T_Loss=3.2788, GPU Xfer: 0.41ms, FW: 40.17ms, BW: 59.56ms, Total Batch Time: 102.79ms
+2025-06-12 18:19:19,298 - INFO - Epoch 1, Batch 5900: P_Loss=2.5205, V_Loss=0.8425, T_Loss=3.3630, GPU Xfer: 0.42ms, FW: 40.23ms, BW: 59.75ms, Total Batch Time: 102.90ms
+2025-06-12 18:19:37,570 - INFO - Epoch 1, Batch 6000: P_Loss=2.4849, V_Loss=0.7983, T_Loss=3.2831, GPU Xfer: 0.37ms, FW: 39.36ms, BW: 60.30ms, Total Batch Time: 102.58ms
+2025-06-12 18:19:55,859 - INFO - Epoch 1, Batch 6100: P_Loss=2.5714, V_Loss=0.8224, T_Loss=3.3938, GPU Xfer: 0.38ms, FW: 40.44ms, BW: 59.29ms, Total Batch Time: 102.53ms
+2025-06-12 18:20:14,213 - INFO - Epoch 1, Batch 6200: P_Loss=2.4807, V_Loss=0.8451, T_Loss=3.3258, GPU Xfer: 0.37ms, FW: 39.89ms, BW: 59.66ms, Total Batch Time: 103.09ms
+2025-06-12 18:20:32,496 - INFO - Epoch 1, Batch 6300: P_Loss=2.5995, V_Loss=0.8177, T_Loss=3.4172, GPU Xfer: 0.38ms, FW: 39.64ms, BW: 60.54ms, Total Batch Time: 103.27ms
+2025-06-12 18:20:50,918 - INFO - Epoch 1, Batch 6400: P_Loss=2.6243, V_Loss=0.8278, T_Loss=3.4521, GPU Xfer: 0.37ms, FW: 39.45ms, BW: 60.07ms, Total Batch Time: 102.98ms
+2025-06-12 18:21:09,239 - INFO - Epoch 1, Batch 6500: P_Loss=2.6904, V_Loss=0.7861, T_Loss=3.4765, GPU Xfer: 0.37ms, FW: 39.55ms, BW: 59.97ms, Total Batch Time: 102.41ms
+2025-06-12 18:21:27,538 - INFO - Epoch 1, Batch 6600: P_Loss=2.5090, V_Loss=0.7989, T_Loss=3.3079, GPU Xfer: 0.42ms, FW: 64.62ms, BW: 59.36ms, Total Batch Time: 127.83ms
+2025-06-12 18:21:45,830 - INFO - Epoch 1, Batch 6700: P_Loss=2.4578, V_Loss=0.8427, T_Loss=3.3005, GPU Xfer: 0.38ms, FW: 40.01ms, BW: 59.68ms, Total Batch Time: 102.55ms
+2025-06-12 18:22:04,183 - INFO - Epoch 1, Batch 6800: P_Loss=2.5662, V_Loss=0.8489, T_Loss=3.4151, GPU Xfer: 0.37ms, FW: 40.07ms, BW: 59.42ms, Total Batch Time: 102.48ms
+2025-06-12 18:22:22,598 - INFO - Epoch 1, Batch 6900: P_Loss=2.5213, V_Loss=0.8107, T_Loss=3.3320, GPU Xfer: 0.37ms, FW: 39.92ms, BW: 60.02ms, Total Batch Time: 102.92ms
+2025-06-12 18:22:40,922 - INFO - Epoch 1, Batch 7000: P_Loss=2.4716, V_Loss=0.7856, T_Loss=3.2573, GPU Xfer: 0.42ms, FW: 40.02ms, BW: 59.76ms, Total Batch Time: 103.50ms
+2025-06-12 18:22:59,223 - INFO - Epoch 1, Batch 7100: P_Loss=2.4165, V_Loss=0.8193, T_Loss=3.2358, GPU Xfer: 0.36ms, FW: 39.93ms, BW: 59.88ms, Total Batch Time: 102.70ms
+2025-06-12 18:23:17,547 - INFO - Epoch 1, Batch 7200: P_Loss=2.4681, V_Loss=0.8206, T_Loss=3.2887, GPU Xfer: 0.43ms, FW: 40.58ms, BW: 59.83ms, Total Batch Time: 103.52ms
+2025-06-12 18:23:35,869 - INFO - Epoch 1, Batch 7300: P_Loss=2.4993, V_Loss=0.7819, T_Loss=3.2811, GPU Xfer: 0.38ms, FW: 39.54ms, BW: 60.06ms, Total Batch Time: 102.84ms
+2025-06-12 18:23:54,285 - INFO - Epoch 1, Batch 7400: P_Loss=2.5078, V_Loss=0.8624, T_Loss=3.3702, GPU Xfer: 0.41ms, FW: 39.44ms, BW: 60.01ms, Total Batch Time: 102.80ms
+2025-06-12 18:24:12,505 - INFO - Epoch 1, Batch 7500: P_Loss=2.4911, V_Loss=0.8283, T_Loss=3.3194, GPU Xfer: 0.39ms, FW: 39.43ms, BW: 59.95ms, Total Batch Time: 103.04ms
+2025-06-12 18:24:30,789 - INFO - Epoch 1, Batch 7600: P_Loss=2.5999, V_Loss=0.8629, T_Loss=3.4628, GPU Xfer: 0.37ms, FW: 39.77ms, BW: 60.38ms, Total Batch Time: 103.74ms
+2025-06-12 18:24:49,123 - INFO - Epoch 1, Batch 7700: P_Loss=2.5987, V_Loss=0.7827, T_Loss=3.3814, GPU Xfer: 0.46ms, FW: 40.56ms, BW: 59.84ms, Total Batch Time: 103.97ms
+2025-06-12 18:25:07,446 - INFO - Epoch 1, Batch 7800: P_Loss=2.3517, V_Loss=0.8363, T_Loss=3.1881, GPU Xfer: 0.37ms, FW: 39.96ms, BW: 59.79ms, Total Batch Time: 103.29ms
+2025-06-12 18:25:25,785 - INFO - Epoch 1, Batch 7900: P_Loss=2.3730, V_Loss=0.7712, T_Loss=3.1442, GPU Xfer: 0.37ms, FW: 39.90ms, BW: 59.89ms, Total Batch Time: 102.76ms
+2025-06-12 18:25:44,169 - INFO - Epoch 1, Batch 8000: P_Loss=2.3855, V_Loss=0.8728, T_Loss=3.2584, GPU Xfer: 0.37ms, FW: 40.11ms, BW: 59.10ms, Total Batch Time: 102.16ms
+2025-06-12 18:26:02,475 - INFO - Epoch 1, Batch 8100: P_Loss=2.3848, V_Loss=0.8028, T_Loss=3.1876, GPU Xfer: 0.48ms, FW: 40.40ms, BW: 59.61ms, Total Batch Time: 103.61ms
+2025-06-12 18:26:20,810 - INFO - Epoch 1, Batch 8200: P_Loss=2.3193, V_Loss=0.8324, T_Loss=3.1517, GPU Xfer: 0.37ms, FW: 39.23ms, BW: 60.24ms, Total Batch Time: 102.39ms
+2025-06-12 18:26:39,225 - INFO - Epoch 1, Batch 8300: P_Loss=2.4503, V_Loss=0.8035, T_Loss=3.2538, GPU Xfer: 0.37ms, FW: 39.37ms, BW: 60.52ms, Total Batch Time: 102.95ms
+2025-06-12 18:26:57,581 - INFO - Epoch 1, Batch 8400: P_Loss=2.4354, V_Loss=0.7990, T_Loss=3.2344, GPU Xfer: 0.37ms, FW: 39.99ms, BW: 60.00ms, Total Batch Time: 102.86ms
+2025-06-12 18:27:15,900 - INFO - Epoch 1, Batch 8500: P_Loss=2.5203, V_Loss=0.8682, T_Loss=3.3885, GPU Xfer: 0.37ms, FW: 39.32ms, BW: 60.10ms, Total Batch Time: 102.19ms
+2025-06-12 18:27:34,233 - INFO - Epoch 1, Batch 8600: P_Loss=2.4051, V_Loss=0.7753, T_Loss=3.1805, GPU Xfer: 0.37ms, FW: 39.54ms, BW: 60.81ms, Total Batch Time: 103.39ms
+2025-06-12 18:27:52,523 - INFO - Epoch 1, Batch 8700: P_Loss=2.3040, V_Loss=0.7978, T_Loss=3.1018, GPU Xfer: 0.38ms, FW: 40.05ms, BW: 59.54ms, Total Batch Time: 102.76ms
+2025-06-12 18:28:11,085 - INFO - Epoch 1, Batch 8800: P_Loss=2.3940, V_Loss=0.8505, T_Loss=3.2445, GPU Xfer: 0.41ms, FW: 40.47ms, BW: 59.67ms, Total Batch Time: 103.12ms
+2025-06-12 18:28:29,419 - INFO - Epoch 1, Batch 8900: P_Loss=2.4121, V_Loss=0.8362, T_Loss=3.2483, GPU Xfer: 0.48ms, FW: 40.14ms, BW: 59.81ms, Total Batch Time: 103.47ms
+2025-06-12 18:28:47,754 - INFO - Epoch 1, Batch 9000: P_Loss=2.2063, V_Loss=0.8246, T_Loss=3.0309, GPU Xfer: 0.37ms, FW: 39.54ms, BW: 60.33ms, Total Batch Time: 102.62ms
+2025-06-12 18:29:06,076 - INFO - Epoch 1, Batch 9100: P_Loss=2.4848, V_Loss=0.7818, T_Loss=3.2666, GPU Xfer: 0.41ms, FW: 40.36ms, BW: 59.70ms, Total Batch Time: 103.61ms
+2025-06-12 18:29:24,363 - INFO - Epoch 1, Batch 9200: P_Loss=2.3404, V_Loss=0.8137, T_Loss=3.1540, GPU Xfer: 0.41ms, FW: 39.62ms, BW: 60.06ms, Total Batch Time: 103.33ms
+2025-06-12 18:29:42,731 - INFO - Epoch 1, Batch 9300: P_Loss=2.4162, V_Loss=0.8151, T_Loss=3.2313, GPU Xfer: 0.36ms, FW: 39.63ms, BW: 60.16ms, Total Batch Time: 103.41ms
+2025-06-12 18:30:01,082 - INFO - Epoch 1, Batch 9400: P_Loss=2.3844, V_Loss=0.7823, T_Loss=3.1667, GPU Xfer: 0.45ms, FW: 39.69ms, BW: 60.17ms, Total Batch Time: 103.34ms
+2025-06-12 18:30:19,432 - INFO - Epoch 1, Batch 9500: P_Loss=2.3772, V_Loss=0.8348, T_Loss=3.2119, GPU Xfer: 0.41ms, FW: 39.99ms, BW: 59.77ms, Total Batch Time: 102.55ms
+2025-06-12 18:30:32,604 - INFO - --- Epoch 1 Train Summary ---
+2025-06-12 18:30:32,604 - INFO - Average Policy Loss: 2.9163
+2025-06-12 18:30:32,604 - INFO - Average Value Loss: 0.8271
+2025-06-12 18:30:32,604 - INFO - Average Total Loss: 3.7434
+2025-06-12 18:30:32,604 - INFO - Current Learning Rate: 0.001000
+2025-06-12 18:31:15,860 - INFO - --- Epoch 1 Val Summary ---
+2025-06-12 18:31:15,860 - INFO - Average Policy Loss: 2.3721
+2025-06-12 18:31:15,860 - INFO - Average Value Loss: 0.8215
+2025-06-12 18:31:15,860 - INFO - Average Total Loss: 3.1936
+2025-06-12 18:31:15,861 - INFO - New best validation loss: 3.1936. Saving best model...
+2025-06-12 18:31:15,983 - INFO - Model checkpoint saved to C:\Users\User\Projects\talbot\model\checkpoints_supervised\chess_ai_model_epoch_1.pth
+2025-06-12 18:31:26,207 - INFO - Epoch 2, Batch 0: P_Loss=2.2184, V_Loss=0.7944, T_Loss=3.0128, GPU Xfer: 1.11ms, FW: 193.50ms, BW: 66.77ms, Total Batch Time: 263.95ms
+2025-06-12 18:31:44,375 - INFO - Epoch 2, Batch 100: P_Loss=2.4172, V_Loss=0.8013, T_Loss=3.2185, GPU Xfer: 0.46ms, FW: 37.88ms, BW: 59.40ms, Total Batch Time: 100.79ms
+2025-06-12 18:32:02,910 - INFO - Epoch 2, Batch 200: P_Loss=2.2230, V_Loss=0.7729, T_Loss=2.9960, GPU Xfer: 0.43ms, FW: 37.55ms, BW: 59.23ms, Total Batch Time: 99.61ms
+2025-06-12 18:32:21,259 - INFO - Epoch 2, Batch 300: P_Loss=2.3031, V_Loss=0.7911, T_Loss=3.0942, GPU Xfer: 0.42ms, FW: 37.79ms, BW: 58.95ms, Total Batch Time: 99.70ms
+2025-06-12 18:32:40,895 - INFO - Epoch 2, Batch 400: P_Loss=2.2628, V_Loss=0.7945, T_Loss=3.0572, GPU Xfer: 0.44ms, FW: 37.92ms, BW: 59.18ms, Total Batch Time: 100.13ms
+2025-06-12 18:51:49,193 - INFO - Epoch 2, Batch 500: P_Loss=2.3091, V_Loss=0.7886, T_Loss=3.0977, GPU Xfer: 0.41ms, FW: 38.30ms, BW: 62.20ms, Total Batch Time: 103.83ms
+2025-06-12 18:52:10,112 - INFO - Epoch 2, Batch 600: P_Loss=2.3248, V_Loss=0.7932, T_Loss=3.1181, GPU Xfer: 0.45ms, FW: 37.92ms, BW: 59.53ms, Total Batch Time: 101.70ms
+2025-06-12 18:52:29,875 - INFO - Epoch 2, Batch 700: P_Loss=2.4170, V_Loss=0.8352, T_Loss=3.2522, GPU Xfer: 0.41ms, FW: 37.97ms, BW: 59.03ms, Total Batch Time: 100.55ms
+2025-06-12 18:52:49,076 - INFO - Epoch 2, Batch 800: P_Loss=2.3673, V_Loss=0.8020, T_Loss=3.1693, GPU Xfer: 0.53ms, FW: 44.48ms, BW: 68.07ms, Total Batch Time: 117.07ms
+2025-06-12 18:53:09,743 - INFO - Epoch 2, Batch 900: P_Loss=2.2468, V_Loss=0.8528, T_Loss=3.0996, GPU Xfer: 0.38ms, FW: 37.70ms, BW: 59.53ms, Total Batch Time: 100.59ms
+2025-06-12 18:53:30,198 - INFO - Epoch 2, Batch 1000: P_Loss=2.2147, V_Loss=0.7882, T_Loss=3.0028, GPU Xfer: 0.39ms, FW: 37.75ms, BW: 59.81ms, Total Batch Time: 100.58ms
+2025-06-12 18:53:50,196 - INFO - Epoch 2, Batch 1100: P_Loss=2.2617, V_Loss=0.8089, T_Loss=3.0707, GPU Xfer: 0.42ms, FW: 42.46ms, BW: 65.98ms, Total Batch Time: 113.49ms
+2025-06-12 18:54:10,065 - INFO - Epoch 2, Batch 1200: P_Loss=2.2685, V_Loss=0.7911, T_Loss=3.0596, GPU Xfer: 0.43ms, FW: 38.06ms, BW: 60.47ms, Total Batch Time: 102.84ms
+2025-06-12 18:54:29,689 - INFO - Epoch 2, Batch 1300: P_Loss=2.3257, V_Loss=0.8175, T_Loss=3.1431, GPU Xfer: 0.46ms, FW: 42.41ms, BW: 61.94ms, Total Batch Time: 107.42ms
+2025-06-12 18:54:50,006 - INFO - Epoch 2, Batch 1400: P_Loss=2.2188, V_Loss=0.8168, T_Loss=3.0356, GPU Xfer: 0.43ms, FW: 37.82ms, BW: 60.43ms, Total Batch Time: 101.98ms
+2025-06-12 18:55:09,139 - INFO - Epoch 2, Batch 1500: P_Loss=2.2065, V_Loss=0.7689, T_Loss=2.9754, GPU Xfer: 0.43ms, FW: 37.80ms, BW: 59.72ms, Total Batch Time: 100.38ms
+2025-06-12 18:55:29,062 - INFO - Epoch 2, Batch 1600: P_Loss=2.4464, V_Loss=0.7700, T_Loss=3.2165, GPU Xfer: 0.37ms, FW: 37.95ms, BW: 60.83ms, Total Batch Time: 102.04ms
+2025-06-12 18:55:48,953 - INFO - Epoch 2, Batch 1700: P_Loss=2.2197, V_Loss=0.8249, T_Loss=3.0446, GPU Xfer: 0.49ms, FW: 37.84ms, BW: 59.63ms, Total Batch Time: 101.69ms
+2025-06-12 18:56:08,797 - INFO - Epoch 2, Batch 1800: P_Loss=2.2567, V_Loss=0.7842, T_Loss=3.0409, GPU Xfer: 0.47ms, FW: 41.75ms, BW: 66.66ms, Total Batch Time: 113.56ms
+2025-06-12 18:56:27,632 - INFO - Epoch 2, Batch 1900: P_Loss=2.2061, V_Loss=0.8241, T_Loss=3.0301, GPU Xfer: 0.49ms, FW: 38.41ms, BW: 59.65ms, Total Batch Time: 101.39ms
+2025-06-12 18:56:47,185 - INFO - Epoch 2, Batch 2000: P_Loss=2.2436, V_Loss=0.7944, T_Loss=3.0379, GPU Xfer: 0.38ms, FW: 38.04ms, BW: 59.56ms, Total Batch Time: 100.90ms
+2025-06-12 18:57:05,872 - INFO - Epoch 2, Batch 2100: P_Loss=2.3752, V_Loss=0.7627, T_Loss=3.1380, GPU Xfer: 0.43ms, FW: 38.13ms, BW: 60.20ms, Total Batch Time: 101.18ms
+2025-06-12 18:57:24,484 - INFO - Epoch 2, Batch 2200: P_Loss=2.2181, V_Loss=0.7666, T_Loss=2.9847, GPU Xfer: 0.40ms, FW: 37.86ms, BW: 60.08ms, Total Batch Time: 101.79ms
+2025-06-12 18:57:43,192 - INFO - Epoch 2, Batch 2300: P_Loss=2.2126, V_Loss=0.7663, T_Loss=2.9789, GPU Xfer: 0.43ms, FW: 39.06ms, BW: 59.46ms, Total Batch Time: 101.45ms
+2025-06-12 18:58:01,783 - INFO - Epoch 2, Batch 2400: P_Loss=2.2981, V_Loss=0.8210, T_Loss=3.1191, GPU Xfer: 0.38ms, FW: 38.31ms, BW: 60.82ms, Total Batch Time: 102.13ms
+2025-06-12 18:58:20,364 - INFO - Epoch 2, Batch 2500: P_Loss=2.3374, V_Loss=0.8219, T_Loss=3.1593, GPU Xfer: 0.39ms, FW: 37.81ms, BW: 59.46ms, Total Batch Time: 100.63ms
+2025-06-12 18:58:39,102 - INFO - Epoch 2, Batch 2600: P_Loss=2.3314, V_Loss=0.8585, T_Loss=3.1899, GPU Xfer: 0.48ms, FW: 40.09ms, BW: 62.27ms, Total Batch Time: 106.25ms
+2025-06-12 18:58:57,778 - INFO - Epoch 2, Batch 2700: P_Loss=2.2863, V_Loss=0.7849, T_Loss=3.0712, GPU Xfer: 0.47ms, FW: 38.00ms, BW: 60.40ms, Total Batch Time: 101.71ms
+2025-06-12 18:59:16,380 - INFO - Epoch 2, Batch 2800: P_Loss=2.2385, V_Loss=0.8303, T_Loss=3.0689, GPU Xfer: 0.38ms, FW: 37.73ms, BW: 59.76ms, Total Batch Time: 100.35ms
+2025-06-12 18:59:34,997 - INFO - Epoch 2, Batch 2900: P_Loss=2.3069, V_Loss=0.8099, T_Loss=3.1168, GPU Xfer: 0.38ms, FW: 37.95ms, BW: 60.40ms, Total Batch Time: 101.31ms
+2025-06-12 18:59:53,799 - INFO - Epoch 2, Batch 3000: P_Loss=2.2652, V_Loss=0.7922, T_Loss=3.0573, GPU Xfer: 0.43ms, FW: 37.87ms, BW: 60.60ms, Total Batch Time: 101.73ms
+2025-06-12 19:00:12,443 - INFO - Epoch 2, Batch 3100: P_Loss=2.1694, V_Loss=0.8375, T_Loss=3.0069, GPU Xfer: 0.42ms, FW: 37.98ms, BW: 59.50ms, Total Batch Time: 100.31ms
+2025-06-12 19:00:31,231 - INFO - Epoch 2, Batch 3200: P_Loss=2.3286, V_Loss=0.7787, T_Loss=3.1073, GPU Xfer: 0.38ms, FW: 37.78ms, BW: 59.77ms, Total Batch Time: 100.37ms
+2025-06-12 19:00:49,939 - INFO - Epoch 2, Batch 3300: P_Loss=2.1811, V_Loss=0.8221, T_Loss=3.0032, GPU Xfer: 0.38ms, FW: 37.80ms, BW: 59.74ms, Total Batch Time: 100.61ms
+2025-06-12 19:01:08,605 - INFO - Epoch 2, Batch 3400: P_Loss=2.2314, V_Loss=0.8042, T_Loss=3.0357, GPU Xfer: 0.38ms, FW: 37.95ms, BW: 59.09ms, Total Batch Time: 100.99ms
+2025-06-12 19:01:27,399 - INFO - Epoch 2, Batch 3500: P_Loss=2.2917, V_Loss=0.7936, T_Loss=3.0853, GPU Xfer: 0.40ms, FW: 38.80ms, BW: 59.81ms, Total Batch Time: 101.64ms
+2025-06-12 19:01:46,015 - INFO - Epoch 2, Batch 3600: P_Loss=2.1365, V_Loss=0.7790, T_Loss=2.9155, GPU Xfer: 0.40ms, FW: 40.16ms, BW: 62.94ms, Total Batch Time: 105.91ms
+2025-06-12 19:02:04,618 - INFO - Epoch 2, Batch 3700: P_Loss=2.1149, V_Loss=0.7845, T_Loss=2.8994, GPU Xfer: 0.39ms, FW: 38.02ms, BW: 59.92ms, Total Batch Time: 100.85ms
+2025-06-12 19:02:23,169 - INFO - Epoch 2, Batch 3800: P_Loss=2.1606, V_Loss=0.7909, T_Loss=2.9515, GPU Xfer: 0.39ms, FW: 37.78ms, BW: 59.71ms, Total Batch Time: 100.24ms
+2025-06-12 19:02:41,750 - INFO - Epoch 2, Batch 3900: P_Loss=2.3061, V_Loss=0.8429, T_Loss=3.1489, GPU Xfer: 0.38ms, FW: 37.75ms, BW: 59.58ms, Total Batch Time: 100.46ms
+2025-06-12 19:03:00,390 - INFO - Epoch 2, Batch 4000: P_Loss=2.2457, V_Loss=0.7526, T_Loss=2.9983, GPU Xfer: 0.40ms, FW: 38.04ms, BW: 59.79ms, Total Batch Time: 101.08ms
+2025-06-12 19:03:18,906 - INFO - Epoch 2, Batch 4100: P_Loss=2.2548, V_Loss=0.8069, T_Loss=3.0617, GPU Xfer: 0.39ms, FW: 37.79ms, BW: 59.95ms, Total Batch Time: 100.68ms
+2025-06-12 19:03:37,496 - INFO - Epoch 2, Batch 4200: P_Loss=2.3368, V_Loss=0.8228, T_Loss=3.1595, GPU Xfer: 0.42ms, FW: 38.02ms, BW: 59.70ms, Total Batch Time: 100.67ms
+2025-06-12 19:03:56,140 - INFO - Epoch 2, Batch 4300: P_Loss=2.2189, V_Loss=0.8129, T_Loss=3.0318, GPU Xfer: 0.43ms, FW: 37.80ms, BW: 59.90ms, Total Batch Time: 100.70ms
+2025-06-12 19:04:14,720 - INFO - Epoch 2, Batch 4400: P_Loss=2.3749, V_Loss=0.7692, T_Loss=3.1441, GPU Xfer: 0.43ms, FW: 38.02ms, BW: 59.69ms, Total Batch Time: 100.67ms
+2025-06-12 19:04:33,411 - INFO - Epoch 2, Batch 4500: P_Loss=2.2135, V_Loss=0.8108, T_Loss=3.0243, GPU Xfer: 0.38ms, FW: 38.63ms, BW: 59.72ms, Total Batch Time: 101.12ms
+2025-06-12 19:04:52,075 - INFO - Epoch 2, Batch 4600: P_Loss=2.2976, V_Loss=0.7925, T_Loss=3.0901, GPU Xfer: 0.39ms, FW: 37.89ms, BW: 59.85ms, Total Batch Time: 100.93ms
+2025-06-12 19:05:10,717 - INFO - Epoch 2, Batch 4700: P_Loss=2.2012, V_Loss=0.7828, T_Loss=2.9841, GPU Xfer: 0.39ms, FW: 38.25ms, BW: 59.60ms, Total Batch Time: 101.02ms
+2025-06-12 19:05:29,257 - INFO - Epoch 2, Batch 4800: P_Loss=2.1898, V_Loss=0.7800, T_Loss=2.9698, GPU Xfer: 0.39ms, FW: 37.80ms, BW: 60.52ms, Total Batch Time: 101.62ms
+2025-06-12 19:05:47,808 - INFO - Epoch 2, Batch 4900: P_Loss=2.1830, V_Loss=0.8222, T_Loss=3.0052, GPU Xfer: 0.38ms, FW: 38.59ms, BW: 59.85ms, Total Batch Time: 102.00ms
+2025-06-12 19:06:06,478 - INFO - Epoch 2, Batch 5000: P_Loss=2.2094, V_Loss=0.8256, T_Loss=3.0350, GPU Xfer: 0.40ms, FW: 37.99ms, BW: 59.67ms, Total Batch Time: 100.48ms
+2025-06-12 19:06:25,069 - INFO - Epoch 2, Batch 5100: P_Loss=2.1510, V_Loss=0.7891, T_Loss=2.9401, GPU Xfer: 0.39ms, FW: 37.59ms, BW: 59.13ms, Total Batch Time: 100.28ms
+2025-06-12 19:06:43,481 - INFO - Epoch 2, Batch 5200: P_Loss=2.1382, V_Loss=0.7961, T_Loss=2.9344, GPU Xfer: 0.39ms, FW: 37.49ms, BW: 59.09ms, Total Batch Time: 99.92ms
+2025-06-12 19:07:01,827 - INFO - Epoch 2, Batch 5300: P_Loss=2.1946, V_Loss=0.7744, T_Loss=2.9690, GPU Xfer: 0.43ms, FW: 38.07ms, BW: 59.12ms, Total Batch Time: 100.56ms
+2025-06-12 19:07:20,158 - INFO - Epoch 2, Batch 5400: P_Loss=2.2826, V_Loss=0.8363, T_Loss=3.1189, GPU Xfer: 0.38ms, FW: 37.78ms, BW: 59.45ms, Total Batch Time: 100.45ms
+2025-06-12 19:07:38,467 - INFO - Epoch 2, Batch 5500: P_Loss=2.2651, V_Loss=0.7771, T_Loss=3.0422, GPU Xfer: 0.39ms, FW: 37.75ms, BW: 59.59ms, Total Batch Time: 100.43ms
+2025-06-12 19:07:56,758 - INFO - Epoch 2, Batch 5600: P_Loss=2.2026, V_Loss=0.8074, T_Loss=3.0100, GPU Xfer: 0.38ms, FW: 37.68ms, BW: 59.46ms, Total Batch Time: 100.47ms
+2025-06-12 19:08:15,149 - INFO - Epoch 2, Batch 5700: P_Loss=2.1676, V_Loss=0.7720, T_Loss=2.9396, GPU Xfer: 0.39ms, FW: 37.75ms, BW: 59.50ms, Total Batch Time: 100.19ms
+2025-06-12 19:08:33,413 - INFO - Epoch 2, Batch 5800: P_Loss=2.0426, V_Loss=0.7615, T_Loss=2.8041, GPU Xfer: 0.38ms, FW: 37.70ms, BW: 59.18ms, Total Batch Time: 99.63ms
+2025-06-12 19:08:51,799 - INFO - Epoch 2, Batch 5900: P_Loss=2.1399, V_Loss=0.7968, T_Loss=2.9367, GPU Xfer: 0.43ms, FW: 37.66ms, BW: 59.51ms, Total Batch Time: 100.11ms
+2025-06-12 19:09:10,070 - INFO - Epoch 2, Batch 6000: P_Loss=2.1022, V_Loss=0.7749, T_Loss=2.8770, GPU Xfer: 0.39ms, FW: 38.18ms, BW: 59.24ms, Total Batch Time: 100.23ms
+2025-06-12 19:09:28,393 - INFO - Epoch 2, Batch 6100: P_Loss=2.1170, V_Loss=0.8074, T_Loss=2.9243, GPU Xfer: 0.39ms, FW: 37.96ms, BW: 59.86ms, Total Batch Time: 100.82ms
+2025-06-12 19:09:46,719 - INFO - Epoch 2, Batch 6200: P_Loss=2.2495, V_Loss=0.8224, T_Loss=3.0719, GPU Xfer: 0.38ms, FW: 37.62ms, BW: 59.21ms, Total Batch Time: 100.19ms
+2025-06-12 19:10:05,075 - INFO - Epoch 2, Batch 6300: P_Loss=2.2704, V_Loss=0.7678, T_Loss=3.0382, GPU Xfer: 0.39ms, FW: 37.53ms, BW: 59.20ms, Total Batch Time: 99.75ms
+2025-06-12 19:10:23,414 - INFO - Epoch 2, Batch 6400: P_Loss=2.2163, V_Loss=0.8262, T_Loss=3.0425, GPU Xfer: 0.37ms, FW: 37.68ms, BW: 59.14ms, Total Batch Time: 99.65ms
+2025-06-12 19:10:41,762 - INFO - Epoch 2, Batch 6500: P_Loss=2.1564, V_Loss=0.8257, T_Loss=2.9821, GPU Xfer: 0.38ms, FW: 37.97ms, BW: 59.87ms, Total Batch Time: 100.90ms
+2025-06-12 19:11:01,657 - INFO - Epoch 2, Batch 6600: P_Loss=2.0447, V_Loss=0.7927, T_Loss=2.8374, GPU Xfer: 0.43ms, FW: 37.84ms, BW: 59.94ms, Total Batch Time: 101.51ms
+2025-06-12 19:11:21,665 - INFO - Epoch 2, Batch 6700: P_Loss=2.0987, V_Loss=0.7742, T_Loss=2.8729, GPU Xfer: 0.39ms, FW: 37.93ms, BW: 59.76ms, Total Batch Time: 100.49ms
+2025-06-12 19:11:40,627 - INFO - Epoch 2, Batch 6800: P_Loss=2.1666, V_Loss=0.7723, T_Loss=2.9389, GPU Xfer: 0.44ms, FW: 37.77ms, BW: 60.15ms, Total Batch Time: 101.11ms
+2025-06-12 19:12:00,277 - INFO - Epoch 2, Batch 6900: P_Loss=2.1584, V_Loss=0.7836, T_Loss=2.9420, GPU Xfer: 0.39ms, FW: 38.99ms, BW: 59.76ms, Total Batch Time: 102.52ms
+2025-06-12 19:12:18,888 - INFO - Epoch 2, Batch 7000: P_Loss=2.2306, V_Loss=0.8045, T_Loss=3.0350, GPU Xfer: 0.43ms, FW: 38.58ms, BW: 60.23ms, Total Batch Time: 101.66ms
+2025-06-12 19:12:37,496 - INFO - Epoch 2, Batch 7100: P_Loss=2.0886, V_Loss=0.8065, T_Loss=2.8951, GPU Xfer: 0.42ms, FW: 38.12ms, BW: 59.20ms, Total Batch Time: 100.29ms
+2025-06-12 19:12:56,126 - INFO - Epoch 2, Batch 7200: P_Loss=2.1823, V_Loss=0.7555, T_Loss=2.9378, GPU Xfer: 0.39ms, FW: 40.21ms, BW: 63.42ms, Total Batch Time: 106.56ms
+2025-06-12 19:13:16,945 - INFO - Epoch 2, Batch 7300: P_Loss=2.1492, V_Loss=0.8403, T_Loss=2.9895, GPU Xfer: 0.39ms, FW: 37.81ms, BW: 59.87ms, Total Batch Time: 100.66ms
+2025-06-12 19:13:35,944 - INFO - Epoch 2, Batch 7400: P_Loss=2.0943, V_Loss=0.7945, T_Loss=2.8888, GPU Xfer: 0.39ms, FW: 37.82ms, BW: 59.83ms, Total Batch Time: 101.18ms
+2025-06-12 19:13:56,678 - INFO - Epoch 2, Batch 7500: P_Loss=2.1459, V_Loss=0.7715, T_Loss=2.9174, GPU Xfer: 0.40ms, FW: 38.00ms, BW: 60.01ms, Total Batch Time: 102.02ms
+2025-06-12 19:14:16,577 - INFO - Epoch 2, Batch 7600: P_Loss=2.2222, V_Loss=0.7989, T_Loss=3.0211, GPU Xfer: 0.43ms, FW: 38.03ms, BW: 59.74ms, Total Batch Time: 100.63ms
+2025-06-12 19:14:35,160 - INFO - Epoch 2, Batch 7700: P_Loss=2.1953, V_Loss=0.7746, T_Loss=2.9698, GPU Xfer: 0.39ms, FW: 37.98ms, BW: 59.88ms, Total Batch Time: 100.76ms
+2025-06-12 19:14:53,703 - INFO - Epoch 2, Batch 7800: P_Loss=2.2364, V_Loss=0.7660, T_Loss=3.0024, GPU Xfer: 0.39ms, FW: 38.00ms, BW: 59.89ms, Total Batch Time: 100.70ms
+2025-06-12 19:15:12,285 - INFO - Epoch 2, Batch 7900: P_Loss=2.1327, V_Loss=0.7491, T_Loss=2.8818, GPU Xfer: 0.40ms, FW: 38.20ms, BW: 59.80ms, Total Batch Time: 101.02ms
+2025-06-12 19:15:30,795 - INFO - Epoch 2, Batch 8000: P_Loss=2.1575, V_Loss=0.7690, T_Loss=2.9266, GPU Xfer: 0.37ms, FW: 37.88ms, BW: 59.94ms, Total Batch Time: 100.57ms
+2025-06-12 19:15:49,255 - INFO - Epoch 2, Batch 8100: P_Loss=2.2037, V_Loss=0.8064, T_Loss=3.0101, GPU Xfer: 0.48ms, FW: 38.39ms, BW: 59.92ms, Total Batch Time: 101.42ms
+2025-06-12 19:16:07,838 - INFO - Epoch 2, Batch 8200: P_Loss=2.0758, V_Loss=0.7840, T_Loss=2.8598, GPU Xfer: 0.40ms, FW: 38.08ms, BW: 60.76ms, Total Batch Time: 101.74ms
+2025-06-12 19:16:26,373 - INFO - Epoch 2, Batch 8300: P_Loss=2.0581, V_Loss=0.7961, T_Loss=2.8542, GPU Xfer: 0.39ms, FW: 38.16ms, BW: 60.66ms, Total Batch Time: 101.62ms
+2025-06-12 19:16:44,938 - INFO - Epoch 2, Batch 8400: P_Loss=2.1153, V_Loss=0.8299, T_Loss=2.9452, GPU Xfer: 0.38ms, FW: 38.16ms, BW: 60.26ms, Total Batch Time: 101.43ms
+2025-06-12 19:17:03,464 - INFO - Epoch 2, Batch 8500: P_Loss=2.1790, V_Loss=0.8217, T_Loss=3.0007, GPU Xfer: 0.43ms, FW: 38.28ms, BW: 59.95ms, Total Batch Time: 101.54ms
+2025-06-12 19:17:21,940 - INFO - Epoch 2, Batch 8600: P_Loss=2.1048, V_Loss=0.7924, T_Loss=2.8971, GPU Xfer: 0.38ms, FW: 38.46ms, BW: 59.86ms, Total Batch Time: 101.11ms
+2025-06-12 19:17:40,501 - INFO - Epoch 2, Batch 8700: P_Loss=2.1579, V_Loss=0.7548, T_Loss=2.9127, GPU Xfer: 0.39ms, FW: 38.03ms, BW: 60.02ms, Total Batch Time: 100.89ms
+2025-06-12 19:17:59,072 - INFO - Epoch 2, Batch 8800: P_Loss=2.1666, V_Loss=0.7908, T_Loss=2.9574, GPU Xfer: 0.39ms, FW: 38.13ms, BW: 60.08ms, Total Batch Time: 101.66ms
+2025-06-12 19:18:17,796 - INFO - Epoch 2, Batch 8900: P_Loss=2.1378, V_Loss=0.7591, T_Loss=2.8969, GPU Xfer: 0.49ms, FW: 38.19ms, BW: 59.88ms, Total Batch Time: 101.45ms
+2025-06-12 19:18:36,308 - INFO - Epoch 2, Batch 9000: P_Loss=2.0855, V_Loss=0.7715, T_Loss=2.8570, GPU Xfer: 0.42ms, FW: 38.13ms, BW: 59.85ms, Total Batch Time: 101.40ms
+2025-06-12 19:18:54,807 - INFO - Epoch 2, Batch 9100: P_Loss=2.2453, V_Loss=0.7613, T_Loss=3.0066, GPU Xfer: 0.43ms, FW: 38.04ms, BW: 59.86ms, Total Batch Time: 100.92ms
+2025-06-12 19:19:13,421 - INFO - Epoch 2, Batch 9200: P_Loss=2.1552, V_Loss=0.8321, T_Loss=2.9874, GPU Xfer: 0.39ms, FW: 38.07ms, BW: 59.88ms, Total Batch Time: 100.83ms
+2025-06-12 19:19:31,979 - INFO - Epoch 2, Batch 9300: P_Loss=2.1159, V_Loss=0.7607, T_Loss=2.8765, GPU Xfer: 0.49ms, FW: 38.33ms, BW: 59.98ms, Total Batch Time: 101.92ms
+2025-06-12 19:19:50,457 - INFO - Epoch 2, Batch 9400: P_Loss=2.0960, V_Loss=0.7839, T_Loss=2.8800, GPU Xfer: 0.48ms, FW: 38.27ms, BW: 59.80ms, Total Batch Time: 101.18ms
+2025-06-12 19:20:09,013 - INFO - Epoch 2, Batch 9500: P_Loss=2.1171, V_Loss=0.8007, T_Loss=2.9178, GPU Xfer: 0.38ms, FW: 38.13ms, BW: 60.32ms, Total Batch Time: 101.32ms
+2025-06-12 19:20:22,072 - INFO - --- Epoch 2 Train Summary ---
+2025-06-12 19:20:22,073 - INFO - Average Policy Loss: 2.2299
+2025-06-12 19:20:22,073 - INFO - Average Value Loss: 0.8004
+2025-06-12 19:20:22,073 - INFO - Average Total Loss: 3.0303
+2025-06-12 19:20:22,073 - INFO - Current Learning Rate: 0.001000
+2025-06-12 19:21:05,674 - INFO - --- Epoch 2 Val Summary ---
+2025-06-12 19:21:05,674 - INFO - Average Policy Loss: 2.1618
+2025-06-12 19:21:05,674 - INFO - Average Value Loss: 0.7909
+2025-06-12 19:21:05,674 - INFO - Average Total Loss: 2.9527
+2025-06-12 19:21:05,674 - INFO - New best validation loss: 2.9527. Saving best model...
+2025-06-12 19:21:05,803 - INFO - Model checkpoint saved to C:\Users\User\Projects\talbot\model\checkpoints_supervised\chess_ai_model_epoch_2.pth
+2025-06-12 19:21:16,188 - INFO - Epoch 3, Batch 0: P_Loss=2.0703, V_Loss=0.7772, T_Loss=2.8475, GPU Xfer: 0.96ms, FW: 288.54ms, BW: 67.22ms, Total Batch Time: 359.60ms
+2025-06-12 19:21:34,619 - INFO - Epoch 3, Batch 100: P_Loss=2.0872, V_Loss=0.8166, T_Loss=2.9039, GPU Xfer: 0.38ms, FW: 37.90ms, BW: 60.36ms, Total Batch Time: 102.39ms
+2025-06-12 19:21:53,177 - INFO - Epoch 3, Batch 200: P_Loss=2.2622, V_Loss=0.8098, T_Loss=3.0720, GPU Xfer: 0.39ms, FW: 38.02ms, BW: 60.60ms, Total Batch Time: 101.57ms
+2025-06-12 19:22:11,714 - INFO - Epoch 3, Batch 300: P_Loss=1.9665, V_Loss=0.8043, T_Loss=2.7708, GPU Xfer: 0.38ms, FW: 38.03ms, BW: 60.58ms, Total Batch Time: 101.40ms
+2025-06-12 19:22:30,318 - INFO - Epoch 3, Batch 400: P_Loss=2.0869, V_Loss=0.8035, T_Loss=2.8904, GPU Xfer: 0.40ms, FW: 38.31ms, BW: 61.10ms, Total Batch Time: 102.65ms
+2025-06-12 19:22:48,828 - INFO - Epoch 3, Batch 500: P_Loss=2.0233, V_Loss=0.7946, T_Loss=2.8179, GPU Xfer: 0.39ms, FW: 37.80ms, BW: 60.64ms, Total Batch Time: 101.44ms
+2025-06-12 19:23:07,435 - INFO - Epoch 3, Batch 600: P_Loss=2.0789, V_Loss=0.8234, T_Loss=2.9023, GPU Xfer: 0.38ms, FW: 38.97ms, BW: 59.80ms, Total Batch Time: 101.76ms
+2025-06-12 19:23:26,004 - INFO - Epoch 3, Batch 700: P_Loss=2.1065, V_Loss=0.8449, T_Loss=2.9514, GPU Xfer: 0.38ms, FW: 40.69ms, BW: 62.74ms, Total Batch Time: 106.32ms
+2025-06-12 19:23:44,608 - INFO - Epoch 3, Batch 800: P_Loss=2.0285, V_Loss=0.7947, T_Loss=2.8232, GPU Xfer: 0.43ms, FW: 38.09ms, BW: 59.91ms, Total Batch Time: 100.87ms
+2025-06-12 19:24:03,179 - INFO - Epoch 3, Batch 900: P_Loss=2.2030, V_Loss=0.8162, T_Loss=3.0192, GPU Xfer: 0.38ms, FW: 37.96ms, BW: 59.59ms, Total Batch Time: 100.67ms
+2025-06-12 19:24:21,757 - INFO - Epoch 3, Batch 1000: P_Loss=2.1312, V_Loss=0.7842, T_Loss=2.9153, GPU Xfer: 0.43ms, FW: 37.74ms, BW: 59.63ms, Total Batch Time: 100.46ms
+2025-06-12 19:24:40,172 - INFO - Epoch 3, Batch 1100: P_Loss=2.1617, V_Loss=0.8218, T_Loss=2.9835, GPU Xfer: 0.39ms, FW: 37.87ms, BW: 59.58ms, Total Batch Time: 100.74ms
+2025-06-12 19:24:58,548 - INFO - Epoch 3, Batch 1200: P_Loss=1.9984, V_Loss=0.8210, T_Loss=2.8194, GPU Xfer: 0.40ms, FW: 37.81ms, BW: 59.23ms, Total Batch Time: 100.56ms
+2025-06-12 19:25:16,857 - INFO - Epoch 3, Batch 1300: P_Loss=2.1052, V_Loss=0.7818, T_Loss=2.8870, GPU Xfer: 0.43ms, FW: 37.73ms, BW: 59.68ms, Total Batch Time: 100.95ms
+2025-06-12 19:25:35,131 - INFO - Epoch 3, Batch 1400: P_Loss=2.1245, V_Loss=0.7953, T_Loss=2.9198, GPU Xfer: 0.39ms, FW: 37.51ms, BW: 59.10ms, Total Batch Time: 100.11ms
+2025-06-12 19:25:53,457 - INFO - Epoch 3, Batch 1500: P_Loss=2.0286, V_Loss=0.7929, T_Loss=2.8215, GPU Xfer: 0.39ms, FW: 37.65ms, BW: 59.35ms, Total Batch Time: 99.91ms
+2025-06-12 19:26:11,819 - INFO - Epoch 3, Batch 1600: P_Loss=2.0992, V_Loss=0.7766, T_Loss=2.8758, GPU Xfer: 0.39ms, FW: 37.76ms, BW: 59.44ms, Total Batch Time: 100.42ms
+2025-06-12 19:26:30,063 - INFO - Epoch 3, Batch 1700: P_Loss=2.0734, V_Loss=0.7948, T_Loss=2.8682, GPU Xfer: 0.47ms, FW: 37.75ms, BW: 59.55ms, Total Batch Time: 100.42ms
+2025-06-12 19:26:48,416 - INFO - Epoch 3, Batch 1800: P_Loss=2.1514, V_Loss=0.7847, T_Loss=2.9360, GPU Xfer: 0.40ms, FW: 37.76ms, BW: 60.10ms, Total Batch Time: 101.53ms
+2025-06-12 19:27:06,684 - INFO - Epoch 3, Batch 1900: P_Loss=2.2067, V_Loss=0.7884, T_Loss=2.9951, GPU Xfer: 0.43ms, FW: 37.62ms, BW: 59.64ms, Total Batch Time: 100.19ms
+2025-06-12 19:27:24,939 - INFO - Epoch 3, Batch 2000: P_Loss=2.0591, V_Loss=0.8119, T_Loss=2.8710, GPU Xfer: 0.43ms, FW: 37.98ms, BW: 59.52ms, Total Batch Time: 100.48ms
+2025-06-12 19:27:43,310 - INFO - Epoch 3, Batch 2100: P_Loss=2.0657, V_Loss=0.7849, T_Loss=2.8506, GPU Xfer: 0.39ms, FW: 37.83ms, BW: 59.44ms, Total Batch Time: 101.04ms
+2025-06-12 19:28:01,577 - INFO - Epoch 3, Batch 2200: P_Loss=2.1088, V_Loss=0.7895, T_Loss=2.8983, GPU Xfer: 0.38ms, FW: 38.20ms, BW: 58.85ms, Total Batch Time: 99.94ms
+2025-06-12 19:28:19,900 - INFO - Epoch 3, Batch 2300: P_Loss=2.1562, V_Loss=0.8425, T_Loss=2.9987, GPU Xfer: 0.50ms, FW: 37.89ms, BW: 59.35ms, Total Batch Time: 100.48ms
+2025-06-12 19:28:38,207 - INFO - Epoch 3, Batch 2400: P_Loss=2.1010, V_Loss=0.8102, T_Loss=2.9112, GPU Xfer: 0.40ms, FW: 37.62ms, BW: 59.26ms, Total Batch Time: 100.73ms
+2025-06-12 19:28:56,447 - INFO - Epoch 3, Batch 2500: P_Loss=1.9128, V_Loss=0.7483, T_Loss=2.6612, GPU Xfer: 0.39ms, FW: 37.63ms, BW: 59.25ms, Total Batch Time: 99.89ms
+2025-06-12 19:29:14,858 - INFO - Epoch 3, Batch 2600: P_Loss=2.0036, V_Loss=0.8015, T_Loss=2.8051, GPU Xfer: 0.50ms, FW: 37.98ms, BW: 59.60ms, Total Batch Time: 100.62ms
+2025-06-12 19:29:33,217 - INFO - Epoch 3, Batch 2700: P_Loss=2.0249, V_Loss=0.7894, T_Loss=2.8144, GPU Xfer: 0.43ms, FW: 37.62ms, BW: 59.74ms, Total Batch Time: 100.92ms
+2025-06-12 19:29:51,510 - INFO - Epoch 3, Batch 2800: P_Loss=2.0796, V_Loss=0.7868, T_Loss=2.8665, GPU Xfer: 0.43ms, FW: 37.71ms, BW: 59.28ms, Total Batch Time: 100.37ms
+2025-06-12 19:30:09,837 - INFO - Epoch 3, Batch 2900: P_Loss=2.1056, V_Loss=0.8162, T_Loss=2.9218, GPU Xfer: 0.39ms, FW: 38.29ms, BW: 60.09ms, Total Batch Time: 101.55ms
+2025-06-12 19:30:28,209 - INFO - Epoch 3, Batch 3000: P_Loss=2.1656, V_Loss=0.7746, T_Loss=2.9403, GPU Xfer: 0.43ms, FW: 38.07ms, BW: 59.40ms, Total Batch Time: 100.58ms
+2025-06-12 19:30:46,531 - INFO - Epoch 3, Batch 3100: P_Loss=2.0606, V_Loss=0.7688, T_Loss=2.8294, GPU Xfer: 0.44ms, FW: 37.68ms, BW: 59.51ms, Total Batch Time: 100.71ms
+2025-06-12 19:31:05,924 - INFO - Epoch 3, Batch 3200: P_Loss=2.2537, V_Loss=0.7900, T_Loss=3.0437, GPU Xfer: 0.60ms, FW: 37.92ms, BW: 59.91ms, Total Batch Time: 101.18ms
+2025-06-12 19:31:26,117 - INFO - Epoch 3, Batch 3300: P_Loss=2.0106, V_Loss=0.8154, T_Loss=2.8260, GPU Xfer: 0.42ms, FW: 42.73ms, BW: 66.24ms, Total Batch Time: 113.17ms
+2025-06-12 19:31:47,113 - INFO - Epoch 3, Batch 3400: P_Loss=2.1119, V_Loss=0.7729, T_Loss=2.8848, GPU Xfer: 0.38ms, FW: 37.94ms, BW: 60.28ms, Total Batch Time: 101.10ms
+2025-06-12 19:32:06,949 - INFO - Epoch 3, Batch 3500: P_Loss=2.1769, V_Loss=0.7345, T_Loss=2.9114, GPU Xfer: 0.55ms, FW: 37.84ms, BW: 59.92ms, Total Batch Time: 100.91ms
+2025-06-12 19:32:25,427 - INFO - Epoch 3, Batch 3600: P_Loss=1.9920, V_Loss=0.8104, T_Loss=2.8024, GPU Xfer: 0.46ms, FW: 38.91ms, BW: 59.71ms, Total Batch Time: 101.67ms
+2025-06-12 19:32:43,982 - INFO - Epoch 3, Batch 3700: P_Loss=2.0216, V_Loss=0.7748, T_Loss=2.7964, GPU Xfer: 0.43ms, FW: 38.11ms, BW: 60.27ms, Total Batch Time: 102.03ms
+2025-06-12 19:33:02,623 - INFO - Epoch 3, Batch 3800: P_Loss=1.9573, V_Loss=0.7585, T_Loss=2.7158, GPU Xfer: 0.39ms, FW: 38.12ms, BW: 59.81ms, Total Batch Time: 100.97ms
+2025-06-12 19:33:21,187 - INFO - Epoch 3, Batch 3900: P_Loss=2.1363, V_Loss=0.7658, T_Loss=2.9021, GPU Xfer: 0.39ms, FW: 38.03ms, BW: 59.80ms, Total Batch Time: 101.34ms
+2025-06-12 19:33:39,822 - INFO - Epoch 3, Batch 4000: P_Loss=2.1195, V_Loss=0.7939, T_Loss=2.9134, GPU Xfer: 0.40ms, FW: 38.00ms, BW: 60.80ms, Total Batch Time: 101.63ms
+2025-06-12 19:33:58,394 - INFO - Epoch 3, Batch 4100: P_Loss=2.1452, V_Loss=0.8119, T_Loss=2.9571, GPU Xfer: 0.42ms, FW: 39.03ms, BW: 60.32ms, Total Batch Time: 103.14ms
+2025-06-12 19:34:16,948 - INFO - Epoch 3, Batch 4200: P_Loss=2.0904, V_Loss=0.8044, T_Loss=2.8947, GPU Xfer: 0.43ms, FW: 38.09ms, BW: 59.93ms, Total Batch Time: 100.99ms
+2025-06-12 19:34:35,456 - INFO - Epoch 3, Batch 4300: P_Loss=2.1215, V_Loss=0.8082, T_Loss=2.9297, GPU Xfer: 0.38ms, FW: 38.21ms, BW: 60.07ms, Total Batch Time: 101.20ms
+2025-06-12 19:34:53,990 - INFO - Epoch 3, Batch 4400: P_Loss=2.0559, V_Loss=0.7758, T_Loss=2.8317, GPU Xfer: 0.43ms, FW: 37.81ms, BW: 59.72ms, Total Batch Time: 101.12ms
+2025-06-12 19:35:12,636 - INFO - Epoch 3, Batch 4500: P_Loss=2.0173, V_Loss=0.8079, T_Loss=2.8251, GPU Xfer: 0.38ms, FW: 37.99ms, BW: 60.07ms, Total Batch Time: 100.98ms
+2025-06-12 19:35:31,225 - INFO - Epoch 3, Batch 4600: P_Loss=2.1723, V_Loss=0.7545, T_Loss=2.9269, GPU Xfer: 0.50ms, FW: 38.44ms, BW: 61.00ms, Total Batch Time: 102.49ms
+2025-06-12 19:35:49,709 - INFO - Epoch 3, Batch 4700: P_Loss=2.1417, V_Loss=0.7853, T_Loss=2.9270, GPU Xfer: 0.46ms, FW: 38.18ms, BW: 59.75ms, Total Batch Time: 101.03ms
+2025-06-12 19:36:08,415 - INFO - Epoch 3, Batch 4800: P_Loss=2.0446, V_Loss=0.7787, T_Loss=2.8233, GPU Xfer: 0.39ms, FW: 39.05ms, BW: 59.83ms, Total Batch Time: 101.65ms
+2025-06-12 19:36:26,935 - INFO - Epoch 3, Batch 4900: P_Loss=2.0177, V_Loss=0.7573, T_Loss=2.7750, GPU Xfer: 0.40ms, FW: 38.91ms, BW: 59.86ms, Total Batch Time: 101.76ms
+2025-06-12 19:36:45,541 - INFO - Epoch 3, Batch 5000: P_Loss=2.0441, V_Loss=0.8145, T_Loss=2.8586, GPU Xfer: 0.42ms, FW: 37.97ms, BW: 59.81ms, Total Batch Time: 100.76ms
+2025-06-12 19:37:04,059 - INFO - Epoch 3, Batch 5100: P_Loss=2.0493, V_Loss=0.7986, T_Loss=2.8478, GPU Xfer: 0.43ms, FW: 38.96ms, BW: 59.82ms, Total Batch Time: 101.92ms
+2025-06-12 19:37:22,617 - INFO - Epoch 3, Batch 5200: P_Loss=2.0382, V_Loss=0.7847, T_Loss=2.8230, GPU Xfer: 0.43ms, FW: 37.92ms, BW: 60.08ms, Total Batch Time: 101.36ms
+2025-06-12 19:37:41,102 - INFO - Epoch 3, Batch 5300: P_Loss=1.8275, V_Loss=0.7817, T_Loss=2.6092, GPU Xfer: 0.43ms, FW: 38.19ms, BW: 60.77ms, Total Batch Time: 102.11ms
+2025-06-12 19:37:59,635 - INFO - Epoch 3, Batch 5400: P_Loss=1.9089, V_Loss=0.8253, T_Loss=2.7341, GPU Xfer: 0.38ms, FW: 38.27ms, BW: 60.67ms, Total Batch Time: 102.16ms
+2025-06-12 19:38:18,139 - INFO - Epoch 3, Batch 5500: P_Loss=1.9569, V_Loss=0.7815, T_Loss=2.7384, GPU Xfer: 0.43ms, FW: 38.06ms, BW: 59.78ms, Total Batch Time: 101.29ms
+2025-06-12 19:38:36,651 - INFO - Epoch 3, Batch 5600: P_Loss=2.1472, V_Loss=0.7905, T_Loss=2.9376, GPU Xfer: 0.42ms, FW: 38.20ms, BW: 60.00ms, Total Batch Time: 101.91ms
+2025-06-12 19:38:55,245 - INFO - Epoch 3, Batch 5700: P_Loss=2.0004, V_Loss=0.7941, T_Loss=2.7945, GPU Xfer: 0.37ms, FW: 38.00ms, BW: 59.85ms, Total Batch Time: 101.31ms
+2025-06-12 19:39:13,772 - INFO - Epoch 3, Batch 5800: P_Loss=2.0380, V_Loss=0.7758, T_Loss=2.8138, GPU Xfer: 0.48ms, FW: 38.09ms, BW: 59.91ms, Total Batch Time: 101.04ms
+2025-06-12 19:39:32,325 - INFO - Epoch 3, Batch 5900: P_Loss=2.1271, V_Loss=0.8287, T_Loss=2.9558, GPU Xfer: 0.44ms, FW: 38.28ms, BW: 60.41ms, Total Batch Time: 101.94ms
+2025-06-12 19:39:50,935 - INFO - Epoch 3, Batch 6000: P_Loss=2.0629, V_Loss=0.7541, T_Loss=2.8170, GPU Xfer: 0.39ms, FW: 37.83ms, BW: 60.60ms, Total Batch Time: 101.48ms
+2025-06-12 19:40:09,494 - INFO - Epoch 3, Batch 6100: P_Loss=2.1178, V_Loss=0.7913, T_Loss=2.9091, GPU Xfer: 0.39ms, FW: 37.93ms, BW: 60.77ms, Total Batch Time: 101.96ms
+2025-06-12 19:40:27,988 - INFO - Epoch 3, Batch 6200: P_Loss=1.9546, V_Loss=0.7999, T_Loss=2.7545, GPU Xfer: 0.46ms, FW: 38.22ms, BW: 59.83ms, Total Batch Time: 101.14ms
+2025-06-12 19:40:46,520 - INFO - Epoch 3, Batch 6300: P_Loss=2.0847, V_Loss=0.7854, T_Loss=2.8701, GPU Xfer: 0.37ms, FW: 38.06ms, BW: 59.91ms, Total Batch Time: 100.91ms
+2025-06-12 19:41:05,121 - INFO - Epoch 3, Batch 6400: P_Loss=2.0317, V_Loss=0.8272, T_Loss=2.8589, GPU Xfer: 0.38ms, FW: 37.70ms, BW: 60.97ms, Total Batch Time: 102.41ms
+2025-06-12 19:41:23,625 - INFO - Epoch 3, Batch 6500: P_Loss=2.1333, V_Loss=0.7435, T_Loss=2.8767, GPU Xfer: 0.39ms, FW: 38.07ms, BW: 59.79ms, Total Batch Time: 100.67ms
+2025-06-12 19:41:42,275 - INFO - Epoch 3, Batch 6600: P_Loss=2.1675, V_Loss=0.8056, T_Loss=2.9732, GPU Xfer: 0.38ms, FW: 39.13ms, BW: 59.59ms, Total Batch Time: 101.62ms
+2025-06-12 19:42:00,930 - INFO - Epoch 3, Batch 6700: P_Loss=1.9786, V_Loss=0.7579, T_Loss=2.7365, GPU Xfer: 0.40ms, FW: 37.57ms, BW: 59.26ms, Total Batch Time: 99.73ms
+2025-06-12 19:42:19,244 - INFO - Epoch 3, Batch 6800: P_Loss=2.1139, V_Loss=0.7825, T_Loss=2.8964, GPU Xfer: 0.49ms, FW: 37.84ms, BW: 59.16ms, Total Batch Time: 100.16ms
+2025-06-12 19:42:37,631 - INFO - Epoch 3, Batch 6900: P_Loss=2.0366, V_Loss=0.7329, T_Loss=2.7695, GPU Xfer: 0.42ms, FW: 37.63ms, BW: 59.48ms, Total Batch Time: 100.00ms
+2025-06-12 19:42:55,976 - INFO - Epoch 3, Batch 7000: P_Loss=1.9797, V_Loss=0.7740, T_Loss=2.7537, GPU Xfer: 0.39ms, FW: 37.50ms, BW: 59.86ms, Total Batch Time: 100.22ms
+2025-06-12 19:43:14,249 - INFO - Epoch 3, Batch 7100: P_Loss=2.0734, V_Loss=0.7617, T_Loss=2.8351, GPU Xfer: 0.37ms, FW: 37.64ms, BW: 59.13ms, Total Batch Time: 99.69ms
+2025-06-12 19:43:32,586 - INFO - Epoch 3, Batch 7200: P_Loss=2.0307, V_Loss=0.7976, T_Loss=2.8283, GPU Xfer: 0.44ms, FW: 37.86ms, BW: 59.23ms, Total Batch Time: 100.52ms
+2025-06-12 19:43:50,870 - INFO - Epoch 3, Batch 7300: P_Loss=2.1361, V_Loss=0.7844, T_Loss=2.9205, GPU Xfer: 0.43ms, FW: 37.67ms, BW: 59.58ms, Total Batch Time: 100.38ms
+2025-06-12 19:44:09,244 - INFO - Epoch 3, Batch 7400: P_Loss=2.0669, V_Loss=0.8134, T_Loss=2.8803, GPU Xfer: 0.38ms, FW: 37.49ms, BW: 59.55ms, Total Batch Time: 99.92ms
+2025-06-12 19:44:27,575 - INFO - Epoch 3, Batch 7500: P_Loss=2.0429, V_Loss=0.7659, T_Loss=2.8088, GPU Xfer: 0.42ms, FW: 37.67ms, BW: 59.75ms, Total Batch Time: 100.30ms
+2025-06-12 19:44:45,928 - INFO - Epoch 3, Batch 7600: P_Loss=2.0197, V_Loss=0.7866, T_Loss=2.8063, GPU Xfer: 0.38ms, FW: 37.55ms, BW: 59.33ms, Total Batch Time: 100.58ms
+2025-06-12 19:45:04,217 - INFO - Epoch 3, Batch 7700: P_Loss=1.9959, V_Loss=0.7539, T_Loss=2.7497, GPU Xfer: 0.43ms, FW: 38.12ms, BW: 59.10ms, Total Batch Time: 100.83ms
+2025-06-12 19:45:22,614 - INFO - Epoch 3, Batch 7800: P_Loss=1.9524, V_Loss=0.7563, T_Loss=2.7088, GPU Xfer: 0.45ms, FW: 37.90ms, BW: 59.35ms, Total Batch Time: 100.99ms
+2025-06-12 19:45:40,929 - INFO - Epoch 3, Batch 7900: P_Loss=2.0732, V_Loss=0.8192, T_Loss=2.8923, GPU Xfer: 0.44ms, FW: 38.38ms, BW: 59.48ms, Total Batch Time: 101.19ms
+2025-06-12 19:45:59,184 - INFO - Epoch 3, Batch 8000: P_Loss=1.9860, V_Loss=0.7498, T_Loss=2.7358, GPU Xfer: 0.42ms, FW: 37.78ms, BW: 59.37ms, Total Batch Time: 100.13ms
+2025-06-12 19:46:17,530 - INFO - Epoch 3, Batch 8100: P_Loss=2.0952, V_Loss=0.8216, T_Loss=2.9168, GPU Xfer: 0.43ms, FW: 37.70ms, BW: 59.29ms, Total Batch Time: 99.85ms
+2025-06-12 19:46:35,841 - INFO - Epoch 3, Batch 8200: P_Loss=2.0818, V_Loss=0.7801, T_Loss=2.8619, GPU Xfer: 0.39ms, FW: 37.84ms, BW: 59.81ms, Total Batch Time: 101.02ms
+2025-06-12 19:46:54,235 - INFO - Epoch 3, Batch 8300: P_Loss=2.0488, V_Loss=0.7498, T_Loss=2.7986, GPU Xfer: 0.39ms, FW: 37.62ms, BW: 59.53ms, Total Batch Time: 100.08ms
+2025-06-12 19:47:12,545 - INFO - Epoch 3, Batch 8400: P_Loss=2.0069, V_Loss=0.7921, T_Loss=2.7990, GPU Xfer: 0.39ms, FW: 37.71ms, BW: 59.32ms, Total Batch Time: 99.96ms
+2025-06-12 19:47:30,844 - INFO - Epoch 3, Batch 8500: P_Loss=2.0430, V_Loss=0.7865, T_Loss=2.8296, GPU Xfer: 0.44ms, FW: 37.75ms, BW: 59.67ms, Total Batch Time: 100.50ms
+2025-06-12 19:47:49,134 - INFO - Epoch 3, Batch 8600: P_Loss=2.0846, V_Loss=0.7962, T_Loss=2.8808, GPU Xfer: 0.44ms, FW: 37.82ms, BW: 59.21ms, Total Batch Time: 99.98ms
+2025-06-12 19:48:07,441 - INFO - Epoch 3, Batch 8700: P_Loss=2.1044, V_Loss=0.7643, T_Loss=2.8688, GPU Xfer: 0.44ms, FW: 37.73ms, BW: 59.55ms, Total Batch Time: 100.97ms
+2025-06-12 19:48:25,830 - INFO - Epoch 3, Batch 8800: P_Loss=2.0456, V_Loss=0.7557, T_Loss=2.8013, GPU Xfer: 0.39ms, FW: 37.53ms, BW: 59.71ms, Total Batch Time: 100.75ms
+2025-06-12 19:48:44,106 - INFO - Epoch 3, Batch 8900: P_Loss=2.1315, V_Loss=0.7686, T_Loss=2.9001, GPU Xfer: 0.39ms, FW: 37.74ms, BW: 59.99ms, Total Batch Time: 100.77ms
+2025-06-12 19:49:02,463 - INFO - Epoch 3, Batch 9000: P_Loss=2.0588, V_Loss=0.7764, T_Loss=2.8352, GPU Xfer: 0.45ms, FW: 37.97ms, BW: 59.46ms, Total Batch Time: 100.36ms
+2025-06-12 19:49:20,797 - INFO - Epoch 3, Batch 9100: P_Loss=1.9464, V_Loss=0.7451, T_Loss=2.6915, GPU Xfer: 0.39ms, FW: 37.96ms, BW: 59.39ms, Total Batch Time: 100.85ms
+2025-06-12 19:49:39,064 - INFO - Epoch 3, Batch 9200: P_Loss=2.1546, V_Loss=0.7916, T_Loss=2.9463, GPU Xfer: 0.39ms, FW: 37.65ms, BW: 59.28ms, Total Batch Time: 99.87ms
+2025-06-12 19:49:57,446 - INFO - Epoch 3, Batch 9300: P_Loss=2.0557, V_Loss=0.7981, T_Loss=2.8538, GPU Xfer: 0.39ms, FW: 37.53ms, BW: 59.69ms, Total Batch Time: 100.45ms
+2025-06-12 19:50:15,794 - INFO - Epoch 3, Batch 9400: P_Loss=1.9949, V_Loss=0.8043, T_Loss=2.7992, GPU Xfer: 0.44ms, FW: 38.05ms, BW: 59.71ms, Total Batch Time: 100.68ms
+2025-06-12 19:50:34,074 - INFO - Epoch 3, Batch 9500: P_Loss=2.0372, V_Loss=0.7890, T_Loss=2.8261, GPU Xfer: 0.42ms, FW: 37.68ms, BW: 59.50ms, Total Batch Time: 100.10ms
+2025-06-12 19:50:46,941 - INFO - --- Epoch 3 Train Summary ---
+2025-06-12 19:50:46,941 - INFO - Average Policy Loss: 2.0597
+2025-06-12 19:50:46,941 - INFO - Average Value Loss: 0.7862
+2025-06-12 19:50:46,942 - INFO - Average Total Loss: 2.8459
+2025-06-12 19:50:46,942 - INFO - Current Learning Rate: 0.001000
+2025-06-12 19:51:30,241 - INFO - --- Epoch 3 Val Summary ---
+2025-06-12 19:51:30,242 - INFO - Average Policy Loss: 2.0742
+2025-06-12 19:51:30,242 - INFO - Average Value Loss: 0.7973
+2025-06-12 19:51:30,242 - INFO - Average Total Loss: 2.8715
+2025-06-12 19:51:30,242 - INFO - New best validation loss: 2.8715. Saving best model...
+2025-06-12 19:51:30,369 - INFO - Model checkpoint saved to C:\Users\User\Projects\talbot\model\checkpoints_supervised\chess_ai_model_epoch_3.pth
+2025-06-12 19:51:40,773 - INFO - Epoch 4, Batch 0: P_Loss=1.8575, V_Loss=0.7669, T_Loss=2.6244, GPU Xfer: 1.09ms, FW: 332.09ms, BW: 66.77ms, Total Batch Time: 403.28ms
+2025-06-12 19:51:58,987 - INFO - Epoch 4, Batch 100: P_Loss=1.8032, V_Loss=0.7874, T_Loss=2.5907, GPU Xfer: 0.43ms, FW: 37.95ms, BW: 58.98ms, Total Batch Time: 99.87ms
+2025-06-12 19:52:17,446 - INFO - Epoch 4, Batch 200: P_Loss=1.9402, V_Loss=0.7481, T_Loss=2.6884, GPU Xfer: 0.43ms, FW: 37.75ms, BW: 59.14ms, Total Batch Time: 99.94ms
+2025-06-12 19:52:35,706 - INFO - Epoch 4, Batch 300: P_Loss=2.0178, V_Loss=0.7377, T_Loss=2.7555, GPU Xfer: 0.44ms, FW: 37.76ms, BW: 59.90ms, Total Batch Time: 100.69ms
+2025-06-12 19:52:53,981 - INFO - Epoch 4, Batch 400: P_Loss=2.0091, V_Loss=0.7414, T_Loss=2.7505, GPU Xfer: 0.43ms, FW: 37.89ms, BW: 59.33ms, Total Batch Time: 100.09ms
+2025-06-12 19:53:12,309 - INFO - Epoch 4, Batch 500: P_Loss=1.9308, V_Loss=0.7773, T_Loss=2.7081, GPU Xfer: 0.39ms, FW: 37.82ms, BW: 59.56ms, Total Batch Time: 100.15ms
+2025-06-12 19:53:30,732 - INFO - Epoch 4, Batch 600: P_Loss=2.0262, V_Loss=0.7414, T_Loss=2.7676, GPU Xfer: 0.38ms, FW: 38.00ms, BW: 59.59ms, Total Batch Time: 100.82ms
+2025-06-12 19:53:49,119 - INFO - Epoch 4, Batch 700: P_Loss=2.0176, V_Loss=0.7644, T_Loss=2.7820, GPU Xfer: 0.43ms, FW: 40.08ms, BW: 60.07ms, Total Batch Time: 103.09ms
+2025-06-12 19:54:07,501 - INFO - Epoch 4, Batch 800: P_Loss=2.0817, V_Loss=0.8365, T_Loss=2.9182, GPU Xfer: 0.36ms, FW: 40.50ms, BW: 59.69ms, Total Batch Time: 104.05ms
+2025-06-12 19:54:25,913 - INFO - Epoch 4, Batch 900: P_Loss=1.9469, V_Loss=0.8202, T_Loss=2.7671, GPU Xfer: 0.37ms, FW: 39.96ms, BW: 59.94ms, Total Batch Time: 103.67ms
+2025-06-12 19:54:44,492 - INFO - Epoch 4, Batch 1000: P_Loss=1.8874, V_Loss=0.7624, T_Loss=2.6498, GPU Xfer: 0.38ms, FW: 39.08ms, BW: 60.03ms, Total Batch Time: 103.81ms
+2025-06-12 19:55:03,016 - INFO - Epoch 4, Batch 1100: P_Loss=1.9527, V_Loss=0.7737, T_Loss=2.7265, GPU Xfer: 0.37ms, FW: 39.80ms, BW: 59.70ms, Total Batch Time: 102.47ms
+2025-06-12 19:55:21,459 - INFO - Epoch 4, Batch 1200: P_Loss=1.8610, V_Loss=0.7587, T_Loss=2.6197, GPU Xfer: 0.38ms, FW: 39.76ms, BW: 59.68ms, Total Batch Time: 102.32ms
+2025-06-12 19:55:39,851 - INFO - Epoch 4, Batch 1300: P_Loss=2.0554, V_Loss=0.7415, T_Loss=2.7969, GPU Xfer: 0.38ms, FW: 39.91ms, BW: 59.69ms, Total Batch Time: 103.19ms
+2025-06-12 19:55:58,278 - INFO - Epoch 4, Batch 1400: P_Loss=2.0614, V_Loss=0.7739, T_Loss=2.8353, GPU Xfer: 0.41ms, FW: 39.31ms, BW: 60.38ms, Total Batch Time: 102.62ms
+2025-06-12 19:56:16,733 - INFO - Epoch 4, Batch 1500: P_Loss=1.9456, V_Loss=0.8209, T_Loss=2.7664, GPU Xfer: 0.38ms, FW: 39.61ms, BW: 60.00ms, Total Batch Time: 102.60ms
+2025-06-12 19:56:35,212 - INFO - Epoch 4, Batch 1600: P_Loss=2.0018, V_Loss=0.8121, T_Loss=2.8138, GPU Xfer: 0.37ms, FW: 39.54ms, BW: 60.10ms, Total Batch Time: 102.54ms
+2025-06-12 19:56:53,673 - INFO - Epoch 4, Batch 1700: P_Loss=1.9237, V_Loss=0.7652, T_Loss=2.6889, GPU Xfer: 0.37ms, FW: 39.16ms, BW: 59.63ms, Total Batch Time: 102.37ms
+2025-06-12 19:57:12,075 - INFO - Epoch 4, Batch 1800: P_Loss=1.9356, V_Loss=0.7746, T_Loss=2.7102, GPU Xfer: 0.42ms, FW: 40.45ms, BW: 59.24ms, Total Batch Time: 102.66ms
+2025-06-12 19:57:30,483 - INFO - Epoch 4, Batch 1900: P_Loss=1.9301, V_Loss=0.7935, T_Loss=2.7237, GPU Xfer: 0.49ms, FW: 40.33ms, BW: 59.33ms, Total Batch Time: 102.84ms
+2025-06-12 19:57:48,900 - INFO - Epoch 4, Batch 2000: P_Loss=1.9281, V_Loss=0.7592, T_Loss=2.6872, GPU Xfer: 0.36ms, FW: 39.86ms, BW: 59.77ms, Total Batch Time: 102.52ms
+2025-06-12 19:58:07,427 - INFO - Epoch 4, Batch 2100: P_Loss=1.9332, V_Loss=0.7871, T_Loss=2.7203, GPU Xfer: 0.37ms, FW: 40.27ms, BW: 59.22ms, Total Batch Time: 102.56ms
+2025-06-12 19:58:25,854 - INFO - Epoch 4, Batch 2200: P_Loss=1.9025, V_Loss=0.7648, T_Loss=2.6673, GPU Xfer: 0.38ms, FW: 39.80ms, BW: 60.05ms, Total Batch Time: 103.04ms
+2025-06-12 19:58:44,267 - INFO - Epoch 4, Batch 2300: P_Loss=1.9210, V_Loss=0.7598, T_Loss=2.6808, GPU Xfer: 0.37ms, FW: 39.92ms, BW: 60.10ms, Total Batch Time: 102.87ms
+2025-06-12 19:59:02,643 - INFO - Epoch 4, Batch 2400: P_Loss=1.9378, V_Loss=0.8076, T_Loss=2.7454, GPU Xfer: 0.37ms, FW: 39.37ms, BW: 60.35ms, Total Batch Time: 103.31ms
+2025-06-12 19:59:21,069 - INFO - Epoch 4, Batch 2500: P_Loss=2.1575, V_Loss=0.7430, T_Loss=2.9005, GPU Xfer: 0.43ms, FW: 40.25ms, BW: 59.30ms, Total Batch Time: 102.61ms
+2025-06-12 19:59:39,588 - INFO - Epoch 4, Batch 2600: P_Loss=1.9387, V_Loss=0.7513, T_Loss=2.6900, GPU Xfer: 0.41ms, FW: 39.65ms, BW: 60.04ms, Total Batch Time: 102.64ms
+2025-06-12 19:59:57,936 - INFO - Epoch 4, Batch 2700: P_Loss=1.9689, V_Loss=0.8303, T_Loss=2.7992, GPU Xfer: 0.39ms, FW: 40.22ms, BW: 59.71ms, Total Batch Time: 103.78ms
+2025-06-12 20:00:16,404 - INFO - Epoch 4, Batch 2800: P_Loss=1.8831, V_Loss=0.7814, T_Loss=2.6644, GPU Xfer: 0.37ms, FW: 39.47ms, BW: 59.59ms, Total Batch Time: 101.88ms
+2025-06-12 20:00:34,803 - INFO - Epoch 4, Batch 2900: P_Loss=1.9006, V_Loss=0.7771, T_Loss=2.6777, GPU Xfer: 0.37ms, FW: 39.82ms, BW: 59.53ms, Total Batch Time: 102.21ms
+2025-06-12 20:00:53,249 - INFO - Epoch 4, Batch 3000: P_Loss=1.9963, V_Loss=0.7595, T_Loss=2.7558, GPU Xfer: 0.43ms, FW: 39.35ms, BW: 60.36ms, Total Batch Time: 102.66ms
+2025-06-12 20:01:11,681 - INFO - Epoch 4, Batch 3100: P_Loss=1.9406, V_Loss=0.7725, T_Loss=2.7131, GPU Xfer: 0.49ms, FW: 39.48ms, BW: 60.20ms, Total Batch Time: 103.39ms
+2025-06-12 20:01:30,111 - INFO - Epoch 4, Batch 3200: P_Loss=1.9004, V_Loss=0.7886, T_Loss=2.6890, GPU Xfer: 0.38ms, FW: 39.81ms, BW: 59.77ms, Total Batch Time: 102.33ms
+2025-06-12 20:01:48,536 - INFO - Epoch 4, Batch 3300: P_Loss=1.9537, V_Loss=0.7525, T_Loss=2.7062, GPU Xfer: 0.43ms, FW: 39.61ms, BW: 60.00ms, Total Batch Time: 102.83ms
+2025-06-12 20:02:06,974 - INFO - Epoch 4, Batch 3400: P_Loss=2.0215, V_Loss=0.7668, T_Loss=2.7883, GPU Xfer: 0.37ms, FW: 39.75ms, BW: 59.82ms, Total Batch Time: 102.48ms
+2025-06-12 20:02:25,470 - INFO - Epoch 4, Batch 3500: P_Loss=1.9817, V_Loss=0.7703, T_Loss=2.7520, GPU Xfer: 0.51ms, FW: 40.14ms, BW: 59.57ms, Total Batch Time: 103.26ms
+2025-06-12 20:02:43,840 - INFO - Epoch 4, Batch 3600: P_Loss=1.9805, V_Loss=0.7937, T_Loss=2.7742, GPU Xfer: 0.41ms, FW: 39.88ms, BW: 60.08ms, Total Batch Time: 103.52ms
+2025-06-12 20:03:02,204 - INFO - Epoch 4, Batch 3700: P_Loss=2.1017, V_Loss=0.7671, T_Loss=2.8688, GPU Xfer: 0.37ms, FW: 40.09ms, BW: 60.48ms, Total Batch Time: 103.42ms
+2025-06-12 20:03:20,575 - INFO - Epoch 4, Batch 3800: P_Loss=1.9358, V_Loss=0.7216, T_Loss=2.6574, GPU Xfer: 0.41ms, FW: 39.62ms, BW: 60.35ms, Total Batch Time: 103.02ms
+2025-06-12 20:03:38,935 - INFO - Epoch 4, Batch 3900: P_Loss=1.9740, V_Loss=0.7673, T_Loss=2.7413, GPU Xfer: 0.38ms, FW: 39.32ms, BW: 59.69ms, Total Batch Time: 101.82ms
+2025-06-12 20:03:57,417 - INFO - Epoch 4, Batch 4000: P_Loss=1.9834, V_Loss=0.7636, T_Loss=2.7470, GPU Xfer: 0.46ms, FW: 40.91ms, BW: 59.26ms, Total Batch Time: 104.46ms
+2025-06-12 20:04:15,789 - INFO - Epoch 4, Batch 4100: P_Loss=1.8785, V_Loss=0.8057, T_Loss=2.6842, GPU Xfer: 0.38ms, FW: 39.95ms, BW: 59.78ms, Total Batch Time: 102.65ms
+2025-06-12 20:04:34,176 - INFO - Epoch 4, Batch 4200: P_Loss=1.8860, V_Loss=0.7708, T_Loss=2.6568, GPU Xfer: 0.39ms, FW: 39.97ms, BW: 59.73ms, Total Batch Time: 102.84ms
+2025-06-12 20:04:52,539 - INFO - Epoch 4, Batch 4300: P_Loss=1.9928, V_Loss=0.7990, T_Loss=2.7918, GPU Xfer: 0.39ms, FW: 39.79ms, BW: 59.65ms, Total Batch Time: 102.31ms
+2025-06-12 20:05:10,908 - INFO - Epoch 4, Batch 4400: P_Loss=1.8891, V_Loss=0.8132, T_Loss=2.7023, GPU Xfer: 0.38ms, FW: 39.25ms, BW: 59.57ms, Total Batch Time: 101.91ms
+2025-06-12 20:05:29,301 - INFO - Epoch 4, Batch 4500: P_Loss=1.9713, V_Loss=0.7727, T_Loss=2.7440, GPU Xfer: 0.38ms, FW: 39.92ms, BW: 59.49ms, Total Batch Time: 102.86ms
+2025-06-12 20:05:47,718 - INFO - Epoch 4, Batch 4600: P_Loss=1.9163, V_Loss=0.7793, T_Loss=2.6956, GPU Xfer: 0.48ms, FW: 40.05ms, BW: 59.72ms, Total Batch Time: 103.01ms
+2025-06-12 20:06:06,096 - INFO - Epoch 4, Batch 4700: P_Loss=2.0292, V_Loss=0.7940, T_Loss=2.8232, GPU Xfer: 0.37ms, FW: 39.88ms, BW: 60.08ms, Total Batch Time: 102.78ms
+2025-06-12 20:06:24,469 - INFO - Epoch 4, Batch 4800: P_Loss=1.8914, V_Loss=0.7810, T_Loss=2.6724, GPU Xfer: 0.47ms, FW: 39.48ms, BW: 60.35ms, Total Batch Time: 103.55ms
+2025-06-12 20:06:42,849 - INFO - Epoch 4, Batch 4900: P_Loss=2.0403, V_Loss=0.7695, T_Loss=2.8098, GPU Xfer: 0.42ms, FW: 39.39ms, BW: 60.52ms, Total Batch Time: 103.30ms
+2025-06-12 20:07:01,320 - INFO - Epoch 4, Batch 5000: P_Loss=1.9069, V_Loss=0.7374, T_Loss=2.6443, GPU Xfer: 0.40ms, FW: 39.54ms, BW: 59.91ms, Total Batch Time: 102.41ms
+2025-06-12 20:07:19,688 - INFO - Epoch 4, Batch 5100: P_Loss=1.9568, V_Loss=0.7493, T_Loss=2.7061, GPU Xfer: 0.36ms, FW: 39.49ms, BW: 60.25ms, Total Batch Time: 103.42ms
+2025-06-12 20:07:38,082 - INFO - Epoch 4, Batch 5200: P_Loss=1.9660, V_Loss=0.7688, T_Loss=2.7349, GPU Xfer: 0.38ms, FW: 39.45ms, BW: 60.47ms, Total Batch Time: 103.47ms
+2025-06-12 20:07:56,469 - INFO - Epoch 4, Batch 5300: P_Loss=1.9101, V_Loss=0.7306, T_Loss=2.6407, GPU Xfer: 0.50ms, FW: 40.65ms, BW: 59.26ms, Total Batch Time: 103.53ms
+2025-06-12 20:08:14,878 - INFO - Epoch 4, Batch 5400: P_Loss=1.8638, V_Loss=0.7469, T_Loss=2.6107, GPU Xfer: 0.40ms, FW: 40.10ms, BW: 60.01ms, Total Batch Time: 102.87ms
+2025-06-12 20:08:33,331 - INFO - Epoch 4, Batch 5500: P_Loss=1.9868, V_Loss=0.8055, T_Loss=2.7923, GPU Xfer: 0.37ms, FW: 39.84ms, BW: 60.01ms, Total Batch Time: 102.71ms
+2025-06-12 20:08:51,717 - INFO - Epoch 4, Batch 5600: P_Loss=1.8323, V_Loss=0.7720, T_Loss=2.6043, GPU Xfer: 0.38ms, FW: 39.26ms, BW: 60.01ms, Total Batch Time: 102.19ms
+2025-06-12 20:09:10,085 - INFO - Epoch 4, Batch 5700: P_Loss=2.0130, V_Loss=0.7671, T_Loss=2.7801, GPU Xfer: 0.42ms, FW: 39.93ms, BW: 59.89ms, Total Batch Time: 103.40ms
+2025-06-12 20:09:28,448 - INFO - Epoch 4, Batch 5800: P_Loss=1.9449, V_Loss=0.8468, T_Loss=2.7917, GPU Xfer: 0.36ms, FW: 39.91ms, BW: 59.76ms, Total Batch Time: 102.52ms
+2025-06-12 20:09:46,885 - INFO - Epoch 4, Batch 5900: P_Loss=1.8332, V_Loss=0.8074, T_Loss=2.6405, GPU Xfer: 0.37ms, FW: 40.08ms, BW: 59.53ms, Total Batch Time: 102.37ms
+2025-06-12 20:10:05,233 - INFO - Epoch 4, Batch 6000: P_Loss=1.9412, V_Loss=0.7423, T_Loss=2.6836, GPU Xfer: 0.40ms, FW: 39.39ms, BW: 60.39ms, Total Batch Time: 103.01ms
+2025-06-12 20:10:23,610 - INFO - Epoch 4, Batch 6100: P_Loss=1.9708, V_Loss=0.8003, T_Loss=2.7711, GPU Xfer: 0.41ms, FW: 40.14ms, BW: 60.03ms, Total Batch Time: 103.25ms
+2025-06-12 20:10:42,085 - INFO - Epoch 4, Batch 6200: P_Loss=2.0309, V_Loss=0.6994, T_Loss=2.7303, GPU Xfer: 0.38ms, FW: 39.90ms, BW: 59.73ms, Total Batch Time: 102.57ms
+2025-06-12 20:11:00,411 - INFO - Epoch 4, Batch 6300: P_Loss=1.9038, V_Loss=0.7825, T_Loss=2.6863, GPU Xfer: 0.40ms, FW: 39.30ms, BW: 60.53ms, Total Batch Time: 102.98ms
+2025-06-12 20:11:18,886 - INFO - Epoch 4, Batch 6400: P_Loss=1.9699, V_Loss=0.8143, T_Loss=2.7842, GPU Xfer: 0.39ms, FW: 39.40ms, BW: 60.19ms, Total Batch Time: 102.49ms
+2025-06-12 20:11:37,270 - INFO - Epoch 4, Batch 6500: P_Loss=1.9520, V_Loss=0.7184, T_Loss=2.6703, GPU Xfer: 0.37ms, FW: 39.77ms, BW: 59.66ms, Total Batch Time: 102.93ms
+2025-06-12 20:11:55,616 - INFO - Epoch 4, Batch 6600: P_Loss=1.8340, V_Loss=0.7558, T_Loss=2.5898, GPU Xfer: 0.42ms, FW: 39.86ms, BW: 59.69ms, Total Batch Time: 102.51ms
+2025-06-12 20:12:14,024 - INFO - Epoch 4, Batch 6700: P_Loss=1.9123, V_Loss=0.8372, T_Loss=2.7495, GPU Xfer: 0.38ms, FW: 39.21ms, BW: 59.81ms, Total Batch Time: 101.87ms
+2025-06-12 20:12:32,400 - INFO - Epoch 4, Batch 6800: P_Loss=2.0202, V_Loss=0.7763, T_Loss=2.7966, GPU Xfer: 0.45ms, FW: 40.21ms, BW: 59.66ms, Total Batch Time: 102.85ms
+2025-06-12 20:12:50,831 - INFO - Epoch 4, Batch 6900: P_Loss=2.0053, V_Loss=0.7263, T_Loss=2.7317, GPU Xfer: 0.38ms, FW: 39.28ms, BW: 60.65ms, Total Batch Time: 103.04ms
+2025-06-12 20:13:09,862 - INFO - Epoch 4, Batch 7000: P_Loss=1.9465, V_Loss=0.7657, T_Loss=2.7121, GPU Xfer: 0.45ms, FW: 42.76ms, BW: 62.99ms, Total Batch Time: 108.80ms
+2025-06-12 20:13:30,344 - INFO - Epoch 4, Batch 7100: P_Loss=1.9768, V_Loss=0.7334, T_Loss=2.7101, GPU Xfer: 0.36ms, FW: 42.39ms, BW: 60.26ms, Total Batch Time: 105.46ms
+2025-06-12 20:13:50,387 - INFO - Epoch 4, Batch 7200: P_Loss=1.9402, V_Loss=0.8227, T_Loss=2.7628, GPU Xfer: 0.37ms, FW: 41.68ms, BW: 60.04ms, Total Batch Time: 105.09ms
+2025-06-12 20:14:08,990 - INFO - Epoch 4, Batch 7300: P_Loss=1.9552, V_Loss=0.8043, T_Loss=2.7595, GPU Xfer: 0.37ms, FW: 41.14ms, BW: 62.16ms, Total Batch Time: 106.29ms
+2025-06-12 20:14:28,470 - INFO - Epoch 4, Batch 7400: P_Loss=1.9795, V_Loss=0.8339, T_Loss=2.8134, GPU Xfer: 0.54ms, FW: 40.71ms, BW: 61.42ms, Total Batch Time: 105.86ms
+2025-06-12 20:14:48,298 - INFO - Epoch 4, Batch 7500: P_Loss=1.9044, V_Loss=0.7736, T_Loss=2.6781, GPU Xfer: 0.36ms, FW: 42.62ms, BW: 60.83ms, Total Batch Time: 107.37ms
+2025-06-12 20:15:08,336 - INFO - Epoch 4, Batch 7600: P_Loss=1.9099, V_Loss=0.6871, T_Loss=2.5970, GPU Xfer: 0.37ms, FW: 42.42ms, BW: 60.22ms, Total Batch Time: 105.49ms
+2025-06-12 20:15:27,894 - INFO - Epoch 4, Batch 7700: P_Loss=1.9108, V_Loss=0.7617, T_Loss=2.6725, GPU Xfer: 0.55ms, FW: 41.57ms, BW: 61.05ms, Total Batch Time: 107.50ms
+2025-06-12 20:15:47,527 - INFO - Epoch 4, Batch 7800: P_Loss=2.0104, V_Loss=0.7876, T_Loss=2.7980, GPU Xfer: 0.38ms, FW: 42.29ms, BW: 59.64ms, Total Batch Time: 106.05ms
+2025-06-12 20:16:07,393 - INFO - Epoch 4, Batch 7900: P_Loss=2.1070, V_Loss=0.7738, T_Loss=2.8808, GPU Xfer: 0.38ms, FW: 41.35ms, BW: 60.15ms, Total Batch Time: 104.60ms
+2025-06-12 20:16:27,172 - INFO - Epoch 4, Batch 8000: P_Loss=2.0283, V_Loss=0.8005, T_Loss=2.8288, GPU Xfer: 0.41ms, FW: 42.84ms, BW: 60.86ms, Total Batch Time: 108.92ms
+2025-06-12 20:16:47,156 - INFO - Epoch 4, Batch 8100: P_Loss=1.9415, V_Loss=0.7880, T_Loss=2.7296, GPU Xfer: 0.39ms, FW: 41.15ms, BW: 61.08ms, Total Batch Time: 105.40ms
+2025-06-12 20:17:07,206 - INFO - Epoch 4, Batch 8200: P_Loss=1.9373, V_Loss=0.7745, T_Loss=2.7118, GPU Xfer: 0.37ms, FW: 41.47ms, BW: 61.66ms, Total Batch Time: 106.28ms
+2025-06-12 20:17:27,400 - INFO - Epoch 4, Batch 8300: P_Loss=2.0165, V_Loss=0.8115, T_Loss=2.8280, GPU Xfer: 0.41ms, FW: 42.33ms, BW: 60.07ms, Total Batch Time: 105.53ms
+2025-06-12 20:17:46,118 - INFO - Epoch 4, Batch 8400: P_Loss=2.0309, V_Loss=0.7696, T_Loss=2.8005, GPU Xfer: 0.45ms, FW: 41.20ms, BW: 61.90ms, Total Batch Time: 106.29ms
+2025-06-12 20:18:05,829 - INFO - Epoch 4, Batch 8500: P_Loss=1.9737, V_Loss=0.7727, T_Loss=2.7464, GPU Xfer: 0.38ms, FW: 41.21ms, BW: 61.05ms, Total Batch Time: 105.26ms
+2025-06-12 20:18:24,882 - INFO - Epoch 4, Batch 8600: P_Loss=2.0902, V_Loss=0.7677, T_Loss=2.8578, GPU Xfer: 0.37ms, FW: 43.24ms, BW: 62.65ms, Total Batch Time: 109.11ms
+2025-06-12 20:18:44,805 - INFO - Epoch 4, Batch 8700: P_Loss=1.9606, V_Loss=0.7407, T_Loss=2.7012, GPU Xfer: 0.37ms, FW: 40.28ms, BW: 62.50ms, Total Batch Time: 106.04ms
+2025-06-12 20:19:03,977 - INFO - Epoch 4, Batch 8800: P_Loss=1.9508, V_Loss=0.7821, T_Loss=2.7329, GPU Xfer: 0.58ms, FW: 42.87ms, BW: 60.79ms, Total Batch Time: 106.95ms
+2025-06-12 20:19:24,162 - INFO - Epoch 4, Batch 8900: P_Loss=1.9753, V_Loss=0.7965, T_Loss=2.7718, GPU Xfer: 0.75ms, FW: 42.17ms, BW: 60.15ms, Total Batch Time: 105.74ms
+2025-06-12 20:19:42,877 - INFO - Epoch 4, Batch 9000: P_Loss=1.9395, V_Loss=0.7783, T_Loss=2.7178, GPU Xfer: 0.41ms, FW: 41.24ms, BW: 60.69ms, Total Batch Time: 105.84ms
+2025-06-12 20:20:01,570 - INFO - Epoch 4, Batch 9100: P_Loss=1.9399, V_Loss=0.7745, T_Loss=2.7144, GPU Xfer: 0.47ms, FW: 42.57ms, BW: 60.57ms, Total Batch Time: 106.13ms
+2025-06-12 20:20:20,621 - INFO - Epoch 4, Batch 9200: P_Loss=1.8789, V_Loss=0.7739, T_Loss=2.6528, GPU Xfer: 0.37ms, FW: 42.46ms, BW: 59.90ms, Total Batch Time: 105.32ms
+2025-06-12 20:20:39,779 - INFO - Epoch 4, Batch 9300: P_Loss=2.0680, V_Loss=0.7334, T_Loss=2.8014, GPU Xfer: 0.38ms, FW: 42.83ms, BW: 60.39ms, Total Batch Time: 106.11ms
+2025-06-12 20:20:58,364 - INFO - Epoch 4, Batch 9400: P_Loss=1.9260, V_Loss=0.8081, T_Loss=2.7342, GPU Xfer: 0.40ms, FW: 41.96ms, BW: 60.18ms, Total Batch Time: 105.45ms
+2025-06-12 20:21:17,958 - INFO - Epoch 4, Batch 9500: P_Loss=1.9488, V_Loss=0.7951, T_Loss=2.7439, GPU Xfer: 0.37ms, FW: 42.33ms, BW: 60.34ms, Total Batch Time: 105.65ms
+2025-06-12 20:21:32,936 - INFO - --- Epoch 4 Train Summary ---
+2025-06-12 20:21:32,936 - INFO - Average Policy Loss: 1.9602
+2025-06-12 20:21:32,936 - INFO - Average Value Loss: 0.7737
+2025-06-12 20:21:32,937 - INFO - Average Total Loss: 2.7339
+2025-06-12 20:21:32,937 - INFO - Current Learning Rate: 0.001000
+2025-06-12 20:22:19,420 - INFO - --- Epoch 4 Val Summary ---
+2025-06-12 20:22:19,420 - INFO - Average Policy Loss: 2.0054
+2025-06-12 20:22:19,420 - INFO - Average Value Loss: 0.7837
+2025-06-12 20:22:19,420 - INFO - Average Total Loss: 2.7891
+2025-06-12 20:22:19,420 - INFO - New best validation loss: 2.7891. Saving best model...
+2025-06-12 20:22:19,550 - INFO - Model checkpoint saved to C:\Users\User\Projects\talbot\model\checkpoints_supervised\chess_ai_model_epoch_4.pth

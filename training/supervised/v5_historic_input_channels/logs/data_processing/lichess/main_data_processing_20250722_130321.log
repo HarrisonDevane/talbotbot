@@ -1,0 +1,19 @@
+2025-07-22 13:03:23,043 - INFO - Starting parallel data processing from directory: C:\Users\User\Projects\talbot\src\../data\lichess_elite_db
+2025-07-22 13:03:23,043 - INFO - Saving ONE HDF5 file per worker in: C:\Users\User\Projects\talbot\src\training\supervised\v5_historic_input_channels\scripts\../data\lichess_elite_db
+2025-07-22 13:03:23,043 - INFO - Using 8 parallel workers.
+2025-07-22 13:03:23,044 - INFO - Each worker will process up to 625000 moves.
+2025-07-22 13:03:23,044 - INFO - Total expected moves: 5000000
+2025-07-22 13:03:23,045 - INFO - Found 79 PGN files to process.
+2025-07-22 17:35:33,054 - INFO - Worker 3 completed. Output: worker_3.h5, Moves: 625000. Overall processed: 625000
+2025-07-22 17:35:41,530 - INFO - Worker 2 completed. Output: worker_2.h5, Moves: 625000. Overall processed: 1250000
+2025-07-22 17:35:47,523 - INFO - Worker 1 completed. Output: worker_1.h5, Moves: 625000. Overall processed: 1875000
+2025-07-22 17:36:17,140 - INFO - Worker 0 completed. Output: worker_0.h5, Moves: 625000. Overall processed: 2500000
+2025-07-22 17:36:31,288 - INFO - Worker 5 completed. Output: worker_5.h5, Moves: 625000. Overall processed: 3125000
+2025-07-22 17:36:44,338 - INFO - Worker 4 completed. Output: worker_4.h5, Moves: 625000. Overall processed: 3750000
+2025-07-22 17:37:36,654 - INFO - Worker 6 completed. Output: worker_6.h5, Moves: 625000. Overall processed: 4375000
+2025-07-22 17:38:15,545 - INFO - Worker 7 completed. Output: worker_7.h5, Moves: 625000. Overall processed: 5000000
+2025-07-22 17:38:16,343 - INFO - Parallel data processing complete!
+2025-07-22 17:38:16,343 - INFO - Total individual HDF5 files created: 8
+2025-07-22 17:38:16,343 - INFO - Overall total moves processed: 5000000
+2025-07-22 17:38:16,343 - INFO - Individual HDF5 files are located in: C:\Users\User\Projects\talbot\src\training\supervised\v5_historic_input_channels\scripts\../data\lichess_elite_db
+2025-07-22 17:38:16,344 - INFO - You can now combine these files later using a separate script if needed.

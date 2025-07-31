@@ -1,0 +1,19 @@
+2025-07-23 08:25:33,331 - INFO - Starting parallel tactical data processing from directory: C:\Users\User\Projects\talbot\src\../data\lichess_tactics
+2025-07-23 08:25:33,331 - INFO - Saving ONE HDF5 file per worker in: C:\Users\User\Projects\talbot\src\training\supervised\v5_historic_input_channels\scripts\../data\processed_tactical_h5
+2025-07-23 08:25:33,331 - INFO - Using 8 parallel workers.
+2025-07-23 08:25:33,332 - INFO - Each worker will process up to 312500 positions (all moves in solution).
+2025-07-23 08:25:33,332 - INFO - Total expected positions: 2500000
+2025-07-23 08:25:33,333 - INFO - Found 8 tactical CSV chunks to process.
+2025-07-23 10:19:20,528 - INFO - Tactical Worker 1 completed. Output: tactical_worker_1.h5, Positions: 272620. Overall processed: 272620
+2025-07-23 10:19:34,831 - INFO - Tactical Worker 0 completed. Output: tactical_worker_0.h5, Positions: 273204. Overall processed: 545824
+2025-07-23 10:19:39,863 - INFO - Tactical Worker 3 completed. Output: tactical_worker_3.h5, Positions: 273654. Overall processed: 819478
+2025-07-23 10:19:47,192 - INFO - Tactical Worker 4 completed. Output: tactical_worker_4.h5, Positions: 273748. Overall processed: 1093226
+2025-07-23 10:19:54,370 - INFO - Tactical Worker 2 completed. Output: tactical_worker_2.h5, Positions: 273838. Overall processed: 1367064
+2025-07-23 10:20:07,964 - INFO - Tactical Worker 6 completed. Output: tactical_worker_6.h5, Positions: 274540. Overall processed: 1641604
+2025-07-23 10:20:14,683 - INFO - Tactical Worker 5 completed. Output: tactical_worker_5.h5, Positions: 275144. Overall processed: 1916748
+2025-07-23 10:20:16,970 - INFO - Tactical Worker 7 completed. Output: tactical_worker_7.h5, Positions: 275070. Overall processed: 2191818
+2025-07-23 10:20:17,776 - INFO - Parallel tactical data processing complete!
+2025-07-23 10:20:17,776 - INFO - Total individual HDF5 files created: 8
+2025-07-23 10:20:17,776 - INFO - Overall total positions processed: 2191818
+2025-07-23 10:20:17,776 - INFO - Individual HDF5 files are located in: C:\Users\User\Projects\talbot\src\training\supervised\v5_historic_input_channels\scripts\../data\processed_tactical_h5
+2025-07-23 10:20:17,777 - INFO - You can now combine these files later using a separate script if needed.

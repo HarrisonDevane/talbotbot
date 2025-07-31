@@ -1,0 +1,19 @@
+2025-07-21 19:26:44,667 - INFO - Starting parallel data processing from directory: C:\Users\User\Projects\talbot\src\../data\gm_games
+2025-07-21 19:26:44,667 - INFO - Saving ONE HDF5 file per worker in: C:\Users\User\Projects\talbot\src\training\supervised\v5_historic_input_channels\scripts\../data\gm_games
+2025-07-21 19:26:44,667 - INFO - Using 8 parallel workers.
+2025-07-21 19:26:44,667 - INFO - Each worker will process up to 2500000 moves.
+2025-07-21 19:26:44,667 - INFO - Total expected moves: 20000000
+2025-07-21 19:26:44,669 - INFO - Found 241 PGN files to process.
+2025-07-22 12:30:17,221 - INFO - Worker 7 completed. Output: worker_7.h5, Moves: 2500000. Overall processed: 2500000
+2025-07-22 12:30:41,643 - INFO - Worker 0 completed. Output: worker_0.h5, Moves: 2500000. Overall processed: 5000000
+2025-07-22 12:30:45,300 - INFO - Worker 1 completed. Output: worker_1.h5, Moves: 2500000. Overall processed: 7500000
+2025-07-22 12:30:50,602 - INFO - Worker 4 completed. Output: worker_4.h5, Moves: 2500000. Overall processed: 10000000
+2025-07-22 12:31:06,409 - INFO - Worker 2 completed. Output: worker_2.h5, Moves: 2500000. Overall processed: 12500000
+2025-07-22 12:31:29,380 - INFO - Worker 3 completed. Output: worker_3.h5, Moves: 2500000. Overall processed: 15000000
+2025-07-22 12:31:42,845 - INFO - Worker 6 completed. Output: worker_6.h5, Moves: 2500000. Overall processed: 17500000
+2025-07-22 12:31:45,671 - INFO - Worker 5 completed. Output: worker_5.h5, Moves: 2500000. Overall processed: 20000000
+2025-07-22 12:31:46,334 - INFO - Parallel data processing complete!
+2025-07-22 12:31:46,335 - INFO - Total individual HDF5 files created: 8
+2025-07-22 12:31:46,335 - INFO - Overall total moves processed: 20000000
+2025-07-22 12:31:46,335 - INFO - Individual HDF5 files are located in: C:\Users\User\Projects\talbot\src\training\supervised\v5_historic_input_channels\scripts\../data\gm_games
+2025-07-22 12:31:46,335 - INFO - You can now combine these files later using a separate script if needed.
