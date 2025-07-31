@@ -1,7 +1,6 @@
 lichess:
   bot_id: "Talbotbot" 
   api_token: "placeholder" 
-  threads: 1
   total_games: Null
 
 talbot:
@@ -25,16 +24,24 @@ timing:
   buffer_time: 5
   minimum_time: 1
 
-challenges:
-  accept_challenges: False
-  variant: "standard" 
-  min_challenge_time: 3
-  min_challenge_increment: 2
-  challenge_bots: True
-  challenge_rated: True
-  challenge_interval: 30
-  challenge_time_min: 5
-  challenge_increment_sec: 5
+challenge_in:
+  accept_challenge_threads: 1
+  accept_challenge_bot: False
+  accept_challenge_human: True
+  accept_challenge_rated: False
+  accept_variant: "standard" 
+  accept_min_challenge_time: 3
+  accept_min_challenge_increment: 2
+
+challenge_out:
+  challenge_bot_threads: 1
+  challenge_bot: True
+  challenge_bot_url: "https://lichess.org/player/bots?page=1"
+  challenge_bot_rated: True
+  challenge_bot_variant: "standard"
+  challenge_bot_interval: 45
+  challenge_bot_time_min: 10
+  challenge_bot_increment_sec: 5
 
 logging:
   lichess_logging: True

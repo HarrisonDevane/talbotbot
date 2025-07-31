@@ -9,6 +9,8 @@ import requests.exceptions
 import threading
 import time
 import random
+import requests
+from bs4 import BeautifulSoup
 
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.join(current_script_dir, "..")
@@ -31,12 +33,15 @@ class DummyLogger:
 
 
 class LichessBot:
-    def __init__(self, lichess_config: dict, talbot_player_config: dict, timing_config:dict, challenge_config: dict, logging_config: dict):
+    def __init__(self, lichess_config: dict, talbot_player_config: dict, timing_config:dict, challenge_in_config: dict, challenge_out_config: dict, logging_config: dict):
         self.lichess_config = lichess_config
         self.talbot_player_config = talbot_player_config
         self.timing_config = timing_config
-        self.challenge_config = challenge_config
+        self.challenge_in_config = challenge_in_config
+        self.challenge_out_config = challenge_out_config
         self.logging_config = logging_config
+        self.bots_to_challenge = None
+        self.challenge_thread = None
 
         self.session = berserk.TokenSession(lichess_config["api_token"])
         self.client = berserk.Client(session=self.session)
@@ -83,21 +88,65 @@ class LichessBot:
                 self.logger.info("Challenge thread: Total game limit reached. Stopping challenge loop.")
                 break
 
-            self.logger.info(f"Active games: {len(self.game_threads)}, Total threads: {self.lichess_config['threads']}, Games played: {self.games_played}, Games total: {self.lichess_config['total_games']}")
+            self.logger.info(f"Active games: {len(self.game_threads)}, Total in threads: {self.challenge_in_config['accept_challenge_threads']}, Total out threads: {self.challenge_out_config['challenge_bot_threads']}, Games played: {self.games_played}, Games total: {self.lichess_config['total_games']}")
 
-
-            # Only attempt to challenge if the bot is not currently in any game
-            if len(self.game_threads) < (self.lichess_config['threads']):
+            # Only attempt to challenge if the number of active bot games < challenge threads
+            if len(self.game_threads) < (self.challenge_out_config['challenge_bot_threads']):
                 self._challenge_specific_bots()
 
-            self.stop_event.wait(self.challenge_config['challenge_interval'])
+            self.stop_event.wait(self.challenge_out_config['challenge_bot_interval'])
         self.logger.debug("Challenge thread stopped.")
+
+    def get_bots_page_1(self):
+        url = self.challenge_out_config['challenge_bot_url']
+        self.logger.info(f"Fetching {url} ...")
+        response = requests.get(url)
+        if response.status_code != 200:
+            self.logger.error(f"Failed to fetch page 1: status code {response.status_code}")
+            return
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        bot_links = soup.select('a[href^="/@"]')
+        
+        bots = []
+        for link in bot_links:
+            bot_name = link.text.strip()
+            if bot_name and bot_name not in bots:
+                bots.append(bot_name)
+        
+        cleaned_bots = [bot.replace('BOT\xa0', '') for bot in bots]
+
+        self.logger.info(f"Found {len(bots)} bots on page 1.")
+        return cleaned_bots
+    
+
+    def _challenge_specific_bots(self):
+        """
+        Challenges a list of bots on lichess
+        """
+
+        opponent_id = random.choice(self.bots_to_challenge)
+        self.logger.info(f"Attempting to challenge bot: {opponent_id}")
+
+        try:
+            challenge = self.client.challenges.create(
+                opponent_id,
+                rated=self.challenge_out_config['challenge_bot_rated'],
+                variant=self.challenge_out_config['challenge_bot_variant'],
+                clock_limit=self.challenge_out_config["challenge_bot_time_min"] * 60,
+                clock_increment=self.challenge_out_config["challenge_bot_increment_sec"]
+            )
+            self.logger.info(f"Successfully sent challenge to {opponent_id}. Challenge ID: {challenge['id']}")
+        except Exception as e:
+            self.logger.error(f"Unexpected error when challenging: {e}", exc_info=True)
+
 
 
     def run(self):
         self.logger.debug("Connecting to Lichess API (main event stream)...")
 
-        if self.challenge_config['challenge_bots']:
+        if self.challenge_out_config['challenge_bot']:
+            self.bots_to_challenge = self.get_bots_page_1()
             self.challenge_thread = threading.Thread(target=self._challenge_loop, name="ChallengeThread")
             self.challenge_thread.daemon = True
             self.challenge_thread.start()
@@ -133,7 +182,7 @@ class LichessBot:
 
 
                     # check how many threads are running
-                    if len(self.game_threads) < (self.lichess_config['threads']):
+                    if len(self.game_threads) < (self.challenge_in_config['accept_challenge_threads'] + self.challenge_out_config['challenge_bot_threads']):
                         if game_id not in self.game_threads:
                             self.logger.debug(f"{game_id}: starting new game thread")
                             self.games_played += 1
@@ -172,6 +221,9 @@ class LichessBot:
             self.logger.info("Ctrl+C detected! Resigning all active games and shutting down...")
             for game_id in list(self.game_threads.keys()):
                 self._try_resign_game(game_id)
+
+        except Exception as e:
+            self.logger.critical(f"Unexpected error: {e}", exc_info=True)
 
         finally:
             self._shutdown_bot()
@@ -247,41 +299,22 @@ class LichessBot:
                 game_logger.debug(f"{game_id}: unhandled game event type: {event_type}")
 
 
-    def _shutdown_bot(self):
-        """Gracefully shuts down all game threads and the player, including the challenge thread."""
-        self.logger.debug("Setting stop event for all threads...")
-        self.stop_event.set() # Signal all threads to stop
-
-        # First, join the challenge thread to ensure it cleans up
-        if self.challenge_thread and self.challenge_thread.is_alive():
-            self.logger.debug("Waiting for challenge thread to finish...")
-            self.challenge_thread.join(timeout=5) # Give it 5 seconds to finish
-            if self.challenge_thread.is_alive():
-                self.logger.warning("Challenge thread did not terminate gracefully within timeout.")
-
-        # Then, join individual game threads
-        for game_id, data in list(self.game_threads.items()):
-            thread = data["thread"]
-            if thread and thread.is_alive(): # Check if thread object exists and is alive
-                self.logger.debug(f"{game_id}: Waiting for game thread to finish...")
-                thread.join(timeout=5)
-                if thread.is_alive():
-                    self.logger.warning(f"{game_id}: game thread did not terminate gracefully within timeout.")
-            # Clear game data regardless of thread termination success
-            del self.game_threads[game_id]
-
-        self.logger.debug("Lichess Bot completely shut down.")
-
-
     def _handle_challenge(self, challenge_data):
 
         
         challenge_id = challenge_data["id"]
         challenger_id = challenge_data['challenger']['id'].lower()
+        human_challenge = True
 
         # Ignore self challenges
         if challenger_id == self.lichess_config['bot_id'].lower():
             return
+        
+        # Check for human challenges
+        if 'title' in challenge_data['challenger'] and \
+            challenge_data['challenger']['title'] is not None and \
+            challenge_data['challenger']['title'].lower() == 'bot':
+            human_challenge = False
 
         variant = challenge_data["variant"]["key"].lower()
         rated = challenge_data["rated"]
@@ -289,48 +322,49 @@ class LichessBot:
         challenge_time_min = int(challenge_data["timeControl"]["limit"]) / 60
         challenge_increment_sec = challenge_data["timeControl"]["limit"]
 
+        accepted_variant = self.challenge_in_config["accept_variant"]
+        min_time_min_config = self.challenge_in_config["accept_min_challenge_time"]
+        min_increment_sec_config = self.challenge_in_config["accept_min_challenge_increment"]
+
         self.logger.debug(f"Received challenge {challenge_id} from {challenger_id}: Variant={variant}, Rated={rated}, Time={challenge_time_min:.1f}min+{challenge_increment_sec}s")
 
-        accept = True
-        decline_reason = []
 
-        accepted_variant = self.challenge_config["variant"]
-        min_time_min_config = self.challenge_config["min_challenge_time"]
-        min_increment_sec_config = self.challenge_config["min_challenge_increment"]
+        decline_reason = None
 
-        if not self.challenge_config['accept_challenges']:
-            accept = False
-            decline_reason.append(f"Not accepting challenges")
+        # List reasons for declining challenge
+        if human_challenge and not self.challenge_in_config['accept_challenge_human']:
+            decline_reason = "not accepting human challenges"
 
-        if accepted_variant != "any" and variant != accepted_variant:
-            accept = False
-            decline_reason.append(f"variant '{variant}' (only '{accepted_variant}' accepted)")
+        elif not human_challenge and not self.challenge_in_config['accept_challenge_bot']:
+            decline_reason = "not accepting bot challenges"
 
-        if challenge_time_min < min_time_min_config:
-            accept = False
-            decline_reason.append(f"main time {challenge_time_min:.1f}min (min {min_time_min_config}min required)")
+        elif rated and not self.challenge_in_config['accept_challenge_rated']:
+            decline_reason = "not accepting rated challenges"
 
-        if challenge_increment_sec < min_increment_sec_config:
-            accept = False
-            decline_reason.append(f"increment {challenge_increment_sec}s (min {min_increment_sec_config}s required)")
+        elif accepted_variant != "any" and variant != accepted_variant:
+            decline_reason = f"variant '{variant}' not accepted (only '{accepted_variant}' allowed)"
 
-        if len(self.game_threads) == self.lichess_config['threads']:
-            accept = False
-            decline_reason.append(f"bot is already in {len(self.game_threads)} game(s).")
+        elif challenge_time_min < min_time_min_config:
+            decline_reason = f"main time {challenge_time_min:.1f}min too short (min {min_time_min_config}min required)"
+
+        elif challenge_increment_sec < min_increment_sec_config:
+            decline_reason = f"increment {challenge_increment_sec}s too low (min {min_increment_sec_config}s required)"
+
+        elif len(self.game_threads) == (self.challenge_in_config['accept_challenge_threads'] + self.challenge_out_config['challenge_bot_threads']):
+            decline_reason = f"bot is already in {len(self.game_threads)} game(s)"
             self.logger.info(f"Declining challenge {challenge_id} from {challenger_id} because bot is already busy.")
 
-        if self.lichess_config['total_games'] is not None and self.games_played >= self.lichess_config['total_games']:
-            accept = False
-            decline_reason.append(f"bot has played all games for today")
+        elif self.lichess_config['total_games'] is not None and self.games_played >= self.lichess_config['total_games']:
+            decline_reason = "bot has played all games for today"
             self.logger.info(f"Declining challenge {challenge_id} from {challenger_id} because total games have been played.")
 
-        if accept:
+        # Decline or accept challenge
+        if decline_reason:
+            self.logger.debug(f"Declining challenge {challenge_id} due to: {decline_reason}")
+            self.client.bots.decline_challenge(challenge_id)
+        else:
             self.client.bots.accept_challenge(challenge_id)
             self.logger.debug(f"Accepted challenge {challenge_id}.")
-        else:
-            reason_str = ", ".join(decline_reason)
-            self.logger.debug(f"Declining challenge {challenge_id} due to criteria mismatch: {reason_str}.")
-            self.client.bots.decline_challenge(challenge_id)
 
 
     def _handle_game_state(self, game_id, game_state, event_receive_time):
@@ -459,7 +493,7 @@ class LichessBot:
         max_retries = 3
         initial_delay_seconds = 1
         for attempt in range(1, max_retries + 1):
-            if self.game_threads[game_id]["is_over"]:
+            if self.game_threads.get(game_id) is None and not self.game_threads[game_id]["is_over"]:
                 return
             
             try:
@@ -501,12 +535,11 @@ class LichessBot:
             best_move_obj = player_instance.get_move(current_board, effective_time_for_ai)
             self.game_threads[game_id]["thread_lock"] = False
 
-            best_move_uci = best_move_obj.uci()
-
-            self.logger.debug(f"{game_id}: attempting to make move {best_move_uci}")
-
             # Only make move if game is in play
-            if not self.game_threads[game_id]["is_over"]:
+            if self.game_threads.get(game_id) is not None and not self.game_threads[game_id]["is_over"]:                
+                best_move_uci = best_move_obj.uci()
+                self.logger.debug(f"{game_id}: attempting to make move {best_move_uci}")
+
                 self._make_api_call_with_retries(game_id, self.client.bots.make_move, game_id, best_move_uci)
                 self.logger.debug(f"{game_id}: successfully sent move {best_move_uci}")
                 current_board.push_uci(best_move_uci)
@@ -528,15 +561,16 @@ class LichessBot:
             self.logger.error(f"{game_id}: unexpected error during resignation attempt for game: {e}", exc_info=True)
 
 
-    def _handle_game_finish(self, game_id, status_data):
+    def _handle_game_finish(self, game_id, status_data=None):
         """
         Handles the final cleanup for a game. This should be the single point
         where a game's entry is removed from self.game_threads.
         """
 
-        status_name = status_data.get("name")
-        if status_name:
-            self.logger.info(f"{game_id}: finished with status: {status_name}")
+        if status_data is not None:
+            status_name = status_data.get("name")
+            if status_name:
+                self.logger.info(f"{game_id}: finished with status: {status_name}")
 
         game_data = self.game_threads.get(game_id)
 
@@ -550,74 +584,45 @@ class LichessBot:
         def delayed_cleanup():
             # Wait if move calculation is ongoing
             while game_data["thread_lock"]:
-                time.sleep(0.05)
+                time.sleep(0.5)
             self.game_threads.pop(game_id, None)
             self.logger.info(f"{game_id}: cleaned up and removed from active games. Active games: {len(self.game_threads)}")
 
         threading.Thread(target=delayed_cleanup, daemon=True).start()
 
-    def _challenge_specific_bots(self):
-        """
-        Challenges a predefined list of Lichess bots within the 1500-2500 Elo range.
-        """
-        # List of bot IDs to challenge. These are generally active and within the target Elo range.
-        # You can find more at https://lichess.org/player/bots
-        TARGET_BOT_IDS = [
-            "maia1", "maia5", "maia9", "LeelaQueenOdds", "LeelaKnightOdds", "LeelaRookOdds", "LeelaPieceOdds",
-            "Lynx_BOT", "Boris-Trapsky", "Weiawaga", "RaspFish", "simpleEval", "halcyonbot", "YoBot_v2",
-            "ToromBot", "expositor", "ArasanX", "FataliiBot", "likeawizard-bot", "RadianceEngine", "eubos",
-            "WorstFish", "turkjs", "AKS-Mantissa", "GarboBot", "matmoi", "simbelmyne-bot", "ResoluteBot",
-            "Demolito_L5", "Demolito_L6", "Demolito_L4", "pawn_git", "duchessAI", "Goldfish-Engine", "notropis",
-            "odonata-bot", "ai-con", "sseh-c", "sargon-1ply", "LouisChess48-6K", "WolfuhfuhBot", "baby_eubos",
-            "Humaia", "jangine", "Euwe-chess-engine", "admete_bot", "kopyto_dev", "OpeningsBot", "anti-bot",
-            "fornax-engine", "simplexitor", "sargon-2ply", "Demolito_L3", "VariantsBot", "bot_adario",
-            "melsh_bot", "LeelaRogue", "TopasBot", "AshNostromo", "UltraBrick", "turochamp-1ply", "sargon-4ply",
-            "ChessNoobComp", "rudim-bot", "Elmichess", "DavidsGuterBot", "pawnrobot", "sargon-3ply",
-            "turochamp-2ply", "bot64jaques", "RoundMoundOfRebounds", "schnecken_bot", "CPU2002", "QueensGamBOT",
-            "mayhem23111", "Bot5551", "Moment-That-Inspires", "PatriciaBot", "jmjansen_aus_bot", "CPU2010",
-            "mochi_bot", "maello_bot", "Humaia-Strong", "bitbitbot", "StockDory", "untrained4406",
-            "bernstein-2ply", "Hyperopic", "CatNail", "bernstein-4ply", "pangubot", "Matrioshka_brain",
-            "littlePatricia", "ScalaQueen", "LazyBot", "LeelaQueenForKnight", "grandQ_AI", "cheeseNet",
-            "crabstick-engine", "fathzer-jchess", "buffFishNet", "MNSCP", "LazyBotJr", "PARTNER3615DIAGO",
-            "Endogenetic-Bot", "plumbot", "StupidfishBOTBYDSCS", "NilatacBot", "Cizme", "MaggiChess16",
-            "Annie_Archy", "ChamberiAjedrez", "AjedrezChamberi", "NimsiluBot", "charibot", "JeremyBot",
-            "hummus-bot", "Maelstrom-Chess", "AllRustBot", "GameRoManBot", "Lurch_0", "Lurch_1", "Gryndor",
-            "StreamerVSChat", "ArchduchessBot", "ExpNoSearchBOT", "MinOpponentMoves", "R0bspierre",
-            "tomlesspit", "cinder-bot", "Shocky_BOT", "Demolito_L2", "OlympusCz",
-            "Meltd0wn", "nuttchess_bot", "Groot123456", "CPU1990", "CPU1998", "CPU1994", "colinbot",
-            "Humanoid_1800", "PeachFruit", "HySharp", "ByteKnightEngine", "slow-and-stupid", "eNErGyOFbEiNGbOT",
-            "SomePythonBot", "Demolito_L1", "GNU4u", "Alexnajax_Fan", "TheUnforgivingBot", "GNUPassant",
-            "natto-bot", "GlueWinner", "InvinxibleFlxsh", "RookRusty", "NewChessEngine-ai", "ChampionKitten",
-            "KingBobIV", "Exogenetic-Bot", "HumanTrainedBot", "AconcaguaBot", "MaxtheDog-ESP32",
-            "ChesssenseEngine", "Ellen_Replay", "Cimille", "purwani",
-            "AlwaysPlayMystery", "Boosted_Maia_1900", "SharpRustic", "SeitoGaKatsu", "VEER-OMEGA-BOT",
-            "mjchess13", "SleepMindEngine", "Boosted_Maia_1700", "Boosted_Maia_1500", "Sooraj_Kumar_P_S",
-            "DeChessBot", "Boosted_Maia_1300", "worst_colinbot", "TakticproChes", "Laurentos_bot",
-            "DeepFriedFish", "futuregmbot", "TroutBot", "badgyal9"
-        ]
 
-        time_limit_seconds = self.challenge_config["challenge_time_min"] * 60
-        increment_seconds = self.challenge_config["challenge_increment_sec"]
+    def _shutdown_bot(self):
+        """Gracefully shuts down all game threads and the player, including the challenge thread."""
+        self.logger.debug("Setting stop event for all threads...")
+        self.stop_event.set() # Signal all threads to stop
 
-        opponent_id = random.choice(TARGET_BOT_IDS)
+        # First, join the challenge thread to ensure it cleans up
+        if self.challenge_thread is not None and self.challenge_thread.is_alive():
+            self.logger.debug("Waiting for challenge thread to finish...")
+            self.challenge_thread.join(timeout=1) # Give it 5 seconds to finish
+            if self.challenge_thread.is_alive():
+                self.logger.warning("Challenge thread did not terminate gracefully within timeout.")
 
-        self.logger.info(f"Attempting to challenge bot: {opponent_id}")
+        # Then, join individual game threads
+        for game_id, data in list(self.game_threads.items()):
+            self.logger.debug(f"{game_id}: Handling end of game...")
+            self._handle_game_finish(game_id)
+
+            while self.game_threads.get(game_id) is not None:
+                time.sleep(0.5)
+
+            thread = data["thread"]
+
+            # Join threads after game has been removed
+            if thread and thread.is_alive():
+                self.logger.debug(f"{game_id}: Waiting for game thread to finish...")
+                thread.join()
+                if thread.is_alive():
+                    self.logger.warning(f"{game_id}: game thread did not terminate gracefully within timeout.")
+
+        self.logger.debug("Lichess Bot completely shut down.")
 
 
-            
-
-
-        try:
-            challenge = self.client.challenges.create(
-                opponent_id,
-                rated=self.challenge_config['challenge_rated'],
-                variant=self.challenge_config['variant'],
-                clock_limit=time_limit_seconds,
-                clock_increment=increment_seconds
-            )
-            self.logger.info(f"Successfully sent challenge to {opponent_id}. Challenge ID: {challenge['id']}")
-        except Exception as e:
-            self.logger.error(f"Unexpected error when challenging: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
@@ -628,5 +633,12 @@ if __name__ == "__main__":
 
     config["lichess"]["api_token"] = os.getenv("LICHESS_API_TOKEN")
 
-    bot = LichessBot(config["lichess"], config["talbot"], config["timing"], config["challenges"], config["logging"])
+    bot = LichessBot(
+        lichess_config=config["lichess"], 
+        talbot_player_config=config["talbot"], 
+        timing_config=config["timing"], 
+        challenge_in_config=config["challenge_in"], 
+        challenge_out_config=config["challenge_out"],
+        logging_config=config["logging"]
+    )
     bot.run()
