@@ -33,7 +33,7 @@ Here is the plot showing the training loss per epoch:
 
 Here is the plot comparing the average training loss per epoch, with the average validation loss per epoch:
 
-![Training vs Validation Loss](logs/training_vs_validation.png)
+![Training vs Validation Loss](logs/training_vs_validation_loss.png)
 
 Due to the small model size, relatively small dataset, and no regularization, we see rapid overfitting. Best model is ~epoch 10.
 
