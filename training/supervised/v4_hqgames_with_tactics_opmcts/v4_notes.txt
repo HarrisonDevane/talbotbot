@@ -1,0 +1,5 @@
+Updates from v3:
+- Will use same params starting, just fine tuning to tactical games.
+- Will start with 50/50 split of tactical positions to GM moves. Combine 2m tactics with 2m GM moves to ensure it doesn't forget.
+- Will use cosine annealing with low LR (1e-7 -> 1e-9)
+- Scaled V loss to 5, giving roughly equal weighting with P loss.

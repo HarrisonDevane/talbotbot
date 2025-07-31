@@ -1,0 +1,50 @@
+lichess:
+  bot_id: "Talbotbot" 
+  api_token: "placeholder" 
+  total_games: Null
+
+talbot:
+  model_path: "/Users/User/Projects/talbot/training/supervised/v5_historic_input_channels/model/best_chess_ai_model.pth"
+  input_planes: 68
+  filters: 128
+  resblocks: 20
+  cpuct: 5.0
+  batchsize: 32
+
+timing:
+  early_game_movetime: 6
+  mid_game_threshold: 16
+  mid_game_movetime_factor: 25
+  mid_game_increment_factor: 0.75
+  mid_game_cap_factor: 0.1
+  late_game_threshold: 80
+  late_game_movetime_factor: 20
+  late_game_increment_factor: 0.8
+  late_game_cap_factor: 0.15
+  buffer_time: 5
+  minimum_time: 1
+
+challenge_in:
+  accept_challenge_threads: 1
+  accept_challenge_bot: False
+  accept_challenge_human: True
+  accept_challenge_rated: False
+  accept_variant: "standard" 
+  accept_min_challenge_time: 3
+  accept_min_challenge_increment: 2
+
+challenge_out:
+  challenge_bot_threads: 1
+  challenge_bot: True
+  challenge_bot_url: "https://lichess.org/player/bots?page=1"
+  challenge_bot_rated: False
+  challenge_bot_variant: "standard"
+  challenge_bot_interval: 45
+  challenge_bot_time_min: 10
+  challenge_bot_increment_sec: 5
+
+logging:
+  lichess_logging: True
+  lichess_logging_level: 20
+  game_logging: True
+  game_logging_level: 20

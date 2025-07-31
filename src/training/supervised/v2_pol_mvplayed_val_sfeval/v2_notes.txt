@@ -1,7 +1,0 @@
-Updates from v1:
-- Changed data_processing to read latest games first
-- Added logging to data processing
-- Filtering to >2600 elo games (W + B)
-- Updated data processing to give stockfish evals with 0.01s per position. Now takes ~15h to load all positions
-- 10 -> 16 res blocks
-- Added basic MCTS
