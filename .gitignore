@@ -5,6 +5,7 @@ venv/
 
 # Binaries
 data/
+!data/README.md
 
 # Python cache files
 __pycache__/
