@@ -599,21 +599,3 @@ Starting training from epoch 1 for 12 total epochs...
 2025-07-25 20:48:51,383 - INFO - Average Total Loss: 2.5488
 2025-07-25 20:48:51,384 - INFO - New best validation loss: 2.5488. Saving best model...
 2025-07-25 20:48:51,642 - INFO - Model checkpoint saved to C:\Users\User\Projects\talbot\src\training\supervised\v5_historic_input_channels\model\chess_ai_model_epoch_1.pth
-2025-07-25 20:49:06,883 - INFO - Epoch 2, Batch 0: P_Loss=2.1859, V_Loss=0.0742, T_Loss=2.5570, LR=0.000098, GPU Xfer: 3.41ms, FW: 254.76ms, BW: 130.33ms, Total Batch Time: 392.73ms
-2025-07-25 20:49:39,652 - INFO - Epoch 2, Batch 100: P_Loss=2.0249, V_Loss=0.0780, T_Loss=2.4151, LR=0.000098, GPU Xfer: 1.03ms, FW: 76.05ms, BW: 116.75ms, Total Batch Time: 198.42ms
-2025-07-25 20:50:13,081 - INFO - Epoch 2, Batch 200: P_Loss=2.1509, V_Loss=0.0661, T_Loss=2.4812, LR=0.000098, GPU Xfer: 0.97ms, FW: 78.40ms, BW: 117.68ms, Total Batch Time: 201.74ms
-2025-07-25 20:50:45,728 - INFO - Epoch 2, Batch 300: P_Loss=2.0893, V_Loss=0.0678, T_Loss=2.4282, LR=0.000098, GPU Xfer: 0.93ms, FW: 78.18ms, BW: 117.12ms, Total Batch Time: 201.09ms
-2025-07-25 20:51:18,307 - INFO - Epoch 2, Batch 400: P_Loss=2.1035, V_Loss=0.0701, T_Loss=2.4542, LR=0.000098, GPU Xfer: 1.11ms, FW: 78.12ms, BW: 117.99ms, Total Batch Time: 202.12ms
-2025-07-25 20:51:50,120 - INFO - Epoch 2, Batch 500: P_Loss=2.1700, V_Loss=0.0753, T_Loss=2.5464, LR=0.000098, GPU Xfer: 0.93ms, FW: 78.60ms, BW: 117.48ms, Total Batch Time: 201.88ms
-2025-07-25 20:52:22,697 - INFO - Epoch 2, Batch 600: P_Loss=1.9626, V_Loss=0.0742, T_Loss=2.3337, LR=0.000098, GPU Xfer: 0.95ms, FW: 78.32ms, BW: 118.00ms, Total Batch Time: 203.01ms
-2025-07-25 20:52:55,803 - INFO - Epoch 2, Batch 700: P_Loss=2.1896, V_Loss=0.0653, T_Loss=2.5160, LR=0.000098, GPU Xfer: 1.03ms, FW: 78.48ms, BW: 117.69ms, Total Batch Time: 201.68ms
-2025-07-25 20:53:29,112 - INFO - Epoch 2, Batch 800: P_Loss=2.1169, V_Loss=0.0821, T_Loss=2.5276, LR=0.000098, GPU Xfer: 0.93ms, FW: 78.38ms, BW: 118.07ms, Total Batch Time: 202.74ms
-2025-07-25 20:54:02,109 - INFO - Epoch 2, Batch 900: P_Loss=2.0080, V_Loss=0.0869, T_Loss=2.4426, LR=0.000098, GPU Xfer: 0.93ms, FW: 78.57ms, BW: 117.67ms, Total Batch Time: 201.39ms
-2025-07-25 20:54:35,292 - INFO - Epoch 2, Batch 1000: P_Loss=2.0409, V_Loss=0.0602, T_Loss=2.3421, LR=0.000098, GPU Xfer: 0.97ms, FW: 78.35ms, BW: 117.95ms, Total Batch Time: 202.19ms
-2025-07-25 20:55:08,780 - INFO - Epoch 2, Batch 1100: P_Loss=2.1658, V_Loss=0.0703, T_Loss=2.5171, LR=0.000098, GPU Xfer: 1.00ms, FW: 78.41ms, BW: 117.48ms, Total Batch Time: 202.48ms
-2025-07-25 20:55:42,193 - INFO - Epoch 2, Batch 1200: P_Loss=2.2011, V_Loss=0.0788, T_Loss=2.5951, LR=0.000098, GPU Xfer: 1.03ms, FW: 78.47ms, BW: 117.96ms, Total Batch Time: 202.22ms
-2025-07-25 20:56:15,490 - INFO - Epoch 2, Batch 1300: P_Loss=2.0896, V_Loss=0.0634, T_Loss=2.4065, LR=0.000098, GPU Xfer: 1.00ms, FW: 78.62ms, BW: 118.09ms, Total Batch Time: 202.66ms
-2025-07-25 20:56:48,321 - INFO - Epoch 2, Batch 1400: P_Loss=2.2285, V_Loss=0.0823, T_Loss=2.6401, LR=0.000098, GPU Xfer: 0.96ms, FW: 78.11ms, BW: 117.63ms, Total Batch Time: 202.35ms
-2025-07-25 20:57:20,914 - INFO - Epoch 2, Batch 1500: P_Loss=2.0656, V_Loss=0.0812, T_Loss=2.4715, LR=0.000098, GPU Xfer: 0.94ms, FW: 78.31ms, BW: 117.69ms, Total Batch Time: 202.59ms
-2025-07-25 20:57:54,312 - INFO - Epoch 2, Batch 1600: P_Loss=2.0986, V_Loss=0.0822, T_Loss=2.5097, LR=0.000098, GPU Xfer: 0.95ms, FW: 78.23ms, BW: 117.90ms, Total Batch Time: 202.55ms
-2025-07-25 20:58:27,692 - INFO - Epoch 2, Batch 1700: P_Loss=2.0937, V_Loss=0.0946, T_Loss=2.5665, LR=0.000098, GPU Xfer: 0.97ms, FW: 78.21ms, BW: 117.68ms, Total Batch Time: 202.78ms

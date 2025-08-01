@@ -1,125 +1,59 @@
-# Talbotbot 😈
+# Talbotbot v1.5
 
-**Version:** 1.5  
-**Rating:** ~1700 Lichess Elo  
-**Engine Type:** Chess AI using MCTS + CNN  
+## Overview
 
-Talbotbot is a neural-network-driven chess engine that combines **Monte Carlo Tree Search (MCTS)** with a **Convolutional Neural Network (CNN)** to evaluate positions and play moves.
+This was intended to be the final supervised iteration, with a focus on addressing limitations observed in earlier models—specifically, weaknesses in tactical and endgame positions. To that end, the dataset was significantly expanded and diversified across three sources, and synthetic data was generated to improve endgame understanding. The input representation was also enhanced: positions are now flipped to always represent the side to move, and historical context is included by encoding previous board states and repetition counters.
 
-## Demo
+- **Network:** 20 residual blocks  
+- **Training data:**
+  - **20M grandmaster positions** (filtered to games with 30+ moves to avoid early draws)
+  - **5M Lichess Masters positions** (2600+ Elo, 30+ moves)
+  - **2M Lichess tactical positions**, filtered to contain tactics ≥4 moves. The final 4 moves are prepended to the input to provide sequence context.
+  - **2M synthetic endgame positions** (random samples from 3–7 piece endgames). Each position is replayed for 4 moves to generate realistic previous states.
+- **Input:** A tensor of shape **18 × 8 × 8** representing the board state, composed of the following feature planes:
+  - 6 planes for white pieces: One binary plane per piece type (pawn, knight, bishop, rook, queen, king); `1` indicates presence, `0` absence.
+  - 6 planes for black pieces: Same format as above, for black's pieces.
+  - 1 plane for the current turn: All `1`s if it's white to move, all `0`s if black.
+  - 4 planes for castling rights: Kingside and queenside availability for both white and black; each plane is filled with `1`s if castling is available, otherwise `0`s.
+  - 1 plane for en passant: A binary mask where only the valid en passant file is marked with `1`s (if applicable).
+  - **12 × 4 planes** representing the board state history from the previous 4 positions.
+  - 2 planes for repetition counters: Encodes whether the current position has been seen once or twice in the game.
+- **Policy head:** One-hot encoded move that was played. For synthetic endgames, this corresponds to Stockfish’s principal variation.
+- **Value head:** 0.02s Stockfish evaluation normalized to `[-1, 1]` using `tanh`.
 
-Watch Talbotbot in action or play games at its Lichess profile:  
-**https://lichess.org/@/Talbotbot**
+## Training
 
-## Model Architecture
+The hyperparameters used for this iteration are shown below. Learning rate was reduced for fine-tuning.
 
-Talbotbot v1.5 uses a deep convolutional neural network (CNN) inspired by AlphaZero, with a residual architecture tailored for chess board evaluation. The model is trained to output both a move policy and a value estimate from a given board state.
+### Hyperparameters
 
----
+- **Batch size:** 512  
+- **Learning rate:** `1e-5` (max), `1e-6` (min)  
+- **Scheduler:** CosineAnnealingLR  
+- **Optimizer:** AdamW  
+- **Regularization:**  
+  - L2 regularization: `1e-4`  
+  - Dropout: `0.1` on residual blocks >10, `0.25` on fully connected heads  
+- **Training set size:** 4%
 
-### Input
+## Training Loss
 
-- **Shape:** `(batch_size, 68, 8, 8)`
-- **Encoding:** 68 input planes encode the full game state, including:
-  - 12 planes for the piece types for both players
-  - 4 planes for castling rights
-  - 1 plane for the current turn
-  - 1 plane for en passant
-  - 2 planes for repetition history
-  - 12 x 4 planes for the previous 4 board states
+Here is the plot showing the training loss per epoch:
 
----
+![Training Loss](logs/training_loss.png)
 
-### Core Network
+This plot is smoothed. With added regularization and a more diverse dataset, the model trains more stably than earlier versions.
 
-- 1 initial `3×3` convolution with batch normalization and ReLU
-- **20 Residual Blocks**, each with:
-  - Two `3×3` convolutions
-  - Batch normalization + ReLU
-  - Residual skip connection
-  - **Dropout2D** applied in blocks 10 through 20 (`dropout_rate_conv = 0.1`)
+Here is the comparison of average training loss per epoch with average validation loss per epoch:
 
----
+![Training vs Validation Loss](logs/training_vs_validation_loss.png)
 
-### Policy Head
+Convergence is slower than earlier iterations, but overfitting is minimal, suggesting improved generalization.
 
-- `1×1` convolution → BatchNorm → ReLU  
-- Fully connected layer outputs logits for **8×8×73 = 4672** possible moves  
-- Used to guide MCTS with softmax sampling
+## Evaluation
 
----
-
-### Value Head
-
-- `1×1` convolution → BatchNorm → ReLU  
-- Fully connected → Dropout → Fully connected  
-- Final scalar output passed through `tanh`, representing:
-  - **+1** = certain win  
-  - **0** = draw  
-  - **−1** = certain loss
-
----
-
-### Summary Table
-
-| Component         | Description                                        |
-|------------------|----------------------------------------------------|
-| Input             | `(batch_size, 68, 8, 8)`                           |
-| Residual Blocks   | 20 × [Conv3×3 → BN → ReLU → Dropout (optional)]   |
-| Dropout Strategy  | Dropout2D from block 5 onward                     |
-| Policy Output     | 4672-class logits (8×8×73)                         |
-| Value Output      | Scalar in `[-1, 1]` via `tanh`                     |
-
----
-
-## Training Data
-
-Talbotbot v1.5 was trained using supervised learning on labeled datasets sourced from human and engine play. The next major release, Talbotbot v2, will shift toward reinforcement learning (RL) via self-play and policy iteration.
-
----
-
-### Data Strategy
-
-To ensure strong generalization and position understanding, training data is drawn from a variety of sources covering strategic, tactical, and endgame play. Each position is labeled with a Stockfish evaluation and, the human played (or principal variation for endgames) moves for policy supervision.
-
----
-
-### Dataset Overview
-
-| Source                   | Description                                                               | Volume            |
-|--------------------------|---------------------------------------------------------------------------|-------------------|
-| Grandmaster Games        | 20 million positions (30+ moves each)                                    | ~20 million positions  |
-| Lichess Elite            | 5 million positions by players rated 2600+, filtered to 30+ move games        | ~5 million positions |
-| Tactics Corpus           | High-quality tactical positions extracted from puzzles and sharp games    | ~2 million         |
-| Synthetic Endgames       | Random legal 3–7 piece positions generated by sampling and filtering      | ~2 million         |
-
----
-
-### Position Reconstruction
-
-For snapshot-based datasets (e.g., tactics and synthetic endgames), Talbotbot reconstructs prior context by playing **4 legal moves** into the position. This ensures accurate board state encoding including repetition, castling rights, and move counters.
-
----
-
-### Labeling and Evaluation
-
-- **Stockfish Evaluation:**  
-  All positions are evaluated using Stockfish with a time budget of **0.02 seconds** per position. This provides scalar value labels based on the best move sequence.
-
-- **Policy Labels:**  
-  Where possible, policy labels are derived from the principal variation of the engine (endgame) or the move played in the original game (for supervised datasets).
-
----
-
-### Synthetic Endgame Generation
-
-Synthetic endgames were generated using controlled random sampling of legal positions involving 3–7 pieces. Generation rules include:
-
-- Exclusion of illegal/impossible configurations (e.g., too many pawns or duplicate kings)
-- Balance of piece types to avoid triviality (e.g., K vs K)
-
----
-
-### Transition to Reinforcement Learning
-
-While Talbotbot v1.5 relies entirely on supervised learning, **Talbotbot v2 will use reinforcement learning**, generating its own training data via self-play and MCTS-guided exploration. This will enable stronger policy generalization and long-term strategic planning.
+- Despite similar loss levels to v1.3/v1.4, the model performs significantly better due to higher-quality and more varied data.
+- **Endgames:** Can execute basic mating sequences (e.g., king + rook mate) and convert winning positions more reliably.
+- **Tactics:** Stronger than prior versions. Still capable of missing subtle blunders, but much less frequently.
+- Often sacrifices material for longer-term compensation—more "human-like" in evaluation.
+- Integrated with Lichess API. Achieved an Elo of ~1700. Accounting for rating deflation and sandbagging, true strength likely around 1800–1900 human Elo.

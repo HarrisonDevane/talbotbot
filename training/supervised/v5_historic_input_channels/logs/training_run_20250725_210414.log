@@ -1721,7 +1721,3 @@ Starting training from epoch 2 for 12 total epochs...
 2025-07-26 12:54:49,973 - INFO - Average Total Loss: 2.1702
 2025-07-26 12:54:49,973 - INFO - New best validation loss: 2.1702. Saving best model...
 2025-07-26 12:54:50,271 - INFO - Model checkpoint saved to C:\Users\User\Projects\talbot\src\training\supervised\v5_historic_input_channels\model\chess_ai_model_epoch_4.pth
-2025-07-26 12:55:06,269 - INFO - Epoch 5, Batch 0: P_Loss=1.7637, V_Loss=0.0623, T_Loss=2.0751, LR=0.000077, GPU Xfer: 3.02ms, FW: 254.06ms, BW: 129.35ms, Total Batch Time: 400.27ms
-2025-07-26 12:55:39,092 - INFO - Epoch 5, Batch 100: P_Loss=1.8144, V_Loss=0.0659, T_Loss=2.1437, LR=0.000077, GPU Xfer: 0.97ms, FW: 75.95ms, BW: 118.31ms, Total Batch Time: 209.61ms
-2025-07-26 12:56:12,561 - INFO - Epoch 5, Batch 200: P_Loss=1.8121, V_Loss=0.0562, T_Loss=2.0932, LR=0.000077, GPU Xfer: 1.02ms, FW: 76.44ms, BW: 118.57ms, Total Batch Time: 209.79ms
-2025-07-26 12:56:46,089 - INFO - Epoch 5, Batch 300: P_Loss=1.6863, V_Loss=0.0540, T_Loss=1.9560, LR=0.000077, GPU Xfer: 1.07ms, FW: 80.26ms, BW: 119.08ms, Total Batch Time: 213.49ms
