@@ -14,20 +14,16 @@ https://lichess.org/@/Talbotbot
 ## Project Structure
 
 Talbotbot/
-├── data/                         # Raw position data, engine data and assets
-│
-├── training/                     # Training pipelines and logs
-│ └── supervised/                 # Supervised learning runs by version (v1, v2, etc.)
-│
-├── inference/                    # Inference and gameplay components
-│ ├── agents/                     # Agents implementing playing logic
-│ │ ├── talbot.py                 # High-level player agent using MCTS + NN
-│ │ └── talbot_engine/            # Core engine components
-│ │ 
-│ └── scripts/                    # Utility scripts for running inference
-│   ├── lichess_inference.py      # Lichess API integration for live play
-│   └── local_inference.py        # Local gameplay and testing
-
+├── data/                     # Raw position data, engine data and assets
+│   ├── training/             # Training pipelines and logs
+│   └── supervised/           # Supervised learning runs by version (v1, v2, etc.)
+├── inference/                # Inference and gameplay components
+├── agents/                   # Agents implementing playing logic
+│   ├── talbot.py             # High-level player agent using MCTS + NN
+│   └── talbot_engine/        # Core engine components
+│       └── scripts/          # Utility scripts for running inference
+├── lichess_inference.py      # Lichess API integration for live play
+└── local_inference.py        # Local gameplay and testing
 
 ## Model Architecture
 
