@@ -13,6 +13,7 @@ https://lichess.org/@/Talbotbot
 
 ## Project Structure
 
+```
 Talbotbot/
 ├── data/                     # Raw position data, engine data and assets
 │   ├── training/             # Training pipelines and logs
@@ -24,6 +25,7 @@ Talbotbot/
 │       └── scripts/          # Utility scripts for running inference
 ├── lichess_inference.py      # Lichess API integration for live play
 └── local_inference.py        # Local gameplay and testing
+```
 
 ## Model Architecture
 
