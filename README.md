@@ -21,7 +21,7 @@ Talbotbot/
 ├── inference/                # Inference and gameplay components
 ├── agents/                   # Agents implementing playing logic
 │   ├── talbot.py             # High-level player agent using MCTS + NN
-│   └── talbot_engine/        # Core engine components
+│   └── mcts_engine/        # Core engine components
 │       └── scripts/          # Utility scripts for running inference
 ├── lichess_inference.py      # Lichess API integration for live play
 └── local_inference.py        # Local gameplay and testing
