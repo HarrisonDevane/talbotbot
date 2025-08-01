@@ -17,7 +17,7 @@ sys.path.insert(0, project_root)
 from model import ChessAIModel
 from inference.mcts.mcts_engine import MCTSEngine
 
-class TalbotPlayer:
+class TalbotbotPlayer:
     def __init__(self, logger: logging.Logger, model_path: str, name="Talbot", num_residual_blocks: int = 20, num_input_planes: int = 18, num_filters: int = 128, cpuct: float = 1.0, batch_size: int = 16):
         self.name = name
         self.logger = logger

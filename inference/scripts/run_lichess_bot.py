@@ -20,7 +20,7 @@ sys.path.insert(0, project_root)
 sys.path.insert(0, inference_root)
 sys.path.insert(0, project_root)
 
-from agents import TalbotPlayer
+from agents import TalbotbotPlayer
 
 
 class DummyLogger:
@@ -238,7 +238,7 @@ class LichessBot:
         game_logger = self._setup_game_logger(game_id)
 
 
-        player_instance = TalbotPlayer(
+        player_instance = TalbotbotPlayer(
             name=self.lichess_config["bot_id"] + "_" + game_id[:4],
             model_path=self.talbot_player_config["model_path"],
             logger=game_logger,
