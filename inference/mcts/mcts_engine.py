@@ -16,7 +16,7 @@ sys.path.insert(0, parent_dir)
 
 import utils
 
-class MCTSEngineSingle:
+class MCTSEngine:
     """
     Our Monte Carlo Tree Search brain for finding the best move.
     """

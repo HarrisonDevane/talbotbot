@@ -19,15 +19,18 @@ Talbotbot/
 │ 
 ├── inference/                        # Inference and gameplay components
 │   ├── agents/                       # Agents implementing playing logic
-│   │   ├── talbot.py                 # High-level player agent using MCTS + NN
-│   │   └── talbot_engine/            # Core MCTS engine components
+│   │   └── talbot.py                 # High-level player agent using MCTS + NN
+│   ├── mcts/                         # Monte Carlo tree search components
+│   │   ├── mcts_engine.py            # Main MCTS script called by player instance
+│   │   └── mcts_node.py              # Node for the MCTS
 │   └── scripts/                      # Utility scripts for running inference
-│        ├── lichess_inference.py     # Lichess API integration for live play
-│        └── local_inference.py       # Local gameplay and testing
+│       ├── lichess_inference.py      # Lichess API integration for live play
+│       └── local_inference.py        # Local gameplay and testing
 │
 ├── training
 │   └── supervised/                   # Supervised learning runs by version (v1, v2, etc.)
 │
+├── model.py                          # Model shared for both inference and training
 └── utils.py                          # Utility script shared for both inference and training
 ```
 

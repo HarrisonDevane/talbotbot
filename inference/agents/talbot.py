@@ -8,13 +8,14 @@ import math
 import random
 import time
 import logging
-from .talbot_engine.mcts_engine_single import MCTSEngineSingle
 
-# Adjust path for internal modules
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, parent_dir)
+current_script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_script_dir, "../.."))
 
-import training.supervised.model as model
+sys.path.insert(0, project_root)
+
+from model import ChessAIModel
+from inference.mcts.mcts_engine import MCTSEngine
 
 class TalbotPlayer:
     def __init__(self, logger: logging.Logger, model_path: str, name="Talbot", num_residual_blocks: int = 20, num_input_planes: int = 18, num_filters: int = 128, cpuct: float = 1.0, batch_size: int = 16):
@@ -22,7 +23,7 @@ class TalbotPlayer:
         self.logger = logger
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.model = model.ChessAIModel(num_input_planes=num_input_planes, num_residual_blocks=num_residual_blocks, num_filters=num_filters)
+        self.model = ChessAIModel(num_input_planes=num_input_planes, num_residual_blocks=num_residual_blocks, num_filters=num_filters)
 
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -56,7 +57,7 @@ class TalbotPlayer:
             opponent_last_move = board.move_stack[-1]
 
         if self.mcts is None:
-            self.mcts = MCTSEngineSingle(self.logger, self, self.cpuct, self.batch_size)
+            self.mcts = MCTSEngine(self.logger, self, self.cpuct, self.batch_size)
             self.mcts.set_new_root(board.copy(), None, None) 
         else:
             self.mcts.set_new_root(board.copy(), opponent_last_move, self.last_own_move)

@@ -9,10 +9,14 @@ from tqdm import tqdm # For progress bars
 from datetime import datetime
 import os
 import time
+import sys
 
-# Assuming your model and dataset are in these files
+current_script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_script_dir, "../.."))
+
+sys.path.insert(0, project_root)
+
 from model import ChessAIModel
-# Import both ChessDataset and the worker_init_fn from data_loader
 from data_loader import ChessDataset, _worker_init_fn
 
 # Define constants (should match those in your model.py)
