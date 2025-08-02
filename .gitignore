@@ -72,8 +72,5 @@ training/supervised/v3_hqgames_mcts/data/
 training/supervised/v4_hqgames_with_tactics_opmcts/data/
 training/supervised/v5_historic_input_channels/data/
 
-# RL for now
-training/reinforcement/
-
 # Inference logs
 inference/logs

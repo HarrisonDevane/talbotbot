@@ -1,10 +1,10 @@
 game:
-  white_player: 'human'
-  white_time_per_move: 5.0
-  black_player: 'talbot'
-  black_time_per_move: 5.0
+  white_player: 'talbotbot'
+  white_time_per_move: 1.0
+  black_player: 'human'
+  black_time_per_move: 1.0
   total_games: 5
-  initial_fen: 'k1r5/p2R3p/N3p3/4Pp2/6p1/5nP1/5P1P/5K2 b - - 0 1'
+  initial_fen: '1Q6/3k4/8/4K3/8/8/8/8 b - - 15 120'
 
 talbot:
   model_path: "/Users/User/Projects/talbot/training/supervised/v5_historic_input_channels/model/best_chess_ai_model.pth"
@@ -15,5 +15,5 @@ talbot:
   batchsize: 32
 
 logging:
-  local_logging: True
-  local_logging_level: 20
+  main_logging: True
+  main_logging_level: 20

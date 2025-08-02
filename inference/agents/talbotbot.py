@@ -44,7 +44,7 @@ class TalbotbotPlayer:
             policy_logits, value_output = self.model(board_tensor)
         return policy_logits, value_output
 
-    def get_move(self, board: chess.Board, time_per_move: float = None, depth_limit: int = None) -> chess.Move:
+    def get_move(self, board: chess.Board, time_per_move: float = None) -> chess.Move:
         self.move_number += 1
         self.logger.info(f"\n{'='*60}\n{' '*20}--- MOVE {self.move_number} STARTED ---\n{'='*60}\n")
 

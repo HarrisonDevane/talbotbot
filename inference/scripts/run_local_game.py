@@ -17,7 +17,7 @@ sys.path.insert(0, project_root)
 from agents.human import HumanPlayer
 from agents.stockfish import StockfishPlayer
 from agents.leela import LeelaPlayer
-from agents.talbot import TalbotPlayer
+from agents.talbotbot import TalbotbotPlayer
 from chess_gui import ChessGUI
 from game_controller import GameController
 
@@ -40,7 +40,7 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
 
     logger = logging.getLogger("local_main")
-    logger.setLevel(logging_config['local_logging_level'])
+    logger.setLevel(logging_config['main_logging_level'])
 
     if not logger.handlers:
         handler = logging.FileHandler(os.path.join(log_dir, "main.log"), mode='w')
@@ -56,8 +56,8 @@ def main():
             white_player=StockfishPlayer()
         case "leela":
             white_player=LeelaPlayer()
-        case "talbot":
-            white_player = TalbotPlayer(
+        case "talbotbot":
+            white_player = TalbotbotPlayer(
                 model_path=talbot_config['model_path'],
                 logger=logger,
                 num_input_planes=talbot_config['input_planes'],
@@ -77,8 +77,8 @@ def main():
             black_player = StockfishPlayer()
         case "leela":
             black_player = LeelaPlayer()
-        case "talbot":
-            black_player = TalbotPlayer(
+        case "talbotbot":
+            black_player = TalbotbotPlayer(
                 model_path=talbot_config['model_path'],
                 logger=logger,
                 num_input_planes=talbot_config['input_planes'],
@@ -92,7 +92,7 @@ def main():
 
     # Create root window and GUI
     root = tk.Tk()
-    gui = ChessGUI(root, logger,)
+    gui = ChessGUI(root, logger)
 
     # Create game controller
     controller = GameController(

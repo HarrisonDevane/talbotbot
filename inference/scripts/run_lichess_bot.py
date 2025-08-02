@@ -22,7 +22,6 @@ sys.path.insert(0, project_root)
 
 from agents import TalbotbotPlayer
 
-
 class DummyLogger:
     def debug(self, *args, **kwargs): pass
     def info(self, *args, **kwargs): pass
@@ -50,12 +49,12 @@ class LichessBot:
         self.game_threads = {}
         self.stop_event = threading.Event()
 
-        # Set up logging dir + lichess logging
+        # Set up logging dir + main logging
         self.log_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../logs/lichess_inference", datetime.now().strftime("%Y-%m-%d_%H-%M-%S")))
         os.makedirs(self.log_dir, exist_ok=True)
 
         self.logger = logging.getLogger("lichess_main")
-        self.logger.setLevel(self.logging_config['lichess_logging_level'])
+        self.logger.setLevel(self.logging_config['main_logging_level'])
 
         if not self.logger.handlers:
             handler = logging.FileHandler(os.path.join(self.log_dir, "main.log"), mode='w')

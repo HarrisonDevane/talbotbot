@@ -25,7 +25,7 @@ timing:
   minimum_time: 1
 
 challenge_in:
-  accept_challenge_threads: 1
+  accept_challenge_threads: 2
   accept_challenge_bot: False
   accept_challenge_human: True
   accept_challenge_rated: False
@@ -44,7 +44,7 @@ challenge_out:
   challenge_bot_increment_sec: 5
 
 logging:
-  lichess_logging: True
-  lichess_logging_level: 20
+  main_logging: True
+  main_logging_level: 20
   game_logging: True
   game_logging_level: 20

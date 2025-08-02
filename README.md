@@ -24,8 +24,8 @@ Talbotbot/
 │   │   ├── mcts_engine.py            # Main MCTS script called by player instance
 │   │   └── mcts_node.py              # Node for the MCTS
 │   └── scripts/                      # Utility scripts for running inference
-│       ├── lichess_inference.py      # Lichess API integration for live play
-│       └── local_inference.py        # Local gameplay and testing
+│       ├── run_lichess_inference.py  # Lichess API integration for live play
+│       └── run_local_inference.py    # Local gameplay and testing
 │
 ├── training
 │   └── supervised/                   # Supervised learning runs by version (v1, v2, etc.)

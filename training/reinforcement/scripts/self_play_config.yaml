@@ -1,0 +1,23 @@
+self_play:
+  num_games_total: 10
+  search_depth: 600
+  dirichlet_alpha: 0.25
+  dirichlet_epsilon: 0.2
+  opening_book_path: "/Users/User/Projects/talbot/data/opening_books/Titans.bin"
+  opening_min_moves: 8
+  opening_max_moves: 12
+
+
+talbot:
+  model_path: "/Users/User/Projects/talbot/training/reinforcement/model/supervised_model.pth"
+  input_planes: 68
+  filters: 128
+  resblocks: 20
+  cpuct: 7.0
+  batchsize: 32
+
+logging:
+  main_logging: True
+  main_logging_level: 10
+  worker_logging: True
+  worker_logging_level: 20
