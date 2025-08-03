@@ -5,12 +5,16 @@ import logging
 import random
 import uuid
 import torch
+import numpy as np
 
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
+rl_root = os.path.abspath(os.path.join(current_script_dir, ".."))
 project_root = os.path.abspath(os.path.join(current_script_dir, "../../.."))
+
+sys.path.insert(0, rl_root)
 sys.path.insert(0, project_root)
 
-from mcts_engine import MCTSEngine
+from mcts.mcts_engine import MCTSEngine
 from model import ChessAIModel
 
 
@@ -27,6 +31,9 @@ class TalbotPlayer:
         self.dirichlet_alpha = config['self_play']['dirichlet_alpha']
         self.dirichlet_epsilon = config['self_play']['dirichlet_epsilon']
 
+        self.temperature_threshold_move = config['self_play']['temperature_threshold_move']
+        self.temperature_high = config['self_play']['temperature_high']
+        self.temperature_low = config['self_play']['temperature_low']
 
         # These are reset each game
         self.mcts = None
@@ -49,16 +56,17 @@ class TalbotPlayer:
         return policy_logits, value_output
     
 
-    def get_move(self, board: chess.Board, move_number: int, search_depth: int) -> chess.Move:
+    def get_move(self, board: chess.Board, move_number: int, search_depth: int):
         """
-        Runs MCTS simulations to determine the best move for the current board state.
-        This method replaces the previous version that ran the model directly.
+        Runs MCTS simulations and selects a move based on a temperature schedule.
+        High temperature is used in the early game for exploration, and low
+        temperature is used in the late game for exploitation.
         """
-        self.logger.info(f"\n{'='*60}\n{' '*20}--- MOVE {move_number} STARTED ---\n{'='*60}\n")
+        self.logger.debug(f"\n{'='*60}\n{' '*20}--- MOVE {move_number} STARTED ---\n{'='*60}\n")
         
         if board.is_game_over():
             self.logger.info("Game is already over, no move to make.")
-            return None
+            return None, None, None
 
         if self.mcts is None:
             self.mcts = MCTSEngine(
@@ -75,32 +83,39 @@ class TalbotPlayer:
 
         self.mcts.run_simulations(search_depth)
 
-        best_move = None
-        max_visits = -1
+        moves = list(self.mcts.root.children.keys())
+        visits = np.array([self.mcts.root.children[move].visits for move in moves], dtype=np.float32)
 
-        # Select the best move from the root's children based on visit count
-        if self.mcts.root is not None and self.mcts.root.children:
-            for move, child_node in self.mcts.root.children.items():
-                if child_node.visits > max_visits:
-                    max_visits = child_node.visits
-                    best_move = move
-        
-        # Fallback to a random legal move if no move was found
-        if best_move is None:
-            legal_moves = list(board.legal_moves)
-            if legal_moves:
-                best_move = random.choice(legal_moves)
+        # Determine temperature based on move number
+        if move_number <= self.temperature_threshold_move:
+            temperature = self.temperature_high
+        else:
+            temperature = self.temperature_low
+
+        best_move = None
+        if temperature < 1e-6: # Check for a very low temperature (near zero)
+            # T=0, select the move with the highest visit count (pure exploitation)
+            best_move_index = np.argmax(visits)
+            best_move = moves[best_move_index]
+        else:
+            # T > 0, calculate probabilities based on temperature and sample a move
+            visits_exp = visits ** (1.0 / temperature)
+            probabilities = visits_exp / np.sum(visits_exp)
+
+            # Select a move based on the calculated probabilities
+            best_move = np.random.choice(moves, p=probabilities)
         
         self.last_move = best_move
+        policy_vector, root_value = self.mcts.get_target_vectors()
 
-        self.logger.info(f"MCTS for move {move_number} picked move: {best_move.uci()} with {max_visits} visits.")
-        return best_move
+        self.logger.debug(f"MCTS for move {move_number} picked move: {best_move.uci()} with temperature {temperature}.")
+        return best_move, policy_vector, root_value
     
     def reset_for_new_game(self):
         """
         Resets the player's state for a new game - called at the start of each new game.
         """
-        self.logger.info(f"Resetting state for a new game.")
+        self.logger.debug(f"Resetting state for a new game.")
 
         # Re-initialize the MCTS engine to discard the old tree
         self.mcts = MCTSEngine(

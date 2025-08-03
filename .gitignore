@@ -74,3 +74,9 @@ training/supervised/v5_historic_input_channels/data/
 
 # Inference logs
 inference/logs
+
+# Reinforcement logs + data
+training/reinforcement/rl_cycles/**/logs/
+training/reinforcement/rl_cycles/**/data/
+training/reinforcement/rl_cycles/rl_logs/
+training/reinforcement/rl_cycles/circular_buffer.hdf5

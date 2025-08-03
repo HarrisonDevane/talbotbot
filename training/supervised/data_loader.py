@@ -61,17 +61,7 @@ class ChessDataset(Dataset):
         worker_info = torch.utils.data.get_worker_info()
         worker_id = worker_info.id if worker_info else 0 
         # worker_id_str_for_log = f"Worker {worker_id}"
-
-        # if idx % 1000 == 0: 
-        #      print(
-        #         f"{worker_id_str_for_log} - Sample {idx}: "
-        #         f"HDF5 Read: {(hdf5_read_end - hdf5_read_start)*1000:.2f}ms, "
-        #         f"Board to Tensor: {(board_to_tensor_end - board_to_tensor_start)*1000:.2f}ms, "
-        #         f"Policy to Tensor: {(policy_to_tensor_end - policy_to_tensor_start)*1000:.2f}ms, "
-        #         f"Value to Tensor: {(value_to_tensor_end - value_to_tensor_start)*1000:.2f}ms, "
-        #         f"Total __getitem__: {total_get_item_time_ms:.2f}ms"
-        #     )
-
+        
         return board_tensor, policy_index, value_target
 
     def __del__(self):
