@@ -28,9 +28,10 @@ class TalbotPlayer:
         self.logger = logger
         self.cpuct = config['talbot']['cpuct']
         self.batch_size = config['talbot']['batchsize']
+        self.num_threads = config['talbot']['threads']
+
         self.dirichlet_alpha = config['self_play']['dirichlet_alpha']
         self.dirichlet_epsilon = config['self_play']['dirichlet_epsilon']
-
         self.temperature_threshold_move = config['self_play']['temperature_threshold_move']
         self.temperature_high = config['self_play']['temperature_high']
         self.temperature_low = config['self_play']['temperature_low']
@@ -75,7 +76,8 @@ class TalbotPlayer:
                 self.cpuct, 
                 self.batch_size,
                 self.dirichlet_alpha,
-                self.dirichlet_epsilon
+                self.dirichlet_epsilon,
+                self.num_threads
             )
             self.mcts.set_new_root(board.copy(), None) 
         else:
@@ -124,7 +126,8 @@ class TalbotPlayer:
             self.cpuct, 
             self.batch_size,
             self.dirichlet_alpha,
-            self.dirichlet_epsilon
+            self.dirichlet_epsilon,
+            self.num_threads
         )
         self.last_move = None
         self.move_number = 0

@@ -10,6 +10,8 @@ import logging
 import numpy as np
 from .mcts_node import MCTSNode
 from collections import deque
+import threading
+import queue
 
 # Adjust path for internal modules
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
@@ -19,19 +21,25 @@ import utils
 
 class MCTSEngine:
     """
-    Our Monte Carlo Tree Search brain for finding the best move.
+    Our Monte Carlo Tree Search brain for finding the best move,
+    now with multithreaded workers for parallel selection and queuing.
     """
-    def __init__(self, logger: logging.Logger, model_player, cpuct: float, batch_size: int, dirichlet_alpha: float, dirichlet_epsilon: float):
+    def __init__(self, logger: logging.Logger, model_player, cpuct: float, batch_size: int, dirichlet_alpha: float, dirichlet_epsilon: float, num_threads: int):
         self.model_player = model_player
         self.logger = logger
         self.cpuct = cpuct
         self.root = None
-        self.batch_size = batch_size
-        self.inference_batch = deque()
-        self.pending_nodes = []
-        self.force_batch = False
+        self.num_threads = num_threads
         self.dirichlet_alpha=dirichlet_alpha
         self.dirichlet_epsilon=dirichlet_epsilon
+        
+        # Thread-safe queues for communication between workers and inference thread
+        self.inference_queue = queue.Queue()
+        self.results_queue = queue.Queue()
+        self.batch_size = batch_size
+        self.stop_threads = threading.Event()
+        self.tree_lock = threading.Lock()
+        self.queue_lock = threading.Lock()
 
 
     def _add_dirichlet_noise(self, policy_probs):
@@ -61,165 +69,219 @@ class MCTSEngine:
 
         return policy_vector, root_value
 
+
     def set_new_root(self, board: chess.Board, last_move: chess.Move):
         """
         Updates the MCTS root based on the sequence of moves.
         Otherwise, a new tree is started.
         """
-        if self.root is None:
-            self.root = MCTSNode(board.copy())
-            self.inference_batch.clear()
-            self.pending_nodes.clear()
-            self.force_batch = False
-            return
+        with self.tree_lock:
+            if self.root is None:
+                self.root = MCTSNode(board.copy())
+                self.logger.debug("MCTSEngine: New root node created.")
+                return
 
-        if last_move and last_move in self.root.children:
-            new_root = self.root.children[last_move]
-            new_root.parent = None
-            if new_root.board is None:
-                new_root.board = board.copy()
-            self.root = new_root
-            if self.root.is_expanded and self.root.prior_probabilities is not None:
-                self.root.prior_probabilities = self._add_dirichlet_noise(self.root.prior_probabilities)
-
-        self.inference_batch.clear()
-        self.pending_nodes.clear()
-        self.force_batch = False
+            if last_move and last_move in self.root.children:
+                self.logger.debug(f"MCTSEngine: Root changed to child for move {last_move.uci()}.")
+                new_root = self.root.children[last_move]
+                new_root.parent = None
+                if new_root.board is None:
+                    new_root.board = board.copy()
+                self.root = new_root
+                if self.root.is_expanded and self.root.prior_probabilities is not None:
+                    self.root.prior_probabilities = self._add_dirichlet_noise(self.root.prior_probabilities)
+            else:
+                self.logger.warning(f"MCTSEngine: Last move {last_move.uci()} not in current root's children. Rebuilding tree from scratch.")
+                self.root = MCTSNode(board.copy())
 
 
     def run_simulations(self, search_depth):
-        # Time tracking variables
-        total_selection_time = 0.0
-        total_simulation_time = 0.0
-        total_inference_time = 0.0
-        total_backpropagation_time = 0.0
         
-        start_time_total = time.perf_counter()
-        simulation_count = 0
+        self.stop_threads.clear()
         
-        # Expand the root if it hasn't been yet to get initial policy and value
-        if not self.root.is_expanded and not self.root.is_queued_for_inference:
-            start_root_expansion_time = time.perf_counter()
-            board_input = torch.from_numpy(utils.board_to_tensor_68(self.root.board)).float().to(self.model_player.device)
-            policy_logits, value_output = self.model_player.get_policy_value(board_input.unsqueeze(0))
-            policy_probs = F.softmax(policy_logits.squeeze(0), dim=0)
-            policy_probs = self._add_dirichlet_noise(policy_probs)
-            self.expand(self.root, policy_probs)
-            self.backpropagate(self.root, value_output.item())
-            total_inference_time += (time.perf_counter() - start_root_expansion_time)
-            total_backpropagation_time += (time.perf_counter() - start_root_expansion_time)
+        self.logger.info(f"Starting {search_depth} simulations with {self.num_threads} worker threads.")
 
-        while simulation_count < search_depth:
-            simulation_count += 1
+        # Start the inference worker thread
+        inference_thread = threading.Thread(target=self._inference_worker, daemon=True)
+        inference_thread.start()
+        self.logger.debug("Inference worker thread started.")
+
+        # Start the MCTS worker threads
+        worker_threads = []
+        sims_per_thread = search_depth // self.num_threads
+        for i in range(self.num_threads):
+            worker_thread = threading.Thread(target=self._mcts_worker, args=(sims_per_thread, i,), daemon=True)
+            worker_threads.append(worker_thread)
+            worker_thread.start()
+            self.logger.debug(f"MCTS worker thread {i} started, assigned {sims_per_thread} simulations.")
+
+        # Wait for all worker threads to finish
+        for thread in worker_threads:
+            thread.join()
+        
+        self.logger.debug("All MCTS worker threads have finished their simulations.")
+
+        # Signal inference thread to stop and wait for it to finish its last batch
+        self.stop_threads.set()
+        self.logger.debug("Signaled inference thread to stop. Waiting for final batch.")
+        inference_thread.join()
+        
+        self.logger.info("MCTS search complete.")
+    
+
+    def _mcts_worker(self, num_simulations, thread_id):
+        """
+        Worker thread function for MCTS simulation.
+        """
+        self.logger.debug(f"[Worker {thread_id}] Started with {num_simulations} simulations.")
+        local_sim_count = 0
+        while local_sim_count < num_simulations and not self.stop_threads.is_set():
+            local_sim_count += 1
             node = self.root
-            path = [node]
-
+            
             # Selection: Traverse the tree to find a leaf or unvisited node
-            start_selection_time = time.perf_counter()
-            while not node.is_leaf() and node.is_expanded and \
-                  not node.is_queued_for_inference:
-                best_child = None
-                best_uct_score = -float('inf')
-                best_prior_for_tie_break = -1.0
+            with self.tree_lock:
+                # The selection logic is atomic with respect to other threads
+                while not node.is_leaf() and node.is_expanded:
+                    best_child = None
+                    best_uct_score = -float('inf')
+                    best_prior_for_tie_break = -1.0
 
-                legal_moves = cython_chess.generate_legal_moves(node.board, chess.BB_ALL, chess.BB_ALL)
-                eligible_children = []
-                for move in legal_moves:
-                    if move in node.children and not node.children[move].is_queued_for_inference:
-                        eligible_children.append((move, node.children[move]))
+                    legal_moves = cython_chess.generate_legal_moves(node.board, chess.BB_ALL, chess.BB_ALL)
+                    eligible_children = [
+                        (move, node.children[move]) for move in legal_moves if move in node.children
+                    ]
 
-                sqrt_parent_visits_term = math.sqrt(node.visits) if node.visits > 0 else 0.0
+                    sqrt_parent_visits_term = math.sqrt(node.visits) if node.visits > 0 else 0.0
+                    for move, child in eligible_children:
+                        prior_prob_for_child = child.prior_probability_from_parent
+                        uct = child.uct_score(self.cpuct, prior_prob_for_child, sqrt_parent_visits_term)
 
-                for move, child in eligible_children:
-                    prior_prob_for_child = child.prior_probability_from_parent
-                    uct = child.uct_score(self.cpuct, prior_prob_for_child, sqrt_parent_visits_term)
-
-                    if uct > best_uct_score:
-                        best_uct_score = uct
-                        best_prior_for_tie_break = prior_prob_for_child
-                        best_child = child
-                    elif uct == best_uct_score:
-                        if prior_prob_for_child > best_prior_for_tie_break:
+                        if uct > best_uct_score:
                             best_uct_score = uct
                             best_prior_for_tie_break = prior_prob_for_child
                             best_child = child
+                        elif uct == best_uct_score:
+                            if prior_prob_for_child > best_prior_for_tie_break:
+                                best_uct_score = uct
+                                best_prior_for_tie_break = prior_prob_for_child
+                                best_child = child
                     
-                if best_child is None:
-                    break
+                    if best_child is None:
+                        break
 
-                node = best_child
-                path.append(node)
-            total_selection_time += (time.perf_counter() - start_selection_time)
+                    node = best_child
 
-            # Expansion/Simulation: Queue the selected leaf node for NN inference
-            start_simulation_time = time.perf_counter()
-            successfully_queued = self.simulate(node)
-            total_simulation_time += (time.perf_counter() - start_simulation_time)
-            
-            # If a game-over state was reached or a node was already queued, and we have a batch, process it
-            if not successfully_queued and not node.board.is_game_over() and self.inference_batch:
-                self.force_batch = True
+            self.logger.debug(f"[Worker {thread_id}] Simulation {local_sim_count}: Selected leaf node.")
+
+            # Expansion/Backpropagation
+            if node.board.is_game_over():
+                self.logger.debug(f"[Worker {thread_id}] Simulation {local_sim_count}: Found game-over state. Backpropagating.")
+                result = node.board.result()
+                value = 0.0
+                if result == "1-0":
+                    value = 1.0 if node.board.turn == chess.WHITE else -1.0
+                elif result == "0-1":
+                    value = 1.0 if node.board.turn == chess.BLACK else -1.0
+                with self.tree_lock:
+                    self.backpropagate(node, value)
             else:
-                self.force_batch = False
-
-            # When batch is full or time is running out, run inference and backpropagate
-            if len(self.inference_batch) >= self.batch_size or self.force_batch:
-                start_inference_batch_time = time.perf_counter()
-                self.perform_batched_inference()
-                total_inference_time += (time.perf_counter() - start_inference_batch_time)
-
-                start_backprop_batch_time = time.perf_counter()
-                for processed_node, value_from_nn in self.pending_nodes:
-                    self.backpropagate(processed_node, value_from_nn)
-                self.pending_nodes.clear()
-                total_backpropagation_time += (time.perf_counter() - start_backprop_batch_time)
-
-        # Process any remaining nodes in the batch before finishing
-        if self.inference_batch:
-            start_final_inference_time = time.perf_counter()
-            self.perform_batched_inference()
-            total_inference_time += (time.perf_counter() - start_final_inference_time)
-
-            start_final_backprop_time = time.perf_counter()
-            for processed_node, value_from_nn in self.pending_nodes:
-                self.backpropagate(processed_node, value_from_nn)
-            self.pending_nodes.clear()
-            total_backpropagation_time += (time.perf_counter() - start_final_backprop_time)
-
-        total_elapsed_time = time.perf_counter() - start_time_total
-        
-        self.logger.debug(f"--- MCTS Move Analysis (Total) ---")
-        self.logger.debug(f"Total Simulations: {simulation_count}")
-        self.logger.debug(f"Total time spent: {total_elapsed_time:.4f}s")
-        self.logger.debug(f"Avg time per simulation: {total_elapsed_time/simulation_count:.4f}s" if simulation_count > 0 else "Avg time per simulation: 0.0s")
-        self.logger.debug(f"Selection time: {total_selection_time:.4f}s ({total_selection_time/total_elapsed_time*100:.2f}%)")
-        self.logger.debug(f"Simulation/Queuing time: {total_simulation_time:.4f}s ({total_simulation_time/total_elapsed_time*100:.2f}%)")
-        self.logger.debug(f"Inference time: {total_inference_time:.4f}s ({total_inference_time/total_elapsed_time*100:.2f}%)")
-        self.logger.debug(f"Backpropagation time: {total_backpropagation_time:.4f}s ({total_backpropagation_time/total_elapsed_time*100:.2f}%)")
-        self.logger.debug(f"-----------------------------------\n")
-
-        # Log root children stats at the end of run_simulations
-        if self.root and self.root.children:
-            self.logger.debug(f"\n--- MCTS Root Children Analysis (Final State) ---")
-            sorted_children = sorted(self.root.children.items(), key=lambda item: item[1].visits, reverse=True)
-            total_visits = sum(child.visits for child in self.root.children.values())
-            
-            for move, child_node in sorted_children:
-                q_value = -child_node.value_sum / child_node.visits if child_node.visits > 0 else 0.0
-                normalized_prob = child_node.visits / total_visits if total_visits > 0 else 0.0
+                self.logger.debug(f"[Worker {thread_id}] Simulation {local_sim_count}: Queuing node for inference.")
+                board_input = torch.from_numpy(utils.board_to_tensor_68(node.board)).float().to(self.model_player.device)
                 
-                log_message = (
-                    f"Move: {move.uci()}, Visits: {child_node.visits}, "
-                    f"Avg Q-value: {q_value:.4f}, Policy Prob: {normalized_prob:.4f}"
-                )
-                self.logger.debug(log_message)
-            self.logger.debug("-----------------------------------\n")
+                request_id = id(node) 
+                
+                self.inference_queue.put((request_id, board_input, node))
+                
+                self.logger.debug(f"[Worker {thread_id}] Simulation {local_sim_count}: Waiting for inference result...")
+                # Wait for the result from the inference worker
+                while True:
+                    try:
+                        result_id, policy_probs, value_output = self.results_queue.get(timeout=1)
+                        if result_id == request_id:
+                            with self.tree_lock:
+                                self.expand(node, policy_probs)
+                                self.backpropagate(node, value_output)
+                            self.logger.debug(f"[Worker {thread_id}] Simulation {local_sim_count}: Received result and backpropagated.")
+                            break
+                        else:
+                            # If it's not our result, put it back in the queue for another thread
+                            self.results_queue.put((result_id, policy_probs, value_output))
+                            self.logger.debug(f"[Worker {thread_id}] Simulation {local_sim_count}: Got wrong result, re-queuing.")
+                    except queue.Empty:
+                        if self.stop_threads.is_set():
+                            self.logger.warning(f"[Worker {thread_id}] Simulation {local_sim_count}: Exiting due to stop signal.")
+                            break
+        self.logger.debug(f"[Worker {thread_id}] Finished all {local_sim_count} simulations.")
+
+    def _inference_worker(self):
+        """
+        Dedicated thread for batched neural network inference.
+        """
+        nodes_to_process = []
+        board_tensors = []
+        
+        self.logger.debug("[Inference Worker] Started.")
+
+        while not self.stop_threads.is_set() or not self.inference_queue.empty():
+            try:
+                request_id, board_tensor, node = self.inference_queue.get(timeout=0.01)
+                nodes_to_process.append(request_id)
+                board_tensors.append(board_tensor)
+                self.logger.debug(f"[Inference Worker] Added request from node {request_id} to batch.")
+            except queue.Empty:
+                pass
+            
+            if len(board_tensors) >= self.batch_size or (self.stop_threads.is_set() and len(board_tensors) > 0):
+                if not board_tensors:
+                    continue
+
+                self.logger.debug(f"[Inference Worker] Processing batch of size {len(board_tensors)}.")
+                batch_input = torch.stack(board_tensors)
+                
+                with torch.no_grad():
+                    policy_logits_batch, value_output_batch = self.model_player.get_policy_value(batch_input)
+                
+                policy_probs_batch = F.softmax(policy_logits_batch, dim=1)
+                
+                for i in range(len(nodes_to_process)):
+                    request_id = nodes_to_process[i]
+                    policy_probs = policy_probs_batch[i].squeeze(0)
+                    value_output = value_output_batch[i].item()
+                    self.results_queue.put((request_id, policy_probs, value_output))
+                    self.logger.debug(f"[Inference Worker] Sent result for node {request_id} to results queue.")
+
+                nodes_to_process = []
+                board_tensors = []
+
+        self.logger.debug("[Inference Worker] Exiting loop. Final check on queues.")
+        # Process any remaining items in the queue before exiting
+        while not self.inference_queue.empty():
+            try:
+                request_id, board_tensor, node = self.inference_queue.get(timeout=0.01)
+                nodes_to_process.append(request_id)
+                board_tensors.append(board_tensor)
+            except queue.Empty:
+                pass
+        
+        if len(board_tensors) > 0:
+            self.logger.debug(f"[Inference Worker] Processing final batch of size {len(board_tensors)}.")
+            batch_input = torch.stack(board_tensors)
+            with torch.no_grad():
+                policy_logits_batch, value_output_batch = self.model_player.get_policy_value(batch_input)
+            policy_probs_batch = F.softmax(policy_logits_batch, dim=1)
+            for i in range(len(nodes_to_process)):
+                request_id = nodes_to_process[i]
+                policy_probs = policy_probs_batch[i].squeeze(0)
+                value_output = value_output_batch[i].item()
+                self.results_queue.put((request_id, policy_probs, value_output))
+
+        self.logger.debug("[Inference Worker] Exited.")
 
 
     def expand(self, node: MCTSNode, policy_probs: torch.Tensor):
         if node.board.is_game_over():
             node.is_expanded = True
-            node.is_queued_for_inference = False
             return
 
         legal_moves = cython_chess.generate_legal_moves(node.board, chess.BB_ALL, chess.BB_ALL)
@@ -265,74 +327,6 @@ class MCTSEngine:
                 child_node.prior_probability_from_parent = normalized_priors_list[i]
 
         node.is_expanded = True
-        node.is_queued_for_inference = False
-
-
-    def simulate(self, node: MCTSNode) -> bool:
-        current_board = node.board
-
-        if current_board.is_game_over():
-            result = current_board.result()
-            value = 0.0
-            if result == "1-0":
-                value = 1.0 if current_board.turn == chess.WHITE else -1.0
-            elif result == "0-1":
-                value = 1.0 if current_board.turn == chess.BLACK else -1.0
-            else:
-                value = 0.0
-            self.backpropagate(node, value)
-            return False
-
-        if node.is_queued_for_inference:
-            return False
-
-        board_input = torch.from_numpy(utils.board_to_tensor_68(node.board)).float().to(self.model_player.device)
-        self.inference_batch.append((node, board_input))
-        self.pending_nodes.append(node)
-        node.is_queued_for_inference = True
-
-        current_node = node.parent
-        while current_node is not None:
-            all_legal_children_queued = True
-            parent_legal_moves = cython_chess.generate_legal_moves(current_node.board, chess.BB_ALL, chess.BB_ALL)
-
-            for move in parent_legal_moves:
-                if move not in current_node.children or not current_node.children[move].is_queued_for_inference:
-                    all_legal_children_queued = False
-                    break 
-
-            if all_legal_children_queued:
-                current_node.is_queued_for_inference = True
-            
-            current_node = current_node.parent
-
-        return True
-
-
-    def perform_batched_inference(self):
-        if not self.inference_batch:
-            return
-
-        nodes_to_process = []
-        board_tensors = []
-        while self.inference_batch:
-            node, board_tensor = self.inference_batch.popleft()
-            nodes_to_process.append(node)
-            board_tensors.append(board_tensor)
-
-        batch_input = torch.stack(board_tensors)
-        policy_logits_batch, value_output_batch = self.model_player.get_policy_value(batch_input)
-        policy_probs_batch = F.softmax(policy_logits_batch, dim=1)
-
-        temp_pending_nodes = []
-        for i, node in enumerate(nodes_to_process):
-            policy_probs = policy_probs_batch[i].squeeze(0)
-            value_for_current_node_player = value_output_batch[i].item()
-
-            self.expand(node, policy_probs)
-            temp_pending_nodes.append((node, value_for_current_node_player))
-
-        self.pending_nodes = temp_pending_nodes
 
 
     def backpropagate(self, node: MCTSNode, value: float):
@@ -340,14 +334,9 @@ class MCTSEngine:
         original_expanded_node_turn = node.board.turn
 
         while current is not None:
-            if current.is_queued_for_inference:
-                current.is_queued_for_inference = False
-
             current.visits += 1
-
             if current.board.turn == original_expanded_node_turn:
                 current.value_sum += value
             else:
                 current.value_sum -= value
-
             current = current.parent
