@@ -1,31 +1,55 @@
-self_play:
-  search_depth: 600
-  dirichlet_alpha: 0.25
-  dirichlet_epsilon: 0.2
-  opening_book_path: "/Users/User/Projects/talbot/data/opening_books/Titans.bin"
-  opening_min_moves: 8
-  opening_max_moves: 12
-  value_transition_factor: 0.5
-  value_max_transition_move: 40
-  value_transition_steepness: 0.1
-  temperature_threshold_move: 30
-  temperature_high: 0.8
-  temperature_low: 0
-
-stored_data:
-  positions_per_cycle: 10000
-  positions_total: 100000
-  buffer_file_path: "/Users/User/Projects/talbot/training/reinforcement/rl_cycles/circular_buffer.hdf5"
-
-talbot:
+model:
   model_path: "/Users/User/Projects/talbot/training/reinforcement/best_models/v5_supervised_model.pth"
   input_planes: 68
   filters: 128
   resblocks: 20
-  cpuct: 3.0
-  batchsize: 32
-  threads: 2
 
-logging:
-  selfplay_main_logging_level: 20
-  selfplay_worker_logging_level: 10
+data_generation:
+  positions_per_cycle: 20000
+  selection_workers: 1
+  update_workers: 4
+  batch_size: 16
+  cpuct: 3.0
+  search_depth: [400, 800]
+  search_depth_weights: [0.75, 0.25]
+  virtual_loss: -0.2
+  value_transition_factor: 0.5
+  value_max_transition_move: 40
+  value_transition_steepness: 0.1
+  opening_book_path: "/Users/User/Projects/talbot/data/opening_books/Titans.bin"
+  opening_min_moves: 8
+  opening_max_moves: 12
+  temperature_threshold_move: 25
+  temperature_high: 0.6
+  temperature_low: 0
+  dirichlet_alpha: 0.25
+  dirichlet_epsilon: 0.2
+  early_cutoff_simulations: 50
+  early_cutoff_threshold: 0.6
+  main_logging_level: 20
+  worker_logging_level: 20
+
+data_storage:
+  positions_total: 200000
+  buffer_file_path: "/Users/User/Projects/talbot/training/reinforcement/rl_cycles/circular_buffer.hdf5"
+
+evaluation:
+  threads: 4
+  search_depth: [300]
+  search_depth_weights: [1]
+  batchsize: 32
+  opening_book_path: "/Users/User/Projects/talbot/data/opening_books/Titans.bin"
+  opening_min_moves: 8
+  opening_max_moves: 12
+  value_transition_factor: 0
+  value_max_transition_move: 0
+  value_transition_steepness: 0.0
+  temperature_threshold_move: 1
+  temperature_high: 0
+  temperature_low: 0
+  dirichlet_alpha: 0
+  dirichlet_epsilon: 0
+  early_cutoff_simulations: 100
+  early_cutoff_threshold: 0.8
+  main_logging_level: 20
+  worker_logging_level: 20

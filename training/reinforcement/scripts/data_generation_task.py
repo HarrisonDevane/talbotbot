@@ -1,6 +1,5 @@
 import os
 import time
-import yaml
 import logging
 import numpy as np
 from datetime import datetime
@@ -10,17 +9,14 @@ from tqdm import tqdm
 from self_play_agent import TalbotPlayer
 from self_play_game_worker import SelfPlayGameWorker
 
-class SelfPlayTask:
-    def __init__(self, config_path: str, output_dir: str):
+class DataGenerationTask:
+    def __init__(self, output_dir, model_config, data_generation_config):
         """
         Initializes the self-play task with configuration and paths.
         """
         self.output_dir = output_dir
-        self.config_path = config_path
-
-        # Load configuration from the specified path
-        with open(self.config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+        self.model_config = model_config
+        self.data_generation_config = data_generation_config
 
         # Set up loggers
         self.log_dir = os.path.join(self.output_dir, "logs")
@@ -30,25 +26,27 @@ class SelfPlayTask:
         
         self.main_logger = self._setup_logger(
             "SelfPlayManager", 
-            self.config['logging']['selfplay_main_logging_level'],
+            self.data_generation_config['main_logging_level'],
             os.path.join(self.log_dir, f"self_play_task_{timestamp}.log")
         )
         
         self.worker_logger = self._setup_logger(
             "SelfPlayWorker",
-            self.config['logging']['selfplay_worker_logging_level'],
+            self.data_generation_config['worker_logging_level'],
             os.path.join(self.log_dir, f"self_play_games_{timestamp}.log")
         )
 
         # Instantiate core components
         self.mcts_player = TalbotPlayer(
             logger=self.worker_logger,
-            config=self.config,
+            model_config=self.model_config,
+            self_play_config=self.data_generation_config
         )
         self.game_manager = SelfPlayGameWorker(
             logger=self.worker_logger,
             player=self.mcts_player,
-            config=self.config
+            model_config=self.model_config,
+            self_play_config=self.data_generation_config
         )
 
         # Initialize state variables
@@ -79,7 +77,7 @@ class SelfPlayTask:
         """
         self.main_logger.info(f"Starting self-play task. Logs are in {self.log_dir}")
         
-        num_positions_total = self.config['stored_data']['positions_per_cycle']
+        num_positions_total = self.data_generation_config['positions_per_cycle']
         
         # Initialize the progress bar with the total number of positions
         with tqdm(total=num_positions_total, desc="Positions Generated", unit="pos", dynamic_ncols=True) as pbar:

@@ -1,20 +1,30 @@
 import chess
+import threading
 
 class MCTSNode:
     """
     Represents a single state (board position) in our MCTS tree.
+    Now supports thread-safe updates using per-node locks.
     """
     def __init__(self, board: chess.Board = None, parent=None, move: chess.Move = None):
         self._board = board
         self.parent = parent
         self.move = move
         self.children = {}
+
+        # Node statistics
         self.visits = 0
         self.value_sum = 0.0
         self.prior_probabilities = None
         self.prior_probability_from_parent = 0.0
+
+        # Flags
         self.is_expanded = False
         self.is_queued_for_inference = False
+
+        # Locks
+        self.lock = threading.Lock()
+        self.visits_lock = threading.Lock()
 
     @property
     def board(self) -> chess.Board:
@@ -30,11 +40,11 @@ class MCTSNode:
     def is_root(self) -> bool:
         return self.parent is None
 
-    def uct_score(self, cpuct: float, prior_probability_for_this_move: float, sqrt_parent_visits_term: float) -> float:
+    def uct_score(self, cpuct, prior_probability_for_this_move, sqrt_parent_visits_term) -> float:
+        # No lock needed for stale reads
         if self.visits == 0:
             return float('inf')
 
         Q = -self.value_sum / self.visits
         U = cpuct * prior_probability_for_this_move * sqrt_parent_visits_term / (1 + self.visits)
-
         return Q + U

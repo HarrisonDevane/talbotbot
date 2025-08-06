@@ -1,5 +1,3 @@
-# main.py
-
 import os
 import time
 import yaml
@@ -9,7 +7,7 @@ import h5py
 from datetime import datetime
 
 # Assuming this import is in your project structure
-from self_play_task import SelfPlayTask
+from data_generation_task import DataGenerationTask
 
 # --- Configuration Paths ---
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -18,7 +16,7 @@ rl_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 RL_CYCLES_DIR = os.path.abspath(os.path.join(rl_dir, "rl_cycles"))
 RL_ORCHESTRATOR_LOG_DIR = os.path.abspath(os.path.join(RL_CYCLES_DIR, "rl_logs"))
 CONFIG_STATE_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_state.yaml"))
-CONFIG_SELF_PLAY_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_config.yaml"))
+CONFIG_RL_CYCLE_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_config.yaml"))
 
 
 class RLOrchestrator:
@@ -32,11 +30,11 @@ class RLOrchestrator:
         os.makedirs(RL_CYCLES_DIR, exist_ok=True)
 
         # Load global config to get buffer size and file path
-        with open(CONFIG_SELF_PLAY_FILE, 'r') as f:
+        with open(CONFIG_RL_CYCLE_FILE, 'r') as f:
             self.global_config = yaml.safe_load(f)
         
         # New: Get buffer path from the config file and make it absolute
-        buffer_file_name = self.global_config['stored_data']['buffer_file_path']
+        buffer_file_name = self.global_config['data_storage']['buffer_file_path']
         self.buffer_file_path = os.path.join(rl_dir, buffer_file_name)
 
 
@@ -229,11 +227,12 @@ class RLOrchestrator:
             self.logger.info(f"\n--- Starting RL Cycle {next_cycle} (run {i + 1} of {self.total_cycles}) ---")
             self.logger.info(f"Cycle-specific logs will be stored in: {cycle_dir}")
             
-            # Step 1: Run Self-Play
+            # Step 1: Run self-play data generation
             self.logger.info("1. Generating self-play data...")
-            self_play_task = SelfPlayTask(
-                config_path=CONFIG_SELF_PLAY_FILE,
+            self_play_task = DataGenerationTask(
                 output_dir=cycle_dir,
+                model_config=self.global_config['model'],
+                data_generation_config=self.global_config['data_generation']
             )
             all_training_data = self_play_task.run()
             

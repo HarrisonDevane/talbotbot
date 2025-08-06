@@ -18,6 +18,7 @@ pyyaml = "*"
 python-lichess = "*"
 bs4 = "*"
 matplotlib = "*"
+atomic = "*"
 
 [dev-packages]
 
