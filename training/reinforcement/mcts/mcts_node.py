@@ -24,7 +24,8 @@ class MCTSNode:
 
         # Locks
         self.lock = threading.Lock()
-        self.visits_lock = threading.Lock()
+        self.visits_value_lock = threading.Lock()
+        self.inference_lock = threading.Lock()
 
     @property
     def board(self) -> chess.Board:

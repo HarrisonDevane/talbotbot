@@ -8,7 +8,6 @@ import math
 import time
 import logging
 import numpy as np
-from .mcts_node import MCTSNode
 import threading
 import queue
 
@@ -16,7 +15,8 @@ import queue
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 sys.path.insert(0, parent_dir)
 
-import utils
+import src_shared.utils as utils
+from.mcts_node import MCTSNode
 
 class MCTSEngine:
     """
@@ -111,6 +111,22 @@ class MCTSEngine:
                             node.children[move].prior_probability_from_parent = noisy_legal_probs_list[i]
 
         self.logger.debug(f"[Dirichlet Noise] Added Dirichlet noise to root")
+    
+    
+    def _expand_root(self):
+        """
+        Expand root node initially or when root changed
+        """
+        self.logger.debug("Expanding root node")
+
+        board_input = torch.from_numpy(utils.board_to_tensor_68(self.root.board)).float().to(self.model_player.device)
+        policy_logits, value_output = self.model_player.get_policy_value(board_input.unsqueeze(0))
+        policy_probs = F.softmax(policy_logits.squeeze(0), dim=0)
+
+        # Expand the root node and backpropagate the value
+        self._expand(self.root, policy_probs)
+        self._backpropagate(self.root, value_output.item()) 
+        self._add_dirichlet_noise(self.root)
 
 
     def get_target_vectors(self):
@@ -134,31 +150,43 @@ class MCTSEngine:
         return policy_vector, root_value
 
 
-    def set_new_root(self, board: chess.Board, last_move: chess.Move):
+    def set_new_root(self, board: chess.Board, our_move: chess.Move, opponent_move: chess.Move):
         """
         Updates the MCTS root based on the sequence of moves.
         Otherwise, a new tree is started.
         """
         if self.root is None:
-            self.root = MCTSNode(board.copy())
             self.logger.debug("MCTSEngine: New root node created.")
+            self.root = MCTSNode(board.copy())
+            self._expand_root()
             return
+    
 
-        if last_move and last_move in self.root.children:
-            self.logger.debug(f"MCTSEngine: Root changed to child for move {last_move.uci()}.")
-
-            new_root = self.root.children[last_move]
+        # If our last move is a child of the root, we update the root to that child.
+        if our_move and our_move in self.root.children:
+            new_root = self.root.children[our_move]
             new_root.parent = None
             self.root = new_root
-            self._add_dirichlet_noise(self.root)
 
-            for child in self.root.children.values():
-                child.is_queued_for_inference = False
-                self.logger.debug(f"Reset is_queued_for_inference for child move {child.move.uci()}")
-            
+            self.logger.debug(f"MCTSEngine: Root changed to child for our move {our_move.uci()}.")
+
+            # If opponent move also exists, we further update the root to our move's child node.
+            if opponent_move:
+                if opponent_move in self.root.children:
+                    new_root = self.root.children[opponent_move]
+                    new_root.parent = None
+                    self.root = new_root
+                    self.logger.debug(f"MCTSEngine: Root changed to child for opponent move {opponent_move.uci()}.")
+                else:
+                    self.logger.debug("MCTSE Engine: New root node created.")
+                    self.root = MCTSNode(board.copy())
+                    self._expand_root()
+
+        # After updating the root, we check if it's already expanded.
+        if self.root.is_expanded:
+            self._add_dirichlet_noise(self.root)
         else:
-            self.logger.debug("MCTSEngine: No matching child found, starting new tree.")
-            self.root = MCTSNode(board.copy())
+            self._expand_root()
 
 
     def run_simulations(self, search_depth, early_cutoff_simulations, early_cutoff_threshold):
@@ -173,18 +201,8 @@ class MCTSEngine:
         
         # Before starting worker threads, perform a single inference for the root at the start of the game
         if not self.root.is_expanded:
-            self.logger.debug("Expanding root node before starting simulations.")
-
-            board_input = torch.from_numpy(utils.board_to_tensor_68(self.root.board)).float().to(self.model_player.device)
-            policy_logits, value_output = self.model_player.get_policy_value(board_input.unsqueeze(0))
-            policy_probs = F.softmax(policy_logits.squeeze(0), dim=0)
-
-            # Expand the root node and backpropagate the value
-            self._expand(self.root, policy_probs)
-            # The root expansion is part of a single "initial" simulation, so we backpropagate.
-            self._backpropagate(self.root, value_output.item()) 
-            self._add_dirichlet_noise(self.root)
-
+            self._expand_root()
+        
         # Start the inference worker thread
         inference_thread = threading.Thread(target=self._inference_worker, daemon=True)
         inference_thread.start()
@@ -231,7 +249,7 @@ class MCTSEngine:
             log_message = (
                 f"Move: {move.uci()}, Visits: {child_node.visits}, "
                 f"Prior Probability: {prior_prob:.4f}, "
-                f"Average Value: {-child_node.value_sum / child_node.visits if child_node.visits > 0 else 0.0:.4f}"
+                f"Average Value: {-child_node.value_sum / child_node.visits if child_node.visits > 0 else 0.0:.4f}, "
             )
             self.logger.info(log_message)
         self.logger.info("-----------------------------------\n")
@@ -269,6 +287,7 @@ class MCTSEngine:
                         self.logger.info(f"[Worker {thread_id}] Early cutoff due to a single child having > {early_cutoff_threshold * 100:.1f}% of visits. Visits: {max_visits}/{total_visits}")
                         break
             
+            # Put batch on queue
             if len(batch_buffer) >= self.worker_batch_size:
                 try:
                     self.inference_queue.put_nowait(batch_buffer)
@@ -276,7 +295,7 @@ class MCTSEngine:
                     batch_buffer = []
                 except queue.Full:
                     self.logger.debug(f"[Selection worker {thread_id}] Inference queue full - waiting.")
-                    time.sleep(0.001)  # tiny backoff
+                    time.sleep(0.001)
                     continue
 
             # Use root queue as proxy for forced batch
@@ -333,9 +352,9 @@ class MCTSEngine:
                 with self.counter_lock:
                     self.logger.debug(f"[Selection worker {thread_id}] Selected node ID: {id(node)}, incremented simulation count: {self.simulation_counter}, Queue size: {self.inference_queue.qsize()}")
                 
-                if node.board.is_game_over():
-                    # Leaf is terminal -> backprop directly
-                    result = node.board.result()
+                # Leaf is terminal -> backprop directly
+                if node.board.is_game_over() or node.board.can_claim_threefold_repetition() or node.board.can_claim_fifty_moves():
+                    result = node.board.result(claim_draw=True)
                     value = 0.0
                     if result == "1-0":
                         value = 1.0 if node.board.turn == chess.WHITE else -1.0
@@ -355,6 +374,17 @@ class MCTSEngine:
 
                 with self.counter_lock:
                     self.simulation_counter += 1
+
+        # Batch remaining nodes before shutdown
+        while batch_buffer:
+            try:
+                self.inference_queue.put_nowait(batch_buffer)
+                self.logger.debug(f"[Selection worker {thread_id}] Flushed final partial batch of size {len(batch_buffer)} to inference queue.")
+                batch_buffer = []
+            except queue.Full:
+                self.logger.debug(f"[Selection worker {thread_id}] Inference queue still full during final flush. Retrying.")
+                time.sleep(0.001)
+
 
     def _update_worker(self, thread_id):
         """
@@ -553,9 +583,10 @@ class MCTSEngine:
         original_turn = node.board.turn
 
         while current is not None:
-            current.is_queued_for_inference = False
+            with current.inference_lock:
+                current.is_queued_for_inference = False
 
-            with current.visits_lock:
+            with current.visits_value_lock:
                 current.visits += visit_increment
                 if current.board.turn == original_turn:
                     current.value_sum += value
@@ -575,7 +606,7 @@ class MCTSEngine:
         current = node
         original_turn = node.board.turn
         while current is not None:
-            with current.visits_lock:
+            with current.visits_value_lock:
                 current.visits += 1
                 if current.board.turn == original_turn:
                     current.value_sum += self.virtual_loss

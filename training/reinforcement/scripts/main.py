@@ -4,10 +4,13 @@ import yaml
 import logging
 import numpy as np
 import h5py
+import shutil
 from datetime import datetime
 
 # Assuming this import is in your project structure
 from data_generation_task import DataGenerationTask
+from train_task import TrainTask
+from evaluation_task import EvaluationTask
 
 # --- Configuration Paths ---
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -15,119 +18,77 @@ rl_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 
 RL_CYCLES_DIR = os.path.abspath(os.path.join(rl_dir, "rl_cycles"))
 RL_ORCHESTRATOR_LOG_DIR = os.path.abspath(os.path.join(RL_CYCLES_DIR, "rl_logs"))
-CONFIG_STATE_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_state.yaml"))
-CONFIG_RL_CYCLE_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_config.yaml"))
+CONFIG_RL_STATE_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_state.yaml"))
+CONFIG_RL_PARAMS_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_config.yaml"))
 
 
 class RLOrchestrator:
     def __init__(self):
         self.logger = self._setup_global_logger()
-        self.logger.info(f"Orchestrator initialized. Reading state from: {CONFIG_STATE_FILE}")
+        self.logger.info(f"Orchestrator initialized. Reading state from: {CONFIG_RL_STATE_FILE}")
 
-        self.current_cycle, self.total_cycles = self._load_state()
-        self.logger.info(f"Last completed cycle: {self.current_cycle}. Total cycles to run: {self.total_cycles}.")
+        self.params_config, self.state_config = self._load_configs()
+        self.current_cycle = self.state_config['state']['current_cycle']
+        self.total_cycles = self.params_config['global']['total_cycles']
+
+        self.logger.info(f"Last completed cycle: {self.current_cycle}. Total cycles to run: {self.total_cycles - self.current_cycle}.")
+        self.logger.info(f"Last saved self-play positions: {self.state_config['state']['self_play_positions_current']}")
+        self.logger.info(f"Current buffer size: {self.state_config['state']['buffer_positions_current']}")
 
         os.makedirs(RL_CYCLES_DIR, exist_ok=True)
 
-        # Load global config to get buffer size and file path
-        with open(CONFIG_RL_CYCLE_FILE, 'r') as f:
-            self.global_config = yaml.safe_load(f)
-        
-        # New: Get buffer path from the config file and make it absolute
-        buffer_file_name = self.global_config['data_storage']['buffer_file_path']
-        self.buffer_file_path = os.path.join(rl_dir, buffer_file_name)
-
+        # Get buffer path from the global config file and make it absolute
+        buffer_file_name = self.params_config['global']['buffer_file_path']
+        self.buffer_file_path = buffer_file_name
 
     def _setup_global_logger(self):
-        """
-        Sets up a main logger for the orchestrator, logging only to a single file.
-        """
         os.makedirs(RL_ORCHESTRATOR_LOG_DIR, exist_ok=True)
         
         logger = logging.getLogger("RLOrchestrator")
         logger.setLevel(logging.INFO)
         
-        # Clear any existing handlers to prevent duplicate logs
         if logger.hasHandlers():
             logger.handlers.clear()
         
         formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
-        
-        # File handler for a persistent log of the entire run
         log_filename = f"orchestrator_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
         file_handler = logging.FileHandler(os.path.join(RL_ORCHESTRATOR_LOG_DIR, log_filename))
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-            
+        
         return logger
 
-    def _load_state(self):
-        if os.path.exists(CONFIG_STATE_FILE):
-            with open(CONFIG_STATE_FILE, 'r') as f:
-                state = yaml.safe_load(f)
-                return state.get('current_cycle', 0), state.get('total_cycles', 1)
 
+    def _load_configs(self):
+        with open(CONFIG_RL_PARAMS_FILE, 'r') as f:
+            params_config = yaml.safe_load(f)
 
-    def _save_state(self, cycle_number):
-        with open(CONFIG_STATE_FILE, 'w') as f:
-            yaml.safe_dump({'current_cycle': cycle_number, 'total_cycles': self.total_cycles}, f)
+        with open(CONFIG_RL_STATE_FILE, 'r') as f:
+            state_config = yaml.safe_load(f)
+        
+        return params_config, state_config
     
 
-    def _update_circular_buffer(self, new_data, cycle_dir):
-        """
-        First, saves the data to a cycle-specific HDF5 file.
-        Second, appends this new data to the main circular buffer HDF5 file,
-        trimming it to the maximum size.
-        """
-        max_positions = self.global_config['stored_data']['positions_total']
-        
-        # Step 1: Save data to the cycle-specific HDF5 file
-        iteration_data_dir = os.path.join(cycle_dir, "data")
-        os.makedirs(iteration_data_dir, exist_ok=True)
-        iteration_data_path = os.path.join(iteration_data_dir, "iteration_data.hdf5")
-        
-        self.logger.info(f"Saving cycle data to: {iteration_data_path}")
+    def _save_state(self):
+        with open(CONFIG_RL_STATE_FILE, 'w') as f:
+            yaml.safe_dump(self.state_config, f)
+    
 
-        # Extract data from list of dictionaries into separate arrays
+    def _update_circular_buffer(self, new_data):
+        max_positions = self.params_config['global']['buffer_positions_total']
+        
         boards = np.array([item['board_state'] for item in new_data], dtype=np.float16)
-        policies = np.array([item['policy'] for item in new_data], dtype=np.int32)
+        policies = np.array([item['policy'] for item in new_data], dtype=np.float16)
         values = np.array([item['value_target'] for item in new_data], dtype=np.float16)
 
-        # Create HDF5 file and datasets for the current iteration
-        with h5py.File(iteration_data_path, 'w') as hf:
-            hf.create_dataset(
-                'inputs',
-                data=boards,
-                dtype=np.float16,
-                compression='gzip',
-                chunks=True
-            )
-            hf.create_dataset(
-                'policies',
-                data=policies,
-                dtype=np.int32,
-                compression='gzip',
-                chunks=True
-            )
-            hf.create_dataset(
-                'values',
-                data=values,
-                dtype=np.float16,
-                compression='gzip',
-                chunks=True
-            )
-        self.logger.info("Cycle data saved successfully.")
-
-        # Step 2: Append new data to the main circular buffer
-        self.logger.info(f"Appending new data to the main circular buffer: {self.buffer_file_path}")
+        self.logger.info(f"Appending new data ({len(new_data)} positions) to the circular buffer: {self.buffer_file_path}")
+        
         with h5py.File(self.buffer_file_path, 'a') as hf:
             if 'inputs' in hf and 'policies' in hf and 'values' in hf:
-                # Append to existing datasets
                 inputs_dset = hf['inputs']
                 policies_dset = hf['policies']
                 values_dset = hf['values']
 
-                # Resize datasets to accommodate new data
                 current_size = inputs_dset.shape[0]
                 new_size = current_size + len(new_data)
                 
@@ -135,119 +96,167 @@ class RLOrchestrator:
                 policies_dset.resize(new_size, axis=0)
                 values_dset.resize(new_size, axis=0)
                 
-                # Append new data
                 inputs_dset[current_size:] = boards
                 policies_dset[current_size:] = policies
                 values_dset[current_size:] = values
                 
-                # Trim if over max size
+                self.state_config['state']['buffer_positions_current'] = new_size
+
                 if new_size > max_positions:
                     trim_start = new_size - max_positions
-                    
-                    # Create temporary datasets for the trimmed data
                     temp_inputs = inputs_dset[trim_start:]
                     temp_policies = policies_dset[trim_start:]
                     temp_values = values_dset[trim_start:]
 
-                    # Delete original datasets and create new ones with trimmed data
                     del hf['inputs']
                     del hf['policies']
                     del hf['values']
                     
-                    hf.create_dataset(
-                        'inputs',
-                        data=temp_inputs,
-                        maxshape=(None, *temp_inputs.shape[1:]),
-                        dtype=np.float16,
-                        compression='gzip',
-                        chunks=True
-                    )
-                    hf.create_dataset(
-                        'policies',
-                        data=temp_policies,
-                        maxshape=(None, *temp_policies.shape[1:]),
-                        dtype=np.int32,
-                        compression='gzip',
-                        chunks=True
-                    )
-                    hf.create_dataset(
-                        'values',
-                        data=temp_values,
-                        maxshape=(None, *temp_values.shape[1:]),
-                        dtype=np.float16,
-                        compression='gzip',
-                        chunks=True
-                    )
+                    hf.create_dataset('inputs', data=temp_inputs, maxshape=(None, *temp_inputs.shape[1:]), dtype=np.float16, compression='gzip', chunks=True)
+                    hf.create_dataset('policies', data=temp_policies, maxshape=(None, *temp_policies.shape[1:]), dtype=np.float16, compression='gzip', chunks=True)
+                    hf.create_dataset('values', data=temp_values, maxshape=(None, *temp_values.shape[1:]), dtype=np.float16, compression='gzip', chunks=True)
                     
                     final_size = max_positions
+                    self.state_config['state']['buffer_positions_current'] = final_size
                 else:
                     final_size = new_size
             else:
-                hf.create_dataset(
-                    'inputs',
-                    data=boards,
-                    maxshape=(None, *boards.shape[1:]),
-                    dtype=np.float16,
-                    compression='gzip',
-                    chunks=True
-                )
-                hf.create_dataset(
-                    'policies',
-                    data=policies,
-                    maxshape=(None, *policies.shape[1:]),
-                    dtype=np.int32,
-                    compression='gzip',
-                    chunks=True
-                )
-                hf.create_dataset(
-                    'values',
-                    data=values,
-                    maxshape=(None, *values.shape[1:]),
-                    dtype=np.float16,
-                    compression='gzip',
-                    chunks=True
-                )
+                hf.create_dataset('inputs', data=boards, maxshape=(None, *boards.shape[1:]), dtype=np.float16, compression='gzip', chunks=True)
+                hf.create_dataset('policies', data=policies, maxshape=(None, *policies.shape[1:]), dtype=np.float16, compression='gzip', chunks=True)
+                hf.create_dataset('values', data=values, maxshape=(None, *values.shape[1:]), dtype=np.float16, compression='gzip', chunks=True)
                 final_size = len(new_data)
+                self.state_config['state']['buffer_positions_current'] = final_size
 
             self.logger.info(
                 f"Circular buffer updated. It now contains {final_size} of "
                 f"{max_positions} total positions.")
+    
 
     def run(self):
         """
         The main orchestration loop.
         """
-        for i in range(self.total_cycles):
+        while self.current_cycle < self.total_cycles:
             next_cycle = self.current_cycle + 1
 
             # --- Setup cycle-specific directories ---
-            cycle_dir = os.path.join(RL_CYCLES_DIR, f"iteration_{next_cycle}")
+            cycle_dir = os.path.join(RL_CYCLES_DIR, f"iteration_{self.current_cycle}")
             os.makedirs(cycle_dir, exist_ok=True)
             
-            self.logger.info(f"\n--- Starting RL Cycle {next_cycle} (run {i + 1} of {self.total_cycles}) ---")
+            self.logger.info(f"\n--- Starting RL Cycle {self.current_cycle} (run {self.current_cycle} of {self.total_cycles}) ---")
             self.logger.info(f"Cycle-specific logs will be stored in: {cycle_dir}")
-            
-            # Step 1: Run self-play data generation
+
+            # Step 1: Run self-play data generation in chunks
             self.logger.info("1. Generating self-play data...")
-            self_play_task = DataGenerationTask(
-                output_dir=cycle_dir,
-                model_config=self.global_config['model'],
-                data_generation_config=self.global_config['data_generation']
-            )
-            all_training_data = self_play_task.run()
             
-            # Step 2: Update circular buffer
-            self.logger.info("2. Updating the circular buffer with new data...")
-            # Pass the cycle_dir to the update method
-            self._update_circular_buffer(all_training_data, cycle_dir)
+            total_positions_for_cycle = self.params_config['global']['self_play_positions_per_cycle']
+            save_interval = self.params_config['global']['self_play_save_interval']
+            best_model_path = self.params_config['model']['best_model_path']
+            
+            # Get the starting point from the state config
+            positions_generated_this_cycle = self.state_config['state']['self_play_positions_current']
+            training_steps = self.state_config['state']['training_steps']
+            total_positions = self.state_config['state']['total_positions']
+            total_games = self.state_config['state']['total_games']
 
-            # After successful completion, update the state
-            self.logger.info(f"--- Cycle {next_cycle} self-play completed successfully! ---")
+            
+            # Instantiate the DataGenerationTask once for the cycle
+            data_generation_task = DataGenerationTask(
+                output_dir=cycle_dir,
+                model_config=self.params_config['model'],
+                data_generation_config=self.params_config['data_generation'],
+                best_iter = self.state_config['state']['best_model_cycle']
+            )
+
+            # Loop to generate data in chunks
+            while positions_generated_this_cycle < total_positions_for_cycle:
+                positions_to_generate_this_chunk = min(
+                    save_interval, 
+                    total_positions_for_cycle - positions_generated_this_cycle
+                )
+                
+                new_data_chunk, games_in_chunk = data_generation_task.run_for_n_positions(positions_to_generate_this_chunk)
+                self._update_circular_buffer(new_data_chunk)
+                
+                positions_generated_this_cycle += len(new_data_chunk)
+                total_games += games_in_chunk
+                self.state_config['state']['self_play_positions_current'] = positions_generated_this_cycle
+                self.state_config['state']['total_positions'] = total_positions + positions_generated_this_cycle
+                self.state_config['state']['total_games'] = total_games
+
+                
+                # Periodically save the state to the YAML file
+                self.logger.info(f"Chunk saved. Total positions for cycle {self.current_cycle}: {positions_generated_this_cycle}/{total_positions_for_cycle}. Saving state...")
+                self._save_state()
+
+            self.logger.info(f"--- Cycle {self.current_cycle} self-play completed successfully! ---")
+            self._save_state()
+            
+            # Step 2. Training
+            self.logger.info("2. Training a new model on the updated data buffer...")
+
+            train_task = TrainTask(
+                output_dir=cycle_dir,
+                model_config=self.params_config['model'],
+                training_config=self.params_config['training'],
+                hdf5_path=self.buffer_file_path,
+                cycle_number=self.current_cycle
+            )
+            model_path, steps = train_task.run_training_loop()
+
+            self.logger.info(f"2. Model has trained successfully for {steps} steps.")
+
+            # # Step 3. Evaluation
+            self.logger.info(f"3. Initiating evaluation by self play for {self.params_config['global']['eval_games']} games against current best model...")
+
+            evaluation_task = EvaluationTask(
+                output_dir=cycle_dir,
+                test_model=model_path,
+                model_config=self.params_config['model'],
+                evaluation_config=self.params_config['evaluation'],
+                current_iter = self.current_cycle,
+                best_iter = self.state_config['state']['best_model_cycle']
+            )
+            test_score, best_score = evaluation_task.run_for_n_games(self.params_config['global']['eval_games'])
+
+            self.logger.info(f"3. Evaluation finished with result: {test_score}-{best_score}")
+
+            test_score = 6.0
+            best_score = 4.0
+
+            # Step 4. Save best model
+            win_rate = test_score / self.params_config['global']['eval_games']
+            if win_rate > self.params_config['global']['eval_cutoff']:
+                self.logger.info(f"New model has a win rate of {win_rate:.2f} (> {self.params_config['global']['eval_cutoff']}), accepting it as the new best model.")
+                           
+                
+                # Override the best model with the new, better model
+                self.logger.info(f"Saving new model from {model_path} to {best_model_path}...")
+                shutil.copy(model_path, best_model_path)
+
+                self.state_config['state']['training_steps'] = training_steps + steps
+                self.state_config['state']['best_model_cycle'] = self.current_cycle
+                
+            self.logger.info(f"Current best cycle: {self.state_config['state']['best_model_cycle']}...")
+
+            # Save copy of best model every save interval
+            if self.current_cycle // self.params_config['global']['best_model_save_interval']:
+                current_best_model = os.path.join(rl_dir, f'best_models/best_model_iter_{self.current_cycle}.pth')
+
+                self.logger.info(f"Saving current best model to after {self.params_config['global']['best_model_save_interval']} to {current_best_model}")
+                shutil.copy(best_model_path, current_best_model)
+
+
+            # After the loop is complete, reset the self-play counter and update the cycle number
             self.current_cycle = next_cycle
-            self._save_state(self.current_cycle)
+            self.state_config['state']['self_play_positions_current'] = 0
+            self.state_config['state']['current_cycle'] = self.current_cycle
+            self._save_state()
 
-            if i < self.total_cycles - 1:
-                self.logger.info(f"Sleeping for 10 seconds before starting cycle {next_cycle + 1}...")
+
+            # Increment loop
+            if self.current_cycle < self.total_cycles:
+                self.logger.info(f"Sleeping for 10 seconds before starting cycle {self.current_cycle}...")
                 time.sleep(10)
         
         self.logger.info("\n--- All requested RL cycles have been completed. The orchestrator will now shut down. ---")

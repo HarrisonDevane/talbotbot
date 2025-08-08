@@ -3,20 +3,17 @@ import time
 import logging
 import numpy as np
 from datetime import datetime
-from tqdm import tqdm
 
 # Assuming these imports are in your project structure
 from self_play_agent import TalbotPlayer
 from self_play_game_worker import SelfPlayGameWorker
 
 class DataGenerationTask:
-    def __init__(self, output_dir, model_config, data_generation_config):
-        """
-        Initializes the self-play task with configuration and paths.
-        """
+    def __init__(self, output_dir, model_config, data_generation_config, best_iter):
         self.output_dir = output_dir
         self.model_config = model_config
         self.data_generation_config = data_generation_config
+        self.best_iter = best_iter
 
         # Set up loggers
         self.log_dir = os.path.join(self.output_dir, "logs")
@@ -27,37 +24,34 @@ class DataGenerationTask:
         self.main_logger = self._setup_logger(
             "SelfPlayManager", 
             self.data_generation_config['main_logging_level'],
-            os.path.join(self.log_dir, f"self_play_task_{timestamp}.log")
+            os.path.join(self.log_dir, f"data_generaration_{timestamp}.log")
         )
         
         self.worker_logger = self._setup_logger(
             "SelfPlayWorker",
             self.data_generation_config['worker_logging_level'],
-            os.path.join(self.log_dir, f"self_play_games_{timestamp}.log")
+            os.path.join(self.log_dir, f"data_generaration_games_{timestamp}.log")
         )
 
         # Instantiate core components
         self.mcts_player = TalbotPlayer(
+           name=f'best_model_iter_{self.best_iter} (self-play)',
             logger=self.worker_logger,
+            model_path=self.model_config['best_model_path'],
             model_config=self.model_config,
             self_play_config=self.data_generation_config
         )
         self.game_manager = SelfPlayGameWorker(
             logger=self.worker_logger,
-            player=self.mcts_player,
+            player_1=self.mcts_player,
+            player_2=self.mcts_player,
             model_config=self.model_config,
             self_play_config=self.data_generation_config
         )
 
-        # Initialize state variables
-        self.all_training_data = []
-        self.positions_generated = 0
         self.game_number = 1
 
     def _setup_logger(self, name: str, level: str, log_file: str):
-        """
-        Sets up a logger with a specific name and log file.
-        """
         logger = logging.getLogger(name)
         logger.setLevel(level)
         if logger.hasHandlers():
@@ -70,38 +64,35 @@ class DataGenerationTask:
         
         return logger
 
-    def run(self):
+
+    def run_for_n_positions(self, n_positions: int):
         """
-        The main loop to generate self-play data until the position count is met,
-        with a real-time progress bar.
+        Generates a specified number of positions and returns them as a list.
+        This is the method the RLOrchestrator will call repeatedly.
         """
-        self.main_logger.info(f"Starting self-play task. Logs are in {self.log_dir}")
+        self.main_logger.info(f"Generating a chunk of up to {n_positions} self-play positions...")
+
+        chunk_data = []
+        positions_in_chunk = 0
+        games_in_chunk = 0
         
-        num_positions_total = self.data_generation_config['positions_per_cycle']
-        
-        # Initialize the progress bar with the total number of positions
-        with tqdm(total=num_positions_total, desc="Positions Generated", unit="pos", dynamic_ncols=True) as pbar:
-            while self.positions_generated < num_positions_total:
-                start_time_game = time.time()
-                training_data = self.game_manager.play_one_game(self.game_number)
-                end_time_game = time.time()
-                
-                num_new_positions = len(training_data)
-                self.all_training_data.extend(training_data)
-                self.positions_generated += num_new_positions
-                
-                # Update the progress bar with the new positions from this game
-                pbar.update(num_new_positions)
-                
-                self.main_logger.info(
-                    f"Game {self.game_number} completed in {end_time_game - start_time_game:.2f}s "
-                    f"({num_new_positions} positions). Total: {self.positions_generated}/{num_positions_total}"
-                )
-                self.game_number += 1
-        
-        self.main_logger.info("--- Self-play data generation finished. ---")
-        self.main_logger.info(f"Final count of games completed: {self.game_number - 1}")
-        self.main_logger.info(f"Final count of positions generated: {self.positions_generated}")
-        
-        # Return the collected data directly
-        return self.all_training_data
+        while positions_in_chunk < n_positions:
+            start_time_game = time.time()
+            
+            # The play_one_game method returns the data for a single game
+            training_data = self.game_manager.run_training_loop(self.game_number)
+            
+            end_time_game = time.time()
+            
+            num_new_positions = len(training_data)
+            chunk_data.extend(training_data)
+            positions_in_chunk += num_new_positions
+            
+            self.main_logger.info(
+                f"Game {self.game_number} completed in {end_time_game - start_time_game:.2f}s "
+                f"({num_new_positions} positions). Current chunk total: {positions_in_chunk}. "
+            )
+            self.game_number += 1
+            games_in_chunk += 1
+            
+        return chunk_data, games_in_chunk

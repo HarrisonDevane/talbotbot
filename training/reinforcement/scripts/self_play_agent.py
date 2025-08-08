@@ -16,7 +16,7 @@ sys.path.insert(0, rl_root)
 sys.path.insert(0, project_root)
 
 from mcts.mcts_engine import MCTSEngine
-from model import ChessAIModel
+from src_shared.model import ChessAIModel
 
 
 class TalbotPlayer:
@@ -25,23 +25,24 @@ class TalbotPlayer:
     environment with a central batcher. This class manages the game state
     for a single game worker and communicates with the MCTS instance.
     """
-    def __init__(self, logger, model_config, self_play_config):
+    def __init__(self, name, logger, model_path, model_config, self_play_config):
+        self.name = name
         self.logger = logger
         self.model_config = model_config
+        self.model_path = model_path
         self.self_play_config = self_play_config
 
         # These are reset each game
         self.mcts = None
-        self.last_move = None
+        self.our_last_move = None
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = ChessAIModel(num_input_planes=self.model_config['input_planes'], 
                                   num_residual_blocks=model_config['resblocks'], 
                                   num_filters=model_config['filters'])
 
-        checkpoint = torch.load(model_config['model_path'], map_location=self.device, weights_only=True)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.logger.debug(f"Model loaded successfully from {model_config['model_path']}")
+        self.model.load_state_dict(torch.load(self.model_path, map_location=self.device, weights_only=True))
+        self.logger.debug(f"Model loaded successfully from {self.model_path}")
 
         self.model.to(self.device)
         self.model.eval()
@@ -53,7 +54,7 @@ class TalbotPlayer:
         return policy_logits, value_output
     
 
-    def get_move(self, board, move_number, search_depth):
+    def get_move(self, board, move_number, search_depth, last_move_played):
         """
         Runs MCTS simulations and selects a move based on a temperature schedule.
         High temperature is used in the early game for exploration, and low
@@ -78,10 +79,13 @@ class TalbotPlayer:
                 selection_workers=self.self_play_config['selection_workers'],
                 update_workers=self.self_play_config['update_workers']
             )
-            self.mcts.set_new_root(board.copy(), None) 
+            self.mcts.set_new_root(board.copy(), None, None) 
         else:
-            self.mcts.set_new_root(board.copy(), self.last_move)
+            self.mcts.set_new_root(board.copy(), self.our_last_move, last_move_played)
         
+        self.logger.info(f"Current player: {self.name}")
+        self.logger.info(f"Our last move: {self.our_last_move}. Last move played {last_move_played}")
+
         sim_start_time = time.time()
         self.mcts.run_simulations(search_depth, self.self_play_config['early_cutoff_simulations'], self.self_play_config['early_cutoff_threshold'])
         sim_end_time = time.time()
@@ -107,7 +111,7 @@ class TalbotPlayer:
             # Select a move based on the calculated probabilities
             best_move = np.random.choice(moves, p=probabilities)
         
-        self.last_move = best_move
+        self.our_last_move = best_move
         policy_vector, root_value = self.mcts.get_target_vectors()
 
         self.logger.info(f"MCTS for move {move_number} picked move: {best_move.uci()} with temperature {temperature}.")
@@ -138,5 +142,5 @@ class TalbotPlayer:
             selection_workers=self.self_play_config['selection_workers'],
             update_workers=self.self_play_config['update_workers']
         )
-        self.last_move = None
+        self.our_last_move = None
         self.move_number = 0
