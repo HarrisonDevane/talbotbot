@@ -4,7 +4,6 @@ import sys
 import logging
 import random
 import uuid
-import torch
 import numpy as np
 import time
 
@@ -16,49 +15,32 @@ sys.path.insert(0, rl_root)
 sys.path.insert(0, project_root)
 
 from mcts.mcts_engine import MCTSEngine
-from src_shared.model import ChessAIModel
 
 
-class TalbotPlayer:
+class SelfPlayAgent:
     """
     A chess player wrapper for an MCTS engine designed for a multiprocessing
     environment with a central batcher. This class manages the game state
     for a single game worker and communicates with the MCTS instance.
     """
-    def __init__(self, name, logger, model_path, model_config, self_play_config):
+    def __init__(self, name, logger, self_play_config, worker_id, inference_queue, result_queue):
         self.name = name
         self.logger = logger
-        self.model_config = model_config
-        self.model_path = model_path
         self.self_play_config = self_play_config
+        
+        # The agent now has direct access to the queues for its MCTS engine
+        self.worker_id = worker_id
+        self.inference_queue = inference_queue
+        self.result_queue = result_queue
+        self.worker_batch_size = self.self_play_config['batch_size_per_worker']
 
         # These are reset each game
         self.mcts = None
         self.our_last_move = None
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = ChessAIModel(num_input_planes=self.model_config['input_planes'], 
-                                  num_residual_blocks=model_config['resblocks'], 
-                                  num_filters=model_config['filters'])
-
-        self.model.load_state_dict(torch.load(self.model_path, map_location=self.device, weights_only=True))
-        self.logger.debug(f"Model loaded successfully from {self.model_path}")
-
-        self.model.to(self.device)
-        self.model.eval()
-
     
-    def get_policy_value(self, board_tensor):
-        with torch.no_grad():
-            policy_logits, value_output = self.model(board_tensor)
-        return policy_logits, value_output
-    
-
     def get_move(self, board, move_number, search_depth, last_move_played):
         """
         Runs MCTS simulations and selects a move based on a temperature schedule.
-        High temperature is used in the early game for exploration, and low
-        temperature is used in the late game for exploitation.
         """
         self.logger.info(f"\n{'='*60}\n{' '*20}--- MOVE {move_number} STARTED ---\n{'='*60}\n")
         move_start_time = time.time()
@@ -68,16 +50,17 @@ class TalbotPlayer:
             return None, None, None
 
         if self.mcts is None:
+            # We now pass the queues to the MCTS engine
             self.mcts = MCTSEngine(
                 logger=self.logger, 
-                model_player=self, 
+                worker_id=self.worker_id,
+                worker_batch_size=self.worker_batch_size,
+                inference_queue=self.inference_queue,
+                result_queue=self.result_queue,
                 cpuct=self.self_play_config['cpuct'], 
-                batch_size=self.self_play_config['batch_size'],
                 virtual_loss=self.self_play_config['virtual_loss'],
                 dirichlet_alpha=self.self_play_config['dirichlet_alpha'],
                 dirichlet_epsilon=self.self_play_config['dirichlet_epsilon'],
-                selection_workers=self.self_play_config['selection_workers'],
-                update_workers=self.self_play_config['update_workers']
             )
             self.mcts.set_new_root(board.copy(), None, None) 
         else:
@@ -86,9 +69,7 @@ class TalbotPlayer:
         self.logger.info(f"Current player: {self.name}")
         self.logger.info(f"Our last move: {self.our_last_move}. Last move played {last_move_played}")
 
-        sim_start_time = time.time()
-        self.mcts.run_simulations(search_depth, self.self_play_config['early_cutoff_simulations'], self.self_play_config['early_cutoff_threshold'])
-        sim_end_time = time.time()
+        simulation_count = self.mcts.run_simulations(search_depth, self.self_play_config['early_cutoff_simulations'], self.self_play_config['early_cutoff_threshold'])
 
         moves = list(self.mcts.root.children.keys())
         visits = np.array([self.mcts.root.children[move].visits for move in moves], dtype=np.float32)
@@ -100,47 +81,40 @@ class TalbotPlayer:
             temperature = self.self_play_config['temperature_low']
 
         best_move = None
-        if temperature < 1e-6: # Check for a very low temperature (near zero)
+        if temperature < 1e-6:
             best_move_index = np.argmax(visits)
             best_move = moves[best_move_index]
         else:
-            # T > 0, calculate probabilities based on temperature and sample a move
             visits_exp = visits ** (1.0 / temperature)
             probabilities = visits_exp / np.sum(visits_exp)
-
-            # Select a move based on the calculated probabilities
             best_move = np.random.choice(moves, p=probabilities)
         
         self.our_last_move = best_move
         policy_vector, root_value = self.mcts.get_target_vectors()
 
-        self.logger.info(f"MCTS for move {move_number} picked move: {best_move.uci()} with temperature {temperature}.")
         move_end_time = time.time()
+        total_move_time = move_end_time - move_start_time
+        simulation_speed = simulation_count / total_move_time
 
-        avg_move_time = move_end_time - move_start_time
-        avg_sim_time = sim_end_time - sim_start_time
+        self.logger.info(f"Total move time: {total_move_time:.4f}, with {simulation_speed:.4f} simulations per second")
 
-        self.logger.info(f"Total move time: {avg_move_time:.4f}, simulation time: {avg_sim_time:.4f}")
-
-        return best_move, policy_vector, root_value
+        return best_move, policy_vector, root_value, simulation_count
     
     def reset_for_new_game(self):
         """
-        Resets the player's state for a new game - called at the start of each new game.
+        Resets the player's state for a new game.
         """
         self.logger.debug(f"Resetting state for a new game.")
-
-        # Re-initialize the MCTS engine to discard the old tree
+        
         self.mcts = MCTSEngine(
             logger=self.logger, 
-            model_player=self, 
+            worker_id=self.worker_id,
+            worker_batch_size=self.worker_batch_size,
+            inference_queue=self.inference_queue,
+            result_queue=self.result_queue,
             cpuct=self.self_play_config['cpuct'], 
-            batch_size=self.self_play_config['batch_size'],
             virtual_loss=self.self_play_config['virtual_loss'],
             dirichlet_alpha=self.self_play_config['dirichlet_alpha'],
             dirichlet_epsilon=self.self_play_config['dirichlet_epsilon'],
-            selection_workers=self.self_play_config['selection_workers'],
-            update_workers=self.self_play_config['update_workers']
         )
         self.our_last_move = None
-        self.move_number = 0

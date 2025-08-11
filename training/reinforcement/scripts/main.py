@@ -32,7 +32,7 @@ class RLOrchestrator:
         self.total_cycles = self.params_config['global']['total_cycles']
 
         self.logger.info(f"Last completed cycle: {self.current_cycle}. Total cycles to run: {self.total_cycles - self.current_cycle}.")
-        self.logger.info(f"Last saved self-play positions: {self.state_config['state']['self_play_positions_current']}")
+        self.logger.info(f"Last saved self-play positions: {self.state_config['state']['data_generation_positions_current']}")
         self.logger.info(f"Current buffer size: {self.state_config['state']['buffer_positions_current']}")
 
         os.makedirs(RL_CYCLES_DIR, exist_ok=True)
@@ -149,16 +149,14 @@ class RLOrchestrator:
             # Step 1: Run self-play data generation in chunks
             self.logger.info("1. Generating self-play data...")
             
-            total_positions_for_cycle = self.params_config['global']['self_play_positions_per_cycle']
-            save_interval = self.params_config['global']['self_play_save_interval']
+            total_positions_for_cycle = self.params_config['global']['data_generation_positions_per_cycle']
+            save_interval = self.params_config['global']['data_generation_save_interval']
             best_model_path = self.params_config['model']['best_model_path']
             
             # Get the starting point from the state config
-            positions_generated_this_cycle = self.state_config['state']['self_play_positions_current']
+            positions_generated_this_cycle = self.state_config['state']['data_generation_positions_current']
             training_steps = self.state_config['state']['training_steps']
-            total_positions = self.state_config['state']['total_positions']
-            total_games = self.state_config['state']['total_games']
-
+            remaining_positions_this_cycle = total_positions_for_cycle - positions_generated_this_cycle
             
             # Instantiate the DataGenerationTask once for the cycle
             data_generation_task = DataGenerationTask(
@@ -168,25 +166,21 @@ class RLOrchestrator:
                 best_iter = self.state_config['state']['best_model_cycle']
             )
 
-            # Loop to generate data in chunks
-            while positions_generated_this_cycle < total_positions_for_cycle:
-                positions_to_generate_this_chunk = min(
-                    save_interval, 
-                    total_positions_for_cycle - positions_generated_this_cycle
-                )
+            for new_data_chunk, games_in_chunk in data_generation_task.run_for_n_positions(remaining_positions_this_cycle, save_interval):
                 
-                new_data_chunk, games_in_chunk = data_generation_task.run_for_n_positions(positions_to_generate_this_chunk)
+                # Process the new chunk of data
                 self._update_circular_buffer(new_data_chunk)
                 
                 positions_generated_this_cycle += len(new_data_chunk)
-                total_games += games_in_chunk
-                self.state_config['state']['self_play_positions_current'] = positions_generated_this_cycle
-                self.state_config['state']['total_positions'] = total_positions + positions_generated_this_cycle
-                self.state_config['state']['total_games'] = total_games
+                self.state_config['state']['data_generation_positions_current'] = positions_generated_this_cycle
+                self.state_config['state']['total_positions'] += len(new_data_chunk)
+                self.state_config['state']['total_games'] += games_in_chunk
 
-                
                 # Periodically save the state to the YAML file
-                self.logger.info(f"Chunk saved. Total positions for cycle {self.current_cycle}: {positions_generated_this_cycle}/{total_positions_for_cycle}. Saving state...")
+                self.logger.info(
+                    f"Chunk saved. Total positions for cycle {self.current_cycle}: "
+                    f"{positions_generated_this_cycle}/{remaining_positions_this_cycle}. Saving state..."
+                )
                 self._save_state()
 
             self.logger.info(f"--- Cycle {self.current_cycle} self-play completed successfully! ---")
@@ -221,9 +215,6 @@ class RLOrchestrator:
 
             self.logger.info(f"3. Evaluation finished with result: {test_score}-{best_score}")
 
-            test_score = 6.0
-            best_score = 4.0
-
             # Step 4. Save best model
             win_rate = test_score / self.params_config['global']['eval_games']
             if win_rate > self.params_config['global']['eval_cutoff']:
@@ -240,7 +231,7 @@ class RLOrchestrator:
             self.logger.info(f"Current best cycle: {self.state_config['state']['best_model_cycle']}...")
 
             # Save copy of best model every save interval
-            if self.current_cycle // self.params_config['global']['best_model_save_interval']:
+            if self.current_cycle > 0 and self.current_cycle % self.params_config['global']['best_model_save_interval'] == 0:
                 current_best_model = os.path.join(rl_dir, f'best_models/best_model_iter_{self.current_cycle}.pth')
 
                 self.logger.info(f"Saving current best model to after {self.params_config['global']['best_model_save_interval']} to {current_best_model}")
@@ -249,7 +240,7 @@ class RLOrchestrator:
 
             # After the loop is complete, reset the self-play counter and update the cycle number
             self.current_cycle = next_cycle
-            self.state_config['state']['self_play_positions_current'] = 0
+            self.state_config['state']['data_generation_positions_current'] = 0
             self.state_config['state']['current_cycle'] = self.current_cycle
             self._save_state()
 

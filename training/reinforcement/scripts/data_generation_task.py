@@ -2,97 +2,204 @@ import os
 import time
 import logging
 import numpy as np
+import multiprocessing as mp
+import os
+import psutil
+import torch
 from datetime import datetime
 
-# Assuming these imports are in your project structure
-from self_play_agent import TalbotPlayer
-from self_play_game_worker import SelfPlayGameWorker
+from self_play_agent import SelfPlayAgent
+from data_generation_game_worker import DataGenerationGameWorker
+from inference_batcher import InferenceBatcher
+
 
 class DataGenerationTask:
+    """
+    Main class to orchestrate a multi-process AlphaZero-style data generation pipeline.
+    It manages the creation of inference and worker processes, and handles inter-process
+    communication via queues.
+    """
     def __init__(self, output_dir, model_config, data_generation_config, best_iter):
         self.output_dir = output_dir
         self.model_config = model_config
         self.data_generation_config = data_generation_config
         self.best_iter = best_iter
+        self.num_workers = data_generation_config['workers']
 
-        # Set up loggers
         self.log_dir = os.path.join(self.output_dir, "logs")
         os.makedirs(self.log_dir, exist_ok=True)
-
         timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        
         self.main_logger = self._setup_logger(
             "SelfPlayManager", 
             self.data_generation_config['main_logging_level'],
-            os.path.join(self.log_dir, f"data_generaration_{timestamp}.log")
+            os.path.join(self.log_dir, f"data_generation_manager_{timestamp}.log")
         )
+
+        # Multi-processing components
+        self.inference_queue = mp.Queue()
+        self.result_queues = [mp.Queue() for _ in range(self.num_workers)]
+        self.data_queue = mp.Queue()
         
-        self.worker_logger = self._setup_logger(
-            "SelfPlayWorker",
-            self.data_generation_config['worker_logging_level'],
-            os.path.join(self.log_dir, f"data_generaration_games_{timestamp}.log")
-        )
+        self.inference_process = None
+        self.worker_processes = []
+        self.game_number_counter = mp.Value('i', 0) 
 
-        # Instantiate core components
-        self.mcts_player = TalbotPlayer(
-           name=f'best_model_iter_{self.best_iter} (self-play)',
-            logger=self.worker_logger,
-            model_path=self.model_config['best_model_path'],
-            model_config=self.model_config,
-            self_play_config=self.data_generation_config
-        )
-        self.game_manager = SelfPlayGameWorker(
-            logger=self.worker_logger,
-            player_1=self.mcts_player,
-            player_2=self.mcts_player,
-            model_config=self.model_config,
-            self_play_config=self.data_generation_config
-        )
-
-        self.game_number = 1
-
-    def _setup_logger(self, name: str, level: str, log_file: str):
+    @staticmethod
+    def _setup_logger(name: str, level: str, log_file: str):
+        """Helper to set up a logger for a specific process."""
         logger = logging.getLogger(name)
         logger.setLevel(level)
         if logger.hasHandlers():
             logger.handlers.clear()
         
-        formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
+        formatter = logging.Formatter("[%(asctime)s][%(name)s] [%(levelname)s] %(message)s")
         file_handler = logging.FileHandler(log_file, mode='w')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-        
         return logger
 
+    @staticmethod
+    def _worker_main(worker_id, output_dir, inference_queue, result_queue, data_queue, data_generation_config, best_iter, game_number_counter):
+        """Target function for a single self-play worker process."""
 
-    def run_for_n_positions(self, n_positions: int):
-        """
-        Generates a specified number of positions and returns them as a list.
-        This is the method the RLOrchestrator will call repeatedly.
-        """
-        self.main_logger.info(f"Generating a chunk of up to {n_positions} self-play positions...")
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["MKL_NUM_THREADS"] = "1"
+        os.environ["OPENBLAS_NUM_THREADS"] = "1"
+        os.environ["NUMEXPR_NUM_THREADS"] = "1"
+        os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+        os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
+        os.environ["TF_NUM_INTEROP_THREADS"] = "1"
 
-        chunk_data = []
-        positions_in_chunk = 0
-        games_in_chunk = 0
+        torch.set_num_threads(1)
+        process = psutil.Process()
+        process.cpu_affinity([worker_id])
+        process.nice(psutil.HIGH_PRIORITY_CLASS)
+
+        # Create a new logger specific to this worker process
+        log_dir = os.path.join(output_dir, "logs")
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        worker_logger = DataGenerationTask._setup_logger(
+            f"SelfPlayWorker_{worker_id}", 
+            data_generation_config['worker_logging_level'],
+            os.path.join(log_dir, f"data_generation_worker_{worker_id}_{timestamp}.log")
+        )
+
+        # Instantiate the MCTS player, configured to use the queues
+        mcts_player = SelfPlayAgent(
+            name=f'best_model_iter_{best_iter} (self-play)',
+            logger=worker_logger,
+            self_play_config=data_generation_config,
+            worker_id=worker_id,
+            inference_queue=inference_queue,
+            result_queue=result_queue
+        )
         
-        while positions_in_chunk < n_positions:
-            start_time_game = time.time()
+        game_manager = DataGenerationGameWorker(
+            logger=worker_logger,
+            player_1=mcts_player,
+            player_2=mcts_player,
+            data_generation_config=data_generation_config
+        )
+        
+        game_number = 1
+        while True:  # Run games indefinitely until the main process terminates us
+            with game_number_counter.get_lock():
+                current_game_number = game_number_counter.value
+                game_number_counter.value += 1
             
-            # The play_one_game method returns the data for a single game
-            training_data = self.game_manager.run_training_loop(self.game_number)
-            
-            end_time_game = time.time()
-            
+            game_start = time.time()
+            # The run_training_loop method plays a full game and returns the data
+            training_data, simulation_count = game_manager.run_training_loop(current_game_number)
+            game_end = time.time()
+
+            game_time = game_end - game_start
             num_new_positions = len(training_data)
-            chunk_data.extend(training_data)
-            positions_in_chunk += num_new_positions
+
+            simulations_per_second = simulation_count / (game_end - game_start)
             
-            self.main_logger.info(
-                f"Game {self.game_number} completed in {end_time_game - start_time_game:.2f}s "
-                f"({num_new_positions} positions). Current chunk total: {positions_in_chunk}. "
+            worker_logger.critical(
+                f"Game {current_game_number} completed in {game_end - game_start:.2f}s  "
+                f"with {simulations_per_second:.2f} simulations per second "
+                f"({num_new_positions} positions). Sending data to main process."
             )
-            self.game_number += 1
-            games_in_chunk += 1
             
-        return chunk_data, games_in_chunk
+            data_queue.put((training_data, game_time))
+                
+
+    def run_for_n_positions(self, total_positions: int, chunk_size: int):
+        """
+        Starts the multi-process pipeline, yields data in chunks,
+        and then terminates the processes gracefully.
+        """
+        self.main_logger.info(f"Starting pipeline to generate a chunk of up to {total_positions} positions...")
+
+        # Create and start all the worker and inference processes
+        for i in range(self.num_workers):
+            p = mp.Process(
+                target=DataGenerationTask._worker_main,
+                args=(i, self.output_dir, self.inference_queue, self.result_queues[i], self.data_queue,
+                    self.data_generation_config, self.best_iter, self.game_number_counter),
+                daemon=True
+            )
+            self.worker_processes.append(p)
+            p.start()
+            self.main_logger.info(f"Worker process {i} started (PID: {p.pid}).")
+
+        batcher = InferenceBatcher('', self.model_config['best_model_path'], self.model_config, self.data_generation_config['batch_size_per_worker'] * self.data_generation_config['workers'],
+                                self.data_generation_config['batch_timeout'], self.log_dir, self.data_generation_config['inference_logging_level'])
+        self.inference_process = mp.Process(
+            target=batcher.run,
+            args=(self.inference_queue, self.result_queues, self.num_workers),
+            daemon=True
+        )
+        self.inference_process.start()
+        self.main_logger.info(f"Inference batcher process started (PID: {self.inference_process.pid}).")
+
+
+        positions_collected_total = 0
+        positions_in_current_chunk = 0
+        collected_data = []
+        games_in_chunk = 0
+
+        try:
+            while positions_collected_total < total_positions:
+                game_data, game_time = self.data_queue.get()                
+                games_in_chunk += 1
+                
+                collected_data.extend(game_data)
+                positions_in_current_chunk += len(game_data)
+                
+                self.main_logger.info(
+                    f"Collected a new game with {len(game_data)} positions in {game_time:.4f} seconds. "
+                    f"Positions in current chunk: {positions_in_current_chunk}/{chunk_size} positions. "
+                )
+
+                if positions_in_current_chunk >= chunk_size:
+
+                    self.main_logger.info(f"Yielding a chunk of {len(collected_data)} positions.")
+                    yield collected_data, games_in_chunk
+                    
+                    positions_collected_total += len(collected_data)
+                    positions_in_current_chunk = 0
+                    games_in_chunk = 0
+                    collected_data = []
+
+                    self.main_logger.info(f"Have processed {positions_collected_total} out of {total_positions} positions.")
+
+
+            if collected_data:
+                self.main_logger.info(f"Yielding final partial chunk of {len(collected_data)} positions.")
+                yield collected_data, games_in_chunk
+        
+            self.main_logger.info(f"Finished collecting {positions_collected_total} positions. Terminating processes...")
+
+        finally:
+            self.inference_process.terminate()
+            for p in self.worker_processes:
+                p.terminate()
+
+            self.inference_process.join()
+            for p in self.worker_processes:
+                p.join()
+                
+            self.main_logger.info("All processes terminated. Data generation task complete.")

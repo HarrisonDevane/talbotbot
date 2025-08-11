@@ -1,8 +1,8 @@
 state:
   best_model_cycle: 0
-  buffer_positions_current: 60113
-  current_cycle: 2
-  self_play_positions_current: 10020
-  total_games: 758
-  total_positions: 60113
+  buffer_positions_current: 0
+  current_cycle: 1
+  data_generation_positions_current: 0
+  total_games: 0
+  total_positions: 0
   training_steps: 0

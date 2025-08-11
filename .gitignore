@@ -77,6 +77,6 @@ inference/logs
 
 # Reinforcement logs + data
 training/reinforcement/rl_cycles/**/logs/
-training/reinforcement/rl_cycles/**/data/
+training/reinforcement/rl_cycles/**/
 training/reinforcement/rl_cycles/rl_logs/
 training/reinforcement/rl_cycles/circular_buffer.hdf5

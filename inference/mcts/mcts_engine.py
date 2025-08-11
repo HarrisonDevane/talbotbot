@@ -14,7 +14,7 @@ from collections import deque
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 sys.path.insert(0, parent_dir)
 
-import utils
+import src_shared.utils as utils
 
 class MCTSEngine:
     """
@@ -88,51 +88,61 @@ class MCTSEngine:
             node = self.root
             path = [node]
 
+            self.logger.debug(f"[Selection] Node selection/traversal starting.")
+
             # Selection: Traverse the tree to find a leaf or unvisited node
             while not node.is_leaf() and node.is_expanded and \
                     not node.is_queued_for_inference:
+                
+                iter_start = time.time()
 
                 best_child = None
                 best_uct_score = -float('inf')
                 best_prior_for_tie_break = -1.0
 
+                t0 = time.time()
                 legal_moves = cython_chess.generate_legal_moves(node.board, chess.BB_ALL, chess.BB_ALL)
+                t1 = time.time()
+                self.logger.debug(f"[Timing] Legal move gen: {(t1 - t0) * 1000:.3f} ms")
+
+                t2 = time.time()
                 eligible_children = []
                 for move in legal_moves:
                     if move in node.children and not node.children[move].is_queued_for_inference:
                         eligible_children.append((move, node.children[move]))
 
+                t3 = time.time()
+                self.logger.debug(f"[Timing] Eligible child build: {(t3 - t2) * 1000:.3f} ms")
+
                 sqrt_parent_visits_term = math.sqrt(node.visits) if node.visits > 0 else 0.0
 
                 parent_info = f"Move: {node.move.uci()}" if node.move else "Root"
-                self.logger.debug(f"     Selecting child from Node ({parent_info}), Parent Visits: {node.visits}, Sqrt Parent Visits Term: {sqrt_parent_visits_term:.4f}")
+                self.logger.debug(f"Selecting child from Node ({parent_info}), Parent Visits: {node.visits}, Sqrt Parent Visits Term: {sqrt_parent_visits_term:.4f}")
+
+                t4 = time.time()
 
                 for move, child in eligible_children:
                     prior_prob_for_child = child.prior_probability_from_parent
                     uct = child.uct_score(self.cpuct, prior_prob_for_child, sqrt_parent_visits_term)
 
-                    self.logger.debug(f'Current move: {move.uci()} with UCT: {uct:.4f}')
-
-                    if uct > best_uct_score:
+                    if uct > best_uct_score or (uct == best_uct_score and prior_prob_for_child > best_prior_for_tie_break):
                         best_uct_score = uct
                         best_prior_for_tie_break = prior_prob_for_child
                         best_child = child
-                    elif uct == best_uct_score:
-                        if prior_prob_for_child > best_prior_for_tie_break:
-                            best_uct_score = uct
-                            best_prior_for_tie_break = prior_prob_for_child
-                            best_child = child
-                    
-                self.logger.debug(f'Best move: {best_child.move.uci()} with UCT: {best_uct_score:.4f}')
 
                 if best_child is None:
-                    self.logger.debug("     No eligible child found for selection. Breaking from selection loop.")
+                    self.logger.debug("No eligible child found for selection. Breaking from selection loop.")
                     break
-
-                self.logger.debug(f"     Selected Node: Move: {best_child.move.uci()}, with UCT: {best_uct_score:.4f}, prior probability: {best_child.prior_probability_from_parent:.4f}")
 
                 node = best_child
                 path.append(node)
+
+                iter_end = time.time()
+                self.logger.debug(f"[Timing] Selection iteration total: {(iter_end - iter_start) * 1000:.3f} ms")
+            
+            self.logger.debug(f"[Selection] Node selection/traversal completed.")
+            self.logger.debug(f"Selected Node: Move: {best_child.move.uci()}, with UCT: {best_uct_score:.4f}, prior probability: {best_child.prior_probability_from_parent:.4f}")
+
 
             # Expansion/Simulation: Queue the selected leaf node for NN inference
             successfully_queued = self.simulate(node)

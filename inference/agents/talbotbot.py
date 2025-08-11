@@ -14,7 +14,7 @@ project_root = os.path.abspath(os.path.join(current_script_dir, "../.."))
 
 sys.path.insert(0, project_root)
 
-from model import ChessAIModel
+from src_shared.model import ChessAIModel
 from inference.mcts.mcts_engine import MCTSEngine
 
 class TalbotbotPlayer:
@@ -25,8 +25,7 @@ class TalbotbotPlayer:
 
         self.model = ChessAIModel(num_input_planes=num_input_planes, num_residual_blocks=num_residual_blocks, num_filters=num_filters)
 
-        checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=True))
         self.logger.debug(f"Model loaded successfully from {model_path}")
 
         self.model.to(self.device)

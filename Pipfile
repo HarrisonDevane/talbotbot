@@ -4,12 +4,11 @@ verify_ssl = true
 name = "pypi"
 
 [[source]]
-url = "https://download.pytorch.org/whl/cu121"
+name = "pytorch_cuda_129"
+url = "https://download.pytorch.org/whl/cu129"
 verify_ssl = true
-name = "pytorch_cuda_121"
 
 [packages]
-torch = {version = "*", index = "pytorch_cuda_121"}
 chess = "*"
 pillow = "*"
 tqdm = "*"
@@ -18,7 +17,9 @@ pyyaml = "*"
 python-lichess = "*"
 bs4 = "*"
 matplotlib = "*"
-atomic = "*"
+torch = "==2.8.0"
+psutil = "*"
+py-spy = "*"
 
 [dev-packages]
 
