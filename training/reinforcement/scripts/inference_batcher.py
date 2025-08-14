@@ -43,13 +43,13 @@ class InferenceBatcher:
     def _setup_logger(self):
         """Sets up the logger for this specific process."""
         timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        log_file = os.path.join(self.log_dir, f"inference_batcher_{self.name}_{timestamp}.log")
+        log_file = os.path.join(self.log_dir, f"inference_batcher_{self.name}.log")
 
         logger = logging.getLogger("InferenceBatcher")
         logger.setLevel(self.logging_level)
         if not logger.handlers:
             formatter = logging.Formatter("[%(asctime)s][%(name)s] [%(levelname)s] %(message)s")
-            file_handler = logging.FileHandler(log_file, mode='w')
+            file_handler = logging.FileHandler(log_file, mode='a')
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
         self.logger = logger

@@ -1,4 +1,5 @@
 import chess
+import math
 
 class MCTSNode:
     """
@@ -16,6 +17,11 @@ class MCTSNode:
         self.is_expanded = False
         self.is_queued_for_inference = False
 
+        # Random action value estimation (RAVE) params
+        self.rave_visits = 0
+        self.rave_value_sum = 0.0
+
+
     @property
     def board(self) -> chess.Board:
         # Lazily create board to save memory
@@ -24,17 +30,36 @@ class MCTSNode:
             self._board.push(self.move)
         return self._board
 
+
     def is_leaf(self) -> bool:
         return not self.children and not self.is_expanded
+
 
     def is_root(self) -> bool:
         return self.parent is None
 
-    def uct_score(self, cpuct: float, prior_probability_for_this_move: float, sqrt_parent_visits_term: float) -> float:
+
+    def uct_score(self, cpuct: float, k_rave: float, prior_probability_for_this_move: float, sqrt_parent_visits_term: float) -> float:
+        """
+        Calculates the UCT score using the specified RAVE weighting formula.
+        
+        Args:
+            cpuct: A constant controlling the exploration vs exploitation trade-off.
+            prior_probability_for_this_move: The policy-based prior probability for this move.
+            sqrt_parent_visits_term: The square root of the parent's total visits.
+            k_rave: A constant 'k' used in the RAVE beta weighting formula.
+        """
+        # If the node has not been visited, it has the highest priority for exploration.
         if self.visits == 0:
             return float('inf')
 
         Q = -self.value_sum / self.visits
+
+        if self.rave_visits > 0:
+            Q_rave = -self.rave_value_sum / self.rave_visits
+            beta = math.sqrt(k_rave / (3 * self.visits + k_rave))
+            Q = Q_rave * beta + Q * (1 - beta)
+
         U = cpuct * prior_probability_for_this_move * sqrt_parent_visits_term / (1 + self.visits)
 
         return Q + U

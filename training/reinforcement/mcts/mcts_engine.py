@@ -25,12 +25,13 @@ class MCTSEngine:
     pipeline. It submits nodes for batched inference and waits
     for results.
     """
-    def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float = 1.0, virtual_loss: float = 3.0, dirichlet_alpha: float = 0.3, dirichlet_epsilon: float = 0.25):
+    def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, k_rave: float, virtual_loss: float, dirichlet_alpha: float, dirichlet_epsilon: float):
         self.logger = logger
         self.worker_batch_size = worker_batch_size
         self.inference_queue = inference_queue
         self.result_queue = result_queue
         self.worker_id = worker_id
+        self.k_rave = k_rave
         self.cpuct = cpuct
         self.virtual_loss = virtual_loss
         self.dirichlet_alpha = dirichlet_alpha
@@ -140,7 +141,8 @@ class MCTSEngine:
                         time_expansion += (time_expansion_end - time_expansion_start)
                     
                     time_backpropagation_start = time.perf_counter()
-                    self._backpropagate(node, value_output - self.virtual_loss, 0)
+                    self._virtual_loss(node, is_applying=False)
+                    self._backpropagate(node, value_output)
                     time_backpropagation_end = time.perf_counter()
                     time_backpropagation += (time_backpropagation_end - time_backpropagation_start)
 
@@ -201,7 +203,7 @@ class MCTSEngine:
 
                 for move, child in eligible_children:
                     prior_prob_for_child = child.prior_probability_from_parent
-                    uct = child.uct_score(self.cpuct, prior_prob_for_child, sqrt_parent_visits_term)
+                    uct = child.uct_score(self.cpuct, self.k_rave, prior_prob_for_child, sqrt_parent_visits_term)
 
                     if uct > best_uct_score or (uct == best_uct_score and prior_prob_for_child > best_prior_for_tie_break):
                         best_uct_score = uct
@@ -258,7 +260,7 @@ class MCTSEngine:
                 time_inference += (time_inference_end - time_inference_start)
                 
                 time_backpropagation_start = time.perf_counter()
-                self._apply_virtual_loss(node)
+                self._virtual_loss(node, is_applying=True)
                 time_backpropagation_end = time.perf_counter()
                 time_backpropagation += (time_backpropagation_end - time_backpropagation_start)
 
@@ -313,8 +315,8 @@ class MCTSEngine:
                 if not node.is_expanded:
                     self._expand(node, policy_probs)
                 
-                self._backpropagate(node, value_output - self.virtual_loss, 0)
-                
+                self._virtual_loss(node, is_applying=False)
+                self._backpropagate(node, value_output)                
                 self.logger.debug(f"[Backpropagation] Expanding and backpropagating on node during final wait.")
                         
             except queue.Empty:
@@ -483,44 +485,91 @@ class MCTSEngine:
         node.is_expanded = True
         node.is_queued_for_inference = False
         
+    def _get_moves_to_root(self, node: MCTSNode):
+        """
+        Helper function to get the moves from a node up to the root.
+        """
+        path = []
+        current = node
+        while current is not None and current.move is not None:
+            path.append(str(current.move))
+            current = current.parent
+        return path[::-1] # Reverse the list to show path from root
 
-    def _backpropagate(self, node: MCTSNode, value: float, visit_increment: int = 1):
+
+    def _backpropagate(self, node: MCTSNode, value: float):
         """
         Update visit counts and value sums along the path from the node up to the root.
         Value is from the perspective of the player whose turn it is at 'node.board'.
+        Incorporate Random Action Value Estimation (RAVE)
         """
+        path_moves = []
+        
         current = node
-        original_expanded_node_turn = node.board.turn
-
+        
+        # Get list of all moves from node -> root
         while current is not None:
-            current.is_queued_for_inference = False
-
-            current.visits += visit_increment
-            if current.board.turn == original_expanded_node_turn:
-                current.value_sum += value
-            else:
-                current.value_sum -= value
-
+            if current.move is not None:
+                path_moves.append(current.move)
             current = current.parent
+
+
+        current_node = node
+        value_for_backprop = value
+
+        while current_node is not None:
+            
+            # Normal backprop
+            current_node.is_queued_for_inference = False
+            current_node.visits += 1
+            current_node.value_sum += value_for_backprop
+
+            
+            # RAVE backprop
+            for rave_move in path_moves:
+                if rave_move in current_node.children:
+                    child_for_rave_update = current_node.children[rave_move]
+                    child_for_rave_update.rave_visits += 1
+                    child_for_rave_update.rave_value_sum -= value_for_backprop
+
+                    path_to_child = self._get_moves_to_root(child_for_rave_update)
+
+                    self.logger.debug(
+                    f"RAVE update on another branch. "
+                    f"Current node move: {current_node.move}. "
+                    f"Child node move: {child_for_rave_update.move}. "
+                    f"Full simulation path: {path_moves}. "
+                    f"Updating move: {rave_move} with value: {-value_for_backprop:.4f}. "
+                    f"Path to updated child: {' -> '.join(path_to_child)}"
+                )
+                
+
+
+            value_for_backprop = -value_for_backprop
+            current_node = current_node.parent
             
             
-    def _apply_virtual_loss(self, node: MCTSNode):
+    def _virtual_loss(self, node: MCTSNode, is_applying: bool):
         """
-        Applies a virtual loss to a node and its ancestors to discourage other workers
-        from exploring the same path while the node is queued for inference.
-        Note: Since we are in a single-threaded MCTS now, this primarily serves to
-        temporarily adjust the Q-value of the selected node and its parents,
-        which will be corrected upon backpropagation.
+        Applies or removes a virtual loss to a node and its ancestors.
         """
-        current = node
+        multiplier = 1 if is_applying else -1
+
+        action = "Applying" if is_applying else "Removing"
+        self.logger.debug(f"[{action}] virtual loss for move: {node.move}")
+
+        current_node = node
         original_turn = node.board.turn
-        while current is not None:
-            current.visits += 1
-            if current.board.turn == original_turn:
-                current.value_sum += self.virtual_loss
+        
+        while current_node is not None:
+            current_node.visits += 1 * multiplier
+            
+            if current_node.board.turn == original_turn:
+                current_node.value_sum += self.virtual_loss * multiplier
             else:
-                current.value_sum -= self.virtual_loss
-            current = current.parent
+                current_node.value_sum -= self.virtual_loss * multiplier
+            
+            current_node = current_node.parent
             
 
     def get_target_vectors(self):

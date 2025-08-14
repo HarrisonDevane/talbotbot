@@ -37,7 +37,7 @@ class EvaluationTask:
         self.main_logger = self._setup_logger(
             "EvaluationManager", 
             self.evaluation_config['main_logging_level'],
-            os.path.join(self.log_dir, f"evaluation_manager_{timestamp}.log")
+            os.path.join(self.log_dir, f"evaluation_manager.log")
         )
         
         # Multiprocessing components for two models (test and best)
@@ -72,7 +72,7 @@ class EvaluationTask:
             logger.handlers.clear()
         
         formatter = logging.Formatter("[%(asctime)s][%(name)s] [%(levelname)s] %(message)s")
-        file_handler = logging.FileHandler(log_file, mode='w')
+        file_handler = logging.FileHandler(log_file, mode='a')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
         
@@ -111,7 +111,7 @@ class EvaluationTask:
         worker_logger = EvaluationTask._setup_logger(
             f"EvalWorker_{worker_id}", 
             evaluation_config['worker_logging_level'],
-            os.path.join(log_dir, f"evaluation_worker_{worker_id}_{timestamp}.log")
+            os.path.join(log_dir, f"evaluation_worker_{worker_id}.log")
         )
 
         # Instantiate players configured to use the inference queues

@@ -5,13 +5,11 @@ import logging
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.amp import autocast, GradScaler
 import os
 import sys
 from datetime import datetime
-import time 
-
-# New import to ensure tqdm is not used
-from tqdm import tqdm as _tqdm_mock
+import time
 
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_script_dir, "../../.."))
@@ -44,19 +42,13 @@ class TrainTask:
         if logger.hasHandlers():
             logger.handlers.clear()
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file_path = os.path.join(self.log_dir, f"training_run_{timestamp}.log")
+        log_file_path = os.path.join(self.log_dir, f"training_run.log")
 
         formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
-        file_handler = logging.FileHandler(log_file_path)
+        file_handler = logging.FileHandler(log_file_path, mode = 'a')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-        
-        # Remove the StreamHandler for console output
-        # stream_handler = logging.StreamHandler()
-        # stream_handler.setFormatter(formatter)
-        # stream_handler.setLevel(logging.INFO)
-        # logger.addHandler(stream_handler)
+
         
         return logger
 
@@ -123,6 +115,8 @@ class TrainTask:
         total_training_steps = self.training_config['epochs'] * len(train_loader)
         scheduler = CosineAnnealingLR(optimizer, T_max=total_training_steps, 
                                      eta_min=float(self.training_config['cosine_eta_min']))
+        
+        scaler = GradScaler('cuda')
 
         best_val_loss = float('inf')
         best_model_state_dict = None
@@ -133,8 +127,6 @@ class TrainTask:
             model.train()
             running_total_loss = 0.0
             
-            # Using a mock tqdm to keep the loop structure but remove the progress bar
-            # Replace tqdm(train_loader, ...) with train_loader
             for batch_idx, (board_tensors, policy_target, value_targets) in enumerate(train_loader):
                 batch_start_time = time.perf_counter()
                 
@@ -142,33 +134,34 @@ class TrainTask:
                 board_tensors = board_tensors.to(self.device, non_blocking=True)
                 policy_target = policy_target.to(self.device, non_blocking=True)
                 value_targets = value_targets.to(self.device, non_blocking=True)
-                if self.device.type == 'cuda':
-                    torch.cuda.synchronize()
+                torch.cuda.synchronize()
                 transfer_to_gpu_end = time.perf_counter()
                 
                 optimizer.zero_grad()
                 
                 forward_pass_start = time.perf_counter()
-                policy_logits, value_outputs = model(board_tensors)
-                policy_log_softmax = F.log_softmax(policy_logits, dim=1)
-                value_outputs = value_outputs.squeeze(1)
-                if self.device.type == 'cuda':
-                    torch.cuda.synchronize()
-                forward_pass_end = time.perf_counter()
 
-                policy_loss = policy_criterion(policy_log_softmax, policy_target)
-                value_loss = value_criterion(value_outputs, value_targets)
-                
-                total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
-                             (value_loss * self.training_config['value_loss_weight'])
+                with autocast('cuda'):
+                    policy_logits, value_outputs = model(board_tensors)
+                    policy_log_softmax = F.log_softmax(policy_logits, dim=1)
+                    value_outputs = value_outputs.squeeze(1)
+                    torch.cuda.synchronize()
+                    forward_pass_end = time.perf_counter()
+
+                    policy_loss = policy_criterion(policy_log_softmax, policy_target)
+                    value_loss = value_criterion(value_outputs, value_targets)
+                    
+                    total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
+                                (value_loss * self.training_config['value_loss_weight'])
 
                 backward_pass_start = time.perf_counter()
-                total_loss.backward()
+                scaler.scale(total_loss).backward()
                 if self.device.type == 'cuda':
                     torch.cuda.synchronize()
                 backward_pass_end = time.perf_counter()
 
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 scheduler.step()
                 
                 running_total_loss += total_loss.item()
@@ -202,16 +195,17 @@ class TrainTask:
                     policy_target = policy_target.to(self.device, non_blocking=True)
                     value_targets = value_targets.to(self.device, non_blocking=True)
 
-                    policy_logits, value_outputs = model(board_tensors)
-                    value_outputs = value_outputs.squeeze(1)
-                    
-                    policy_log_softmax = F.log_softmax(policy_logits, dim=1)
-                    policy_loss = policy_criterion(policy_log_softmax, policy_target)
-                    value_loss = value_criterion(value_outputs, value_targets)
-                    
-                    total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
-                                 (value_loss * self.training_config['value_loss_weight'])
-                    
+                    with autocast('cuda'):
+                        policy_logits, value_outputs = model(board_tensors)
+                        value_outputs = value_outputs.squeeze(1)
+                        
+                        policy_log_softmax = F.log_softmax(policy_logits, dim=1)
+                        policy_loss = policy_criterion(policy_log_softmax, policy_target)
+                        value_loss = value_criterion(value_outputs, value_targets)
+                        
+                        total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
+                                    (value_loss * self.training_config['value_loss_weight'])
+                        
                     running_total_loss_val += total_loss.item()
                     
                     # Log detailed info to file at intervals

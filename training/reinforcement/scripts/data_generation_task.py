@@ -28,11 +28,10 @@ class DataGenerationTask:
 
         self.log_dir = os.path.join(self.output_dir, "logs")
         os.makedirs(self.log_dir, exist_ok=True)
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         self.main_logger = self._setup_logger(
             "SelfPlayManager", 
             self.data_generation_config['main_logging_level'],
-            os.path.join(self.log_dir, f"data_generation_manager_{timestamp}.log")
+            os.path.join(self.log_dir, f"data_generation_manager.log")
         )
 
         # Multi-processing components
@@ -53,7 +52,7 @@ class DataGenerationTask:
             logger.handlers.clear()
         
         formatter = logging.Formatter("[%(asctime)s][%(name)s] [%(levelname)s] %(message)s")
-        file_handler = logging.FileHandler(log_file, mode='w')
+        file_handler = logging.FileHandler(log_file, mode='a')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
         return logger
@@ -77,11 +76,10 @@ class DataGenerationTask:
 
         # Create a new logger specific to this worker process
         log_dir = os.path.join(output_dir, "logs")
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         worker_logger = DataGenerationTask._setup_logger(
             f"SelfPlayWorker_{worker_id}", 
             data_generation_config['worker_logging_level'],
-            os.path.join(log_dir, f"data_generation_worker_{worker_id}_{timestamp}.log")
+            os.path.join(log_dir, f"data_generation_worker_{worker_id}.log")
         )
 
         # Instantiate the MCTS player, configured to use the queues
@@ -101,7 +99,6 @@ class DataGenerationTask:
             data_generation_config=data_generation_config
         )
         
-        game_number = 1
         while True:  # Run games indefinitely until the main process terminates us
             with game_number_counter.get_lock():
                 current_game_number = game_number_counter.value
@@ -114,6 +111,9 @@ class DataGenerationTask:
 
             game_time = game_end - game_start
             num_new_positions = len(training_data)
+
+            if game_time is None:
+                continue
 
             simulations_per_second = simulation_count / (game_end - game_start)
             
@@ -145,7 +145,7 @@ class DataGenerationTask:
             p.start()
             self.main_logger.info(f"Worker process {i} started (PID: {p.pid}).")
 
-        batcher = InferenceBatcher('', self.model_config['best_model_path'], self.model_config, self.data_generation_config['batch_size_per_worker'] * self.data_generation_config['workers'],
+        batcher = InferenceBatcher('data_generation', self.model_config['best_model_path'], self.model_config, self.data_generation_config['batch_size_per_worker'] * self.data_generation_config['workers'],
                                 self.data_generation_config['batch_timeout'], self.log_dir, self.data_generation_config['inference_logging_level'])
         self.inference_process = mp.Process(
             target=batcher.run,

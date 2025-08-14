@@ -2,11 +2,11 @@ global:
   total_cycles: 10
   best_model_save_interval: 5
   buffer_file_path: /Users/User/Projects/talbot/training/reinforcement/rl_cycles/circular_buffer.hdf5
-  buffer_positions_total: 500000
-  data_generation_positions_per_cycle: 50000
-  data_generation_save_interval: 10000
+  buffer_positions_total: 200000
+  data_generation_positions_per_cycle: 100000
+  data_generation_save_interval: 1000
   eval_games: 100
-  eval_cutoff: 0.55
+  eval_cutoff: 0.52
 
 model:
   best_model_path: "/Users/User/Projects/talbot/training/reinforcement/best_models/best_model.pth"
@@ -15,13 +15,14 @@ model:
   resblocks: 20
 
 data_generation:
-  workers: 4
+  workers: 1
   batch_size_per_worker: 16
   batch_timeout: 0.001
   inference_queue_factor: 1
   results_queue_factor: 1
-  cpuct: 3.0
-  search_depth: [308, 800]
+  cpuct: 2.0
+  k_rave: 200
+  search_depth: [304, 608]
   search_depth_weights: [0.75, 0.25]
   virtual_loss: 0.1
   value_transition_factor: 0.5
@@ -30,7 +31,7 @@ data_generation:
   opening_book_path: "/Users/User/Projects/talbot/data/opening_books/Titans.bin"
   opening_min_moves: 0
   opening_max_moves: 0
-  temperature_threshold_move: 25
+  temperature_threshold_move: 20
   temperature_high: 1.0
   temperature_low: 0.1
   dirichlet_alpha: 0.25
@@ -38,7 +39,7 @@ data_generation:
   early_cutoff_simulations: 100
   early_cutoff_threshold: 0.7
   main_logging_level: 20
-  worker_logging_level: 50
+  worker_logging_level: 10
   inference_logging_level: 20
 
 training:
@@ -57,12 +58,13 @@ training:
   main_logging_level: 20
 
 evaluation:
-  workers: 4
+  workers: 6
   batch_size_per_worker: 16
   batch_timeout: 0.001
   inference_queue_factor: 1
   results_queue_factor: 1
-  cpuct: 3.0
+  cpuct: 2.0
+  k_rave: 200
   search_depth: [308]
   search_depth_weights: [1.0]
   virtual_loss: 0.1

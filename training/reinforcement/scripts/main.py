@@ -17,23 +17,18 @@ current_script_dir = os.path.dirname(os.path.abspath(__file__))
 rl_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 
 RL_CYCLES_DIR = os.path.abspath(os.path.join(rl_dir, "rl_cycles"))
-RL_ORCHESTRATOR_LOG_DIR = os.path.abspath(os.path.join(RL_CYCLES_DIR, "rl_logs"))
 CONFIG_RL_STATE_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_state.yaml"))
 CONFIG_RL_PARAMS_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_config.yaml"))
 
 
 class RLOrchestrator:
     def __init__(self):
-        self.logger = self._setup_global_logger()
-        self.logger.info(f"Orchestrator initialized. Reading state from: {CONFIG_RL_STATE_FILE}")
+        # Initialize logger as None. It will be set for the first time inside the run() method.
+        self.logger = None
 
         self.params_config, self.state_config = self._load_configs()
         self.current_cycle = self.state_config['state']['current_cycle']
         self.total_cycles = self.params_config['global']['total_cycles']
-
-        self.logger.info(f"Last completed cycle: {self.current_cycle}. Total cycles to run: {self.total_cycles - self.current_cycle}.")
-        self.logger.info(f"Last saved self-play positions: {self.state_config['state']['data_generation_positions_current']}")
-        self.logger.info(f"Current buffer size: {self.state_config['state']['buffer_positions_current']}")
 
         os.makedirs(RL_CYCLES_DIR, exist_ok=True)
 
@@ -41,18 +36,20 @@ class RLOrchestrator:
         buffer_file_name = self.params_config['global']['buffer_file_path']
         self.buffer_file_path = buffer_file_name
 
-    def _setup_global_logger(self):
-        os.makedirs(RL_ORCHESTRATOR_LOG_DIR, exist_ok=True)
+    def _setup_cycle_logger(self, cycle_dir):
+        # Create a 'logs' subdirectory within the cycle directory
+        log_dir = os.path.join(cycle_dir, 'logs')
+        os.makedirs(log_dir, exist_ok=True)
         
-        logger = logging.getLogger("RLOrchestrator")
+        logger = logging.getLogger(f"RLOrchestrator_Cycle_{self.current_cycle}")
         logger.setLevel(logging.INFO)
         
         if logger.hasHandlers():
             logger.handlers.clear()
-        
+            
         formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
-        log_filename = f"orchestrator_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
-        file_handler = logging.FileHandler(os.path.join(RL_ORCHESTRATOR_LOG_DIR, log_filename))
+        log_filename = "orchestrator.log"
+        file_handler = logging.FileHandler(os.path.join(log_dir, log_filename), mode='a')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
         
@@ -139,9 +136,19 @@ class RLOrchestrator:
         while self.current_cycle < self.total_cycles:
             next_cycle = self.current_cycle + 1
 
-            # --- Setup cycle-specific directories ---
+            # --- Setup cycle-specific directories and logger ---
             cycle_dir = os.path.join(RL_CYCLES_DIR, f"iteration_{self.current_cycle}")
             os.makedirs(cycle_dir, exist_ok=True)
+            
+            # --- Create a NEW logger for this cycle ---
+            self.logger = self._setup_cycle_logger(cycle_dir)
+
+            # Initial messages are now logged here, inside the first cycle's log
+            if self.current_cycle == self.state_config['state']['current_cycle']:
+                self.logger.info(f"Orchestrator initialized. Reading state from: {CONFIG_RL_STATE_FILE}")
+                self.logger.info(f"Last completed cycle: {self.current_cycle}. Total cycles to run: {self.total_cycles - self.current_cycle}.")
+                self.logger.info(f"Last saved self-play positions: {self.state_config['state']['data_generation_positions_current']}")
+                self.logger.info(f"Current buffer size: {self.state_config['state']['buffer_positions_current']}")
             
             self.logger.info(f"\n--- Starting RL Cycle {self.current_cycle} (run {self.current_cycle} of {self.total_cycles}) ---")
             self.logger.info(f"Cycle-specific logs will be stored in: {cycle_dir}")
@@ -200,35 +207,43 @@ class RLOrchestrator:
 
             self.logger.info(f"2. Model has trained successfully for {steps} steps.")
 
-            # # Step 3. Evaluation
-            self.logger.info(f"3. Initiating evaluation by self play for {self.params_config['global']['eval_games']} games against current best model...")
-
-            evaluation_task = EvaluationTask(
-                output_dir=cycle_dir,
-                test_model=model_path,
-                model_config=self.params_config['model'],
-                evaluation_config=self.params_config['evaluation'],
-                current_iter = self.current_cycle,
-                best_iter = self.state_config['state']['best_model_cycle']
-            )
-            test_score, best_score = evaluation_task.run_for_n_games(self.params_config['global']['eval_games'])
-
-            self.logger.info(f"3. Evaluation finished with result: {test_score}-{best_score}")
-
-            # Step 4. Save best model
-            win_rate = test_score / self.params_config['global']['eval_games']
-            if win_rate > self.params_config['global']['eval_cutoff']:
-                self.logger.info(f"New model has a win rate of {win_rate:.2f} (> {self.params_config['global']['eval_cutoff']}), accepting it as the new best model.")
-                           
-                
-                # Override the best model with the new, better model
-                self.logger.info(f"Saving new model from {model_path} to {best_model_path}...")
+            # Save first non-random model
+            if self.current_cycle == 1:
                 shutil.copy(model_path, best_model_path)
 
                 self.state_config['state']['training_steps'] = training_steps + steps
                 self.state_config['state']['best_model_cycle'] = self.current_cycle
-                
-            self.logger.info(f"Current best cycle: {self.state_config['state']['best_model_cycle']}...")
+            else: 
+
+                # # Step 3. Evaluation
+                self.logger.info(f"3. Initiating evaluation by self play for {self.params_config['global']['eval_games']} games against current best model...")
+
+                evaluation_task = EvaluationTask(
+                    output_dir=cycle_dir,
+                    test_model=model_path,
+                    model_config=self.params_config['model'],
+                    evaluation_config=self.params_config['evaluation'],
+                    current_iter = self.current_cycle,
+                    best_iter = self.state_config['state']['best_model_cycle']
+                )
+                test_score, best_score = evaluation_task.run_for_n_games(self.params_config['global']['eval_games'])
+
+                self.logger.info(f"3. Evaluation finished with result: {test_score}-{best_score}")
+
+                # Step 4. Save best model
+                win_rate = test_score / self.params_config['global']['eval_games']
+                if win_rate > self.params_config['global']['eval_cutoff']:
+                    self.logger.info(f"New model has a win rate of {win_rate:.2f} (> {self.params_config['global']['eval_cutoff']}), accepting it as the new best model.")
+                                    
+                    
+                    # Override the best model with the new, better model
+                    self.logger.info(f"Saving new model from {model_path} to {best_model_path}...")
+                    shutil.copy(model_path, best_model_path)
+
+                    self.state_config['state']['training_steps'] = training_steps + steps
+                    self.state_config['state']['best_model_cycle'] = self.current_cycle
+                    
+                self.logger.info(f"Current best cycle: {self.state_config['state']['best_model_cycle']}...")
 
             # Save copy of best model every save interval
             if self.current_cycle > 0 and self.current_cycle % self.params_config['global']['best_model_save_interval'] == 0:
@@ -238,12 +253,13 @@ class RLOrchestrator:
                 shutil.copy(best_model_path, current_best_model)
 
 
-            # After the loop is complete, reset the self-play counter and update the cycle number
+            # After the loop is complete, update the state for the next cycle
             self.current_cycle = next_cycle
             self.state_config['state']['data_generation_positions_current'] = 0
             self.state_config['state']['current_cycle'] = self.current_cycle
+            
+            self.logger.info("Saving state for the next cycle...")
             self._save_state()
-
 
             # Increment loop
             if self.current_cycle < self.total_cycles:

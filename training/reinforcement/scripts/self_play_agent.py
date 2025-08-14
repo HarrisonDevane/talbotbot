@@ -58,6 +58,7 @@ class SelfPlayAgent:
                 inference_queue=self.inference_queue,
                 result_queue=self.result_queue,
                 cpuct=self.self_play_config['cpuct'], 
+                k_rave=self.self_play_config['k_rave'],
                 virtual_loss=self.self_play_config['virtual_loss'],
                 dirichlet_alpha=self.self_play_config['dirichlet_alpha'],
                 dirichlet_epsilon=self.self_play_config['dirichlet_epsilon'],
@@ -94,7 +95,7 @@ class SelfPlayAgent:
 
         move_end_time = time.time()
         total_move_time = move_end_time - move_start_time
-        simulation_speed = simulation_count / total_move_time
+        simulation_speed = (simulation_count / total_move_time) if total_move_time > 0 else 0
 
         self.logger.info(f"Total move time: {total_move_time:.4f}, with {simulation_speed:.4f} simulations per second")
 
@@ -112,7 +113,8 @@ class SelfPlayAgent:
             worker_batch_size=self.worker_batch_size,
             inference_queue=self.inference_queue,
             result_queue=self.result_queue,
-            cpuct=self.self_play_config['cpuct'], 
+            cpuct=self.self_play_config['cpuct'],
+            k_rave=self.self_play_config['k_rave'],
             virtual_loss=self.self_play_config['virtual_loss'],
             dirichlet_alpha=self.self_play_config['dirichlet_alpha'],
             dirichlet_epsilon=self.self_play_config['dirichlet_epsilon'],
