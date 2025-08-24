@@ -1,8 +1,10 @@
 state:
-  best_model_cycle: 3
-  buffer_positions_current: 200000
-  current_cycle: 4
-  data_generation_positions_current: 27896
-  total_games: 1425
-  total_positions: 229564
-  training_steps: 3969
+  best_model_cycle: 13
+  best_training_steps: 140693
+  buffer_positions_current: 1024000
+  buffer_write_head: 1017639
+  current_cycle: 14
+  data_generation_positions_current: 20809
+  total_games: 15685
+  total_positions: 2406500
+  total_training_steps: 149947

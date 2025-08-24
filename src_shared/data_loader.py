@@ -1,55 +1,43 @@
 import torch
 from torch.utils.data import Dataset
-import numpy as np
-import os
 import h5py
-import logging
-import time # Added for profiling
 
 class ChessDataset(Dataset):
-    def __init__(self, hdf5_path: str):
+    def __init__(self, hdf5_path: str, chunk_size: int = 512):
         self.hdf5_path = hdf5_path
+        self.chunk_size = chunk_size
         self.h5_file = None
-        
-        with h5py.File(self.hdf5_path, 'r') as h5_file:
-            self.boards = torch.from_numpy(h5_file['inputs'][...]).float()
-            self.policies = torch.from_numpy(h5_file['policies'][...]).float()
-            self.values = torch.from_numpy(h5_file['values'][...]).float()
+        self.boards_dset = None
+        self.policies_dset = None
+        self.values_dset = None
 
-        self.num_samples = len(self.boards)
+        with h5py.File(self.hdf5_path, 'r') as f:
+            self.total_samples = f['inputs'].shape[0]
+            self.num_chunks = (self.total_samples + chunk_size - 1) // chunk_size 
 
+    def __len__(self):
+        return self.num_chunks
 
-    def __len__(self) -> int:
-        return self.num_samples
+    def __getitem__(self, idx):
+        start = idx * self.chunk_size
+        end = min(start + self.chunk_size, self.total_samples)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # This is now a simple, lightning-fast in-memory lookup
-        return self.boards[idx], self.policies[idx], self.values[idx]
-    
+        boards = torch.from_numpy(self.boards_dset[start:end]).float()
+        policies = torch.from_numpy(self.policies_dset[start:end]).float()
+        values = torch.from_numpy(self.values_dset[start:end]).float()
+
+        return boards, policies, values
 
     def __del__(self):
-        if hasattr(self, 'h5_file') and self.h5_file is not None:
-            if self.h5_file.id.valid:
-                # Use logger to indicate file closure
-                self.logger.info(f"Closing HDF5 file: {self.h5_file.filename}")
-                self.h5_file.close()
+        if hasattr(self, 'h5_file') and self.h5_file is not None and self.h5_file.id.valid:
+            self.h5_file.close()
 
-# This function will be passed to DataLoader as worker_init_fn
+
 def _worker_init_fn(worker_id):
-    """
-    Initializes each DataLoader worker by opening its own HDF5 file handle.
-    This prevents h5py file objects from being pickled.
-    """
     worker_info = torch.utils.data.get_worker_info()
-    if worker_info is not None:
-        # Access the Subset object
-        subset_dataset = worker_info.dataset
-        # Access the original ChessDataset object via the .dataset attribute
-        original_dataset = subset_dataset.dataset
-        
-        # Now, use the original_dataset object to access the logger and file attributes
-        # No need for the file existence check here, as it's done in the main thread
-        original_dataset.h5_file = h5py.File(original_dataset.hdf5_path, 'r')
-        original_dataset.boards_dset = original_dataset.h5_file['inputs']
-        original_dataset.policies_dset = original_dataset.h5_file['policies']
-        original_dataset.values_dset = original_dataset.h5_file['values']
+    dataset_obj = getattr(worker_info.dataset, 'dataset', worker_info.dataset)
+
+    dataset_obj.h5_file = h5py.File(dataset_obj.hdf5_path, 'r')
+    dataset_obj.boards_dset = dataset_obj.h5_file['inputs']
+    dataset_obj.policies_dset = dataset_obj.h5_file['policies']
+    dataset_obj.values_dset = dataset_obj.h5_file['values']

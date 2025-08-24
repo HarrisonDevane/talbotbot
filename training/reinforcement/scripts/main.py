@@ -5,7 +5,6 @@ import logging
 import numpy as np
 import h5py
 import shutil
-from datetime import datetime
 
 # Assuming this import is in your project structure
 from data_generation_task import DataGenerationTask
@@ -69,7 +68,7 @@ class RLOrchestrator:
     def _save_state(self):
         with open(CONFIG_RL_STATE_FILE, 'w') as f:
             yaml.safe_dump(self.state_config, f)
-    
+
 
     def _update_circular_buffer(self, new_data):
         max_positions = self.params_config['global']['buffer_positions_total']
@@ -80,60 +79,143 @@ class RLOrchestrator:
 
         self.logger.info(f"Appending new data ({len(new_data)} positions) to the circular buffer: {self.buffer_file_path}")
         
+        # Check for file corruption *before* opening for modification
+        if os.path.exists(self.buffer_file_path):
+            try:
+                with h5py.File(self.buffer_file_path, 'r') as hf_check:
+                    if not all(dset in hf_check for dset in ['inputs', 'policies', 'values']):
+                        raise Exception(
+                            f"Buffer file is logically corrupted. Missing one or more datasets: {list(hf_check.keys())}."
+                        )
+            except Exception as e:
+                self.logger.critical(f"FATAL: Buffer file is corrupted and cannot be used: {e}")
+                raise Exception("Buffer file is corrupted. Cannot proceed.") from e
+
+        # Proceed with the original, efficient in-place modification
+        current_size = self.state_config['state']['buffer_positions_current']
+        current_write_head = self.state_config['state']['buffer_write_head']
+        
         with h5py.File(self.buffer_file_path, 'a') as hf:
             if 'inputs' in hf and 'policies' in hf and 'values' in hf:
+                self.logger.debug(f"Existing datasets (headers) are: {list(hf.keys())}.")
+
                 inputs_dset = hf['inputs']
                 policies_dset = hf['policies']
                 values_dset = hf['values']
 
-                current_size = inputs_dset.shape[0]
-                new_size = current_size + len(new_data)
-                
-                inputs_dset.resize(new_size, axis=0)
-                policies_dset.resize(new_size, axis=0)
-                values_dset.resize(new_size, axis=0)
-                
-                inputs_dset[current_size:] = boards
-                policies_dset[current_size:] = policies
-                values_dset[current_size:] = values
-                
-                self.state_config['state']['buffer_positions_current'] = new_size
+                boards_remaining = boards
+                policies_remaining = policies
+                values_remaining = values
 
-                if new_size > max_positions:
-                    trim_start = new_size - max_positions
-                    temp_inputs = inputs_dset[trim_start:]
-                    temp_policies = policies_dset[trim_start:]
-                    temp_values = values_dset[trim_start:]
+                ### STEP 1: APPEND to unfilled part of buffer ###
+                if current_size < max_positions:
+                    space_left = max_positions - current_size
+                    append_count = min(len(boards_remaining), space_left)
 
-                    del hf['inputs']
-                    del hf['policies']
-                    del hf['values']
-                    
-                    hf.create_dataset('inputs', data=temp_inputs, maxshape=(None, *temp_inputs.shape[1:]), dtype=np.float16, compression='gzip', chunks=True)
-                    hf.create_dataset('policies', data=temp_policies, maxshape=(None, *temp_policies.shape[1:]), dtype=np.float16, compression='gzip', chunks=True)
-                    hf.create_dataset('values', data=temp_values, maxshape=(None, *temp_values.shape[1:]), dtype=np.float16, compression='gzip', chunks=True)
-                    
-                    final_size = max_positions
-                    self.state_config['state']['buffer_positions_current'] = final_size
-                else:
-                    final_size = new_size
+                    boards_to_append = boards_remaining[:append_count]
+                    policies_to_append = policies_remaining[:append_count]
+                    values_to_append = values_remaining[:append_count]
+
+                    # Resize datasets to accommodate append
+                    new_size = current_size + append_count
+                    inputs_dset.resize(new_size, axis=0)
+                    policies_dset.resize(new_size, axis=0)
+                    values_dset.resize(new_size, axis=0)
+
+                    inputs_dset[current_size : current_size + append_count] = boards_to_append
+                    policies_dset[current_size : current_size + append_count] = policies_to_append
+                    values_dset[current_size : current_size + append_count] = values_to_append
+
+                    self.state_config['state']['buffer_positions_current'] = new_size
+
+                    # Remove appended data from the remaining pool
+                    boards_remaining = boards_remaining[append_count:]
+                    policies_remaining = policies_remaining[append_count:]
+                    values_remaining = values_remaining[append_count:]
+
+                    current_write_head = new_size % max_positions  # Important: update write head if it wrapped to max
+
+                ### STEP 2: CIRCULAR OVERWRITE for remaining data ###
+                num_remaining = len(boards_remaining)
+                if num_remaining > 0:
+                    if current_write_head + num_remaining <= max_positions:
+                        # fits in one go
+                        inputs_dset[current_write_head : current_write_head + num_remaining] = boards_remaining
+                        policies_dset[current_write_head : current_write_head + num_remaining] = policies_remaining
+                        values_dset[current_write_head : current_write_head + num_remaining] = values_remaining
+                    else:
+                        # wraparound
+                        first_part_len = max_positions - current_write_head
+                        second_part_len = num_remaining - first_part_len
+
+                        inputs_dset[current_write_head:] = boards_remaining[:first_part_len]
+                        policies_dset[current_write_head:] = policies_remaining[:first_part_len]
+                        values_dset[current_write_head:] = values_remaining[:first_part_len]
+
+                        inputs_dset[:second_part_len] = boards_remaining[first_part_len:]
+                        policies_dset[:second_part_len] = policies_remaining[first_part_len:]
+                        values_dset[:second_part_len] = values_remaining[first_part_len:]
+
+                    # Write head moves forward circularly
+                    new_write_head = (current_write_head + num_remaining) % max_positions
+                    self.state_config['state']['buffer_write_head'] = new_write_head
+
+                # final size is always clamped to max_positions
+                self.state_config['state']['buffer_positions_current'] = min(
+                    self.state_config['state']['buffer_positions_current'] + num_remaining, max_positions
+                )
+                final_size = self.state_config['state']['buffer_positions_current']
+
             else:
-                hf.create_dataset('inputs', data=boards, maxshape=(None, *boards.shape[1:]), dtype=np.float16, compression='gzip', chunks=True)
-                hf.create_dataset('policies', data=policies, maxshape=(None, *policies.shape[1:]), dtype=np.float16, compression='gzip', chunks=True)
-                hf.create_dataset('values', data=values, maxshape=(None, *values.shape[1:]), dtype=np.float16, compression='gzip', chunks=True)
+                # File is brand new or was just created
+                self.logger.info("Creating new HDF5 datasets for the buffer with explicit chunking.")
+                
+                # Get the batch size from your config
+                batch_size = self.params_config['train']['batch_size']
+                
+                # Use the shape of the first data chunk to define the rest of the dimensions
+                board_shape = boards.shape[1:]
+                policy_shape = policies.shape[1:]
+                
+                # Create datasets with an explicit chunk shape
+                hf.create_dataset('inputs', 
+                                data=boards, 
+                                maxshape=(None, *board_shape), 
+                                dtype=np.float16, 
+                                compression='gzip', 
+                                chunks=(batch_size, *board_shape))
+                
+                # Policies are a single dimension
+                hf.create_dataset('policies', 
+                                data=policies, 
+                                maxshape=(None, *policy_shape), 
+                                dtype=np.float16, 
+                                compression='gzip', 
+                                chunks=(batch_size, *policy_shape))
+                
+                # Values are a single dimension
+                hf.create_dataset('values', 
+                                data=values, 
+                                maxshape=(None,),
+                                dtype=np.float16, 
+                                compression='gzip', 
+                                chunks=(batch_size,))
+                
+                # Update the new state variables
+                self.state_config['state']['buffer_positions_current'] = len(new_data)
+                self.state_config['state']['buffer_write_head'] = len(new_data)
                 final_size = len(new_data)
-                self.state_config['state']['buffer_positions_current'] = final_size
 
-            self.logger.info(
-                f"Circular buffer updated. It now contains {final_size} of "
-                f"{max_positions} total positions.")
-    
+        self.logger.info(
+            f"Circular buffer updated. It now contains {final_size} of "
+            f"{max_positions} total positions.")
+
 
     def run(self):
         """
         The main orchestration loop.
         """
-        while self.current_cycle < self.total_cycles:
+        while self.current_cycle <= self.total_cycles:
             next_cycle = self.current_cycle + 1
 
             # --- Setup cycle-specific directories and logger ---
@@ -162,7 +244,6 @@ class RLOrchestrator:
             
             # Get the starting point from the state config
             positions_generated_this_cycle = self.state_config['state']['data_generation_positions_current']
-            training_steps = self.state_config['state']['training_steps']
             remaining_positions_this_cycle = total_positions_for_cycle - positions_generated_this_cycle
             
             # Instantiate the DataGenerationTask once for the cycle
@@ -192,6 +273,7 @@ class RLOrchestrator:
 
             self.logger.info(f"--- Cycle {self.current_cycle} self-play completed successfully! ---")
             self._save_state()
+            data_generation_task = None
             
             # Step 2. Training
             self.logger.info("2. Training a new model on the updated data buffer...")
@@ -205,13 +287,15 @@ class RLOrchestrator:
             )
             model_path, steps = train_task.run_training_loop()
 
+            train_task = None
             self.logger.info(f"2. Model has trained successfully for {steps} steps.")
 
-            # Save first non-random model
-            if self.current_cycle == 1:
+            # Save model as best if skipping eval
+            if self.params_config['global']['eval_skip']:
                 shutil.copy(model_path, best_model_path)
 
-                self.state_config['state']['training_steps'] = training_steps + steps
+                self.state_config['state']['total_training_steps'] += steps
+                self.state_config['state']['best_training_steps'] += steps
                 self.state_config['state']['best_model_cycle'] = self.current_cycle
             else: 
 
@@ -229,6 +313,7 @@ class RLOrchestrator:
                 test_score, best_score = evaluation_task.run_for_n_games(self.params_config['global']['eval_games'])
 
                 self.logger.info(f"3. Evaluation finished with result: {test_score}-{best_score}")
+                self.state_config['state']['total_training_steps'] += steps
 
                 # Step 4. Save best model
                 win_rate = test_score / self.params_config['global']['eval_games']
@@ -240,17 +325,24 @@ class RLOrchestrator:
                     self.logger.info(f"Saving new model from {model_path} to {best_model_path}...")
                     shutil.copy(model_path, best_model_path)
 
-                    self.state_config['state']['training_steps'] = training_steps + steps
+                    self.state_config['state']['best_training_steps'] += steps
                     self.state_config['state']['best_model_cycle'] = self.current_cycle
                     
                 self.logger.info(f"Current best cycle: {self.state_config['state']['best_model_cycle']}...")
 
-            # Save copy of best model every save interval
+            # Save copy of best model and replay buffer every save interval
             if self.current_cycle > 0 and self.current_cycle % self.params_config['global']['best_model_save_interval'] == 0:
-                current_best_model = os.path.join(rl_dir, f'best_models/best_model_iter_{self.current_cycle}.pth')
+                current_best_model = os.path.join(rl_dir, f'rl_cycles/best_models/best_model_iter_{self.current_cycle}.pth')
 
                 self.logger.info(f"Saving current best model to after {self.params_config['global']['best_model_save_interval']} to {current_best_model}")
                 shutil.copy(best_model_path, current_best_model)
+
+                self.logger.info(f"Saving current circular buffer as backup")
+                shutil.copy(self.buffer_file_path, os.path.join(rl_dir, f'rl_cycles/backup/circular_buffer_cycle_{self.current_cycle}.hdf5'))
+
+                self.logger.info(f"Saving current state as backup")
+                shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(rl_dir, f'rl_cycles/backup/state_cycle_{self.current_cycle}.yaml'))
+
 
 
             # After the loop is complete, update the state for the next cycle

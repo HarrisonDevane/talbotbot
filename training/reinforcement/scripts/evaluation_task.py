@@ -6,18 +6,22 @@ import multiprocessing as mp
 import psutil
 import torch
 import queue
+from collections import deque
 from datetime import datetime
 
 # Assuming these imports are in your project structure
 from self_play_agent import SelfPlayAgent
 from evaluation_game_worker import EvaluationGameWorker
-from inference_batcher import InferenceBatcher # New import for InferenceBatcher
+from inference_batcher import InferenceBatcher
+
+import chess
+import chess.polyglot
 
 
 class EvaluationTask:
     def __init__(self, output_dir, test_model, model_config, evaluation_config, current_iter, best_iter):
         self.output_dir = output_dir
-        self.test_model_path = test_model # Renamed for clarity, holds path to test model
+        self.test_model_path = test_model
         self.model_config = model_config
         self.evaluation_config = evaluation_config
         self.current_iter = current_iter
@@ -31,30 +35,23 @@ class EvaluationTask:
         # Set up loggers
         self.log_dir = os.path.join(self.output_dir, "logs")
         os.makedirs(self.log_dir, exist_ok=True)
-
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         
         self.main_logger = self._setup_logger(
             "EvaluationManager", 
             self.evaluation_config['main_logging_level'],
             os.path.join(self.log_dir, f"evaluation_manager.log")
         )
-        
+
         # Multiprocessing components for two models (test and best)
-        # Queues for test model inferences
         self.test_inference_queue = mp.Queue()
         self.test_result_queues = [mp.Queue() for _ in range(self.num_evaluation_workers)]
         
-        # Queues for best model inferences
         self.best_inference_queue = mp.Queue()
         self.best_result_queues = [mp.Queue() for _ in range(self.num_evaluation_workers)]
         
-        # Queue for sending game assignments to workers
         self.game_job_queue = mp.Queue() 
-        # Queue for receiving game results from workers
         self.game_result_queue = mp.Queue() 
         
-        # Shared counters for wins/draws (using multiprocessing.Value for atomic updates)
         self.test_model_wins = mp.Value('i', 0)
         self.best_model_wins = mp.Value('i', 0)
         self.draws = mp.Value('i', 0)
@@ -77,6 +74,101 @@ class EvaluationTask:
         logger.addHandler(file_handler)
         
         return logger
+    
+
+    @staticmethod
+    def _generate_openings(book_path, num_openings, max_depth, logger):
+        """
+        Generates a specified number of diverse opening lines by first performing a
+        breadth-first search to find unique starting positions, and then for each
+        of those positions, performs a depth-first search to find the most
+        popular continuation.
+        """
+
+        logger.info(f"Generating top {num_openings} diverse openings (max depth: {max_depth})...")
+
+        # --- Phase 1: Find unique starting positions using a BFS ---
+        # This phase stops once it has found num_openings unique positions.
+        
+        queue = deque()
+        # Queue stores tuples of (board, move_list)
+        queue.append((chess.Board(), [])) 
+
+        unique_start_lines = []
+        seen_positions = set()
+        
+        logger.info(f"Phase 1: Searching for {num_openings} unique starting positions...")
+
+        while queue and len(unique_start_lines) < num_openings:
+            board, move_list = queue.popleft()
+            
+            # Use FEN string as a hashable representation of the board state
+            fen = board.fen()
+            if fen in seen_positions:
+                continue
+            
+            seen_positions.add(fen)
+            unique_start_lines.append(move_list)
+            
+            # Don't explore past the max_depth in this phase
+            if len(move_list) >= max_depth:
+                continue
+                
+            with chess.polyglot.open_reader(book_path) as reader:
+                entries = list(reader.find_all(board))
+
+            
+            # Add all possible next moves to the queue for BFS exploration
+            for entry in entries:
+                new_board = board.copy()
+                new_board.push(entry.move)
+                new_move_list = move_list + [entry.move]
+                queue.append((new_board, new_move_list))
+
+        
+        logger.info(f"Phase 1 complete: Found {len(unique_start_lines)} unique starting positions.")
+
+        # --- Phase 2: Extend each unique start line to max_depth using a DFS-like approach ---
+        # This phase follows the single most popular move from the book at each step.
+
+        final_openings = []
+        for start_line in unique_start_lines:
+            board = chess.Board()
+            current_line = []
+            
+            # Recreate the starting position for this line
+            for move in start_line:
+                board.push(move)
+                current_line.append(move)
+
+            # Extend the line until max_depth is reached
+            while len(current_line) < max_depth:
+                try:
+                    with chess.polyglot.open_reader(book_path) as reader:
+                        entries = list(reader.find_all(board))
+                except Exception:
+                    # End of a book line, can't continue.
+                    break
+                
+                if not entries:
+                    # No more moves in the book from this position.
+                    break
+
+                # Find the single most popular move by weight
+                entries.sort(key=lambda x: -x.weight)
+                best_move = entries[0].move
+                
+                board.push(best_move)
+                current_line.append(best_move)
+            
+            final_openings.append(current_line)
+
+        # Sort final openings by length (optional, for readability)
+        final_openings.sort(key=len, reverse=True)
+
+        logger.info(f"Generated {len(final_openings)} full opening lines successfully.")
+        return final_openings
+
 
     @staticmethod
     def _eval_worker_main(
@@ -107,7 +199,6 @@ class EvaluationTask:
 
         # Create a new logger specific to this worker process
         log_dir = os.path.join(output_dir, "logs")
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         worker_logger = EvaluationTask._setup_logger(
             f"EvalWorker_{worker_id}", 
             evaluation_config['worker_logging_level'],
@@ -132,20 +223,17 @@ class EvaluationTask:
             inference_queue=test_inference_queue,
             result_queue=test_result_queue_for_this_worker
         )
-
         
         game_manager = EvaluationGameWorker(
             logger=worker_logger,
-            player_1=mcts_player_best,
-            player_2=mcts_player_test,
             evaluation_config=evaluation_config
         )
 
         # Main loop to receive game jobs and play them
         while True:
             try:
-                # Get a game job: (game_idx, test_is_white_flag)
-                game_idx, test_is_white = game_job_queue.get(timeout=1.0) 
+                # A job is: (game_idx, test_is_white_flag, opening_move_list)
+                game_idx, test_is_white, opening_move_list = game_job_queue.get(timeout=1.0) 
                 
                 # Signal to terminate workers
                 if game_idx is None:
@@ -154,16 +242,26 @@ class EvaluationTask:
 
                 # Determine which player is White/Black for this game
                 if test_is_white:
-                    game_manager.player_1 = mcts_player_test
-                    game_manager.player_2 = mcts_player_best
+                    game_manager.update_players(
+                        player_white=mcts_player_test,
+                        player_black=mcts_player_best
+                    ),
                     player_roles_msg = "Test (W) vs Best (B)"
                 else:
-                    game_manager.player_1 = mcts_player_best
-                    game_manager.player_2 = mcts_player_test
+                    game_manager.update_players(
+                        player_white=mcts_player_best,
+                        player_black=mcts_player_test
+                    ),
                     player_roles_msg = "Best (W) vs Test (B)"
 
                 start_time_game = time.time()
-                game_result, game_length = game_manager.run_eval_loop(game_idx)
+                worker_logger.info(
+                    f"Starting game with opening moves: {' '.join(m.uci() for m in opening_move_list)} "
+                    f"White: {game_manager.players[chess.WHITE].name}, "
+                    f"Black: {game_manager.players[chess.BLACK].name}, "          
+                )
+
+                game_result, game_length = game_manager.run_eval_loop(game_idx, opening_move_list)
                 end_time_game = time.time()
                 game_duration = end_time_game - start_time_game
                 
@@ -201,9 +299,26 @@ class EvaluationTask:
             except queue.Empty:
                 # No jobs for a while, continue waiting or break if explicit signal is added
                 continue
+
             except Exception as e:
-                worker_logger.error(f"Eval Worker {worker_id}: Error during game play: {e}", exc_info=True)
-                # Potentially put an error signal onto game_result_queue for main process to handle
+                worker_logger.critical(f"Eval Worker {worker_id}: Error during game {game_idx} play: {e}", exc_info=True)
+                
+                # Update shared counters (atomically) for a draw
+                with test_model_wins_shared.get_lock():
+                    with best_model_wins_shared.get_lock():
+                        with draws_shared.get_lock():
+                            draws_shared.value += 1
+                
+                # Put the draw result on the queue for the main process to handle.
+                game_result_queue.put({
+                    'game_idx': game_idx,
+                    'result': 'Draw (Error)',
+                    'length': 0,
+                    'duration': 0,
+                    'player_roles': 'N/A'
+                })
+                
+                # The worker can now continue to the next game in the queue.
                 pass
         
         worker_logger.info(f"Eval Worker {worker_id}: Exiting.")
@@ -214,21 +329,25 @@ class EvaluationTask:
         Evaluates the new model by playing a number of games against the best model
         using multiprocessing. The players are swapped for fairness across games.
         Inference is offloaded to dedicated batcher processes.
-        
-        Args:
-            n_games (int): The total number of games to play for evaluation.
-            
-        Returns:
-            tuple: A tuple containing the final game scores (test_score, best_score).
-                    Score is calculated as (wins * 1.0) + (draws * 0.5).
         """
+
         self.main_logger.info(f"Starting evaluation of new model over {n_games} games with {self.num_evaluation_workers} workers...")
         self.main_logger.info(f"Test Model: Iter {self.current_iter} (path: {self.test_model_path}) vs Best Model: Iter {self.best_iter} (path: {self.best_model_path})")
+
+
+        fixed_evaluation_openings = self._generate_openings(
+            self.evaluation_config['opening_book_path'],
+            num_openings=n_games//2,
+            max_depth=self.evaluation_config['opening_moves'],
+            logger=self.main_logger
+        )
+
+        self.main_logger.info(f"Using {len(fixed_evaluation_openings)} fixed openings for evaluation.")
 
         # --- Start Inference Batcher Processes ---
         # Test Model Inference Batcher
         test_batcher = InferenceBatcher(
-            name='test_model',
+            name='eval_test_model',
             model_path=self.test_model_path,
             model_config=self.model_config,
             batch_size=self.evaluation_config['batch_size_per_worker'] * self.num_evaluation_workers,
@@ -246,7 +365,7 @@ class EvaluationTask:
 
         # Best Model Inference Batcher
         best_batcher = InferenceBatcher(
-            name='best_model',
+            name='eval_best_model',
             model_path=self.best_model_path,
             model_config=self.model_config,
             batch_size=self.evaluation_config['batch_size_per_worker'] * self.num_evaluation_workers,
@@ -289,26 +408,26 @@ class EvaluationTask:
             p.start()
             self.main_logger.info(f"Evaluation worker process {i} started (PID: {p.pid}).")
         
-        # --- Distribute game jobs ---
+        # --- MODIFIED: Distribute game jobs with openings ---
         try:
-            half_games = n_games // 2
-            
-            # Phase 1: Best model plays white for the first half of games
-            self.main_logger.info(f"Distributing {half_games} games where Best Model plays White.")
-            for game_idx in range(1, half_games + 1):
-                self.game_job_queue.put((game_idx, False))
-            
-            # Phase 2: Test model plays white for the remaining games
-            remaining_games_start_idx = half_games + 1
-            self.main_logger.info(f"Distributing {n_games - half_games} games where Test Model plays White.")
-            for game_idx in range(remaining_games_start_idx, n_games + 1):
-                self.game_job_queue.put((game_idx, True))
+            game_idx_counter = 0
+            for opening_move_list in fixed_evaluation_openings:
+                # Game 1: Test Model plays White
+                game_idx_counter += 1
+                self.main_logger.debug(f"Putting game {game_idx_counter} with opening {' '.join(m.uci() for m in opening_move_list)} on queue (Test as White)")
+                self.game_job_queue.put((game_idx_counter, True, opening_move_list))
+                
+                # Game 2: Best Model plays White
+                game_idx_counter += 1
+                self.main_logger.debug(f"Putting game {game_idx_counter} with opening {' '.join(m.uci() for m in opening_move_list)} on queue (Best as White)")
+                self.game_job_queue.put((game_idx_counter, False, opening_move_list))
+
             # --- Collect results from workers ---
             games_processed = 0
             while games_processed < n_games:
                 try:
                     # Get results from any worker
-                    result_data = self.game_result_queue.get(timeout=5.0) # Add timeout for robustness
+                    result_data = self.game_result_queue.get(timeout=5.0)
                     games_processed += 1
 
                     self.main_logger.info(
@@ -323,7 +442,6 @@ class EvaluationTask:
         finally:
             self.main_logger.info(f"Finished evaluating {games_processed} games. Terminating evaluation processes...")
             
-            # Ensure inference batcher processes are terminated and joined
             if self.test_inference_process and self.test_inference_process.is_alive():
                 self.test_inference_process.terminate()
             if self.best_inference_process and self.best_inference_process.is_alive():
@@ -334,11 +452,10 @@ class EvaluationTask:
             if self.best_inference_process:
                 self.best_inference_process.join()
             
-            # Ensure all worker processes are terminated and joined
             for p in self.worker_processes:
                 if p.is_alive():
                     p.terminate()
-                p.join() # Wait for the process to clean up
+                p.join()
 
             self.main_logger.info("All evaluation processes terminated. Evaluation task complete.")
 

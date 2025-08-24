@@ -3,20 +3,31 @@ import torch.nn as nn
 import torch.optim as optim
 import logging
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.amp import autocast, GradScaler
 import os
 import sys
-from datetime import datetime
+import random
 import time
+import shutil
+import h5py
+import numpy as np
 
+# Ensure project root is in path for imports
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_script_dir, "../../.."))
 sys.path.insert(0, project_root)
 
 from src_shared.model import ChessAIModel
 from src_shared.data_loader import ChessDataset, _worker_init_fn
+
+def unwrap_single_batch(batch):
+    """
+    Custom collate function for DataLoader to unwrap batches
+    from a Dataset that returns a full batch per __getitem__.
+    """
+    return batch[0]
 
 
 class TrainTask:
@@ -26,6 +37,8 @@ class TrainTask:
         self.output_dir = output_dir
         self.hdf5_path = hdf5_path
         self.cycle_number = cycle_number
+        self.shuffled_hdf5_path = None
+        self.io_chunk_size = self.training_config['io_chunk_size']
 
         self.log_dir = os.path.join(self.output_dir, "logs")
 
@@ -45,192 +58,327 @@ class TrainTask:
         log_file_path = os.path.join(self.log_dir, f"training_run.log")
 
         formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
-        file_handler = logging.FileHandler(log_file_path, mode = 'a')
+        file_handler = logging.FileHandler(log_file_path, mode='a')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
-        
         return logger
 
+
+    def _duplicate_and_shuffle_hdf5(self):
+        """
+        Create a shuffled copy of the buffer by loading random batches (HDF5 chunks)
+        to form IO chunks, then shuffle within the IO chunk and write back.
+        This avoids loading the entire dataset in RAM and shuffles more globally.
+        """
+        self.logger.info("Starting HDF5 duplication and shuffle with batch-randomized IO chunks.")
+
+        base_name, ext = os.path.splitext(os.path.basename(self.hdf5_path))
+
+        temp_file_name = f"{base_name}_shuffled_temp_{os.getpid()}{ext}"
+        self.shuffled_hdf5_path = os.path.join(os.path.dirname(self.hdf5_path), temp_file_name)
+        temp_path_writing = f"{self.shuffled_hdf5_path}.tmp"
+
+        try:
+            with h5py.File(self.hdf5_path, 'r') as hf_source:
+                total_positions = hf_source['inputs'].shape[0]
+                batch_size = self.training_config['batch_size']
+                io_chunk_size = self.io_chunk_size
+                num_batches_total = total_positions // batch_size
+                batches_per_io_chunk = io_chunk_size // batch_size
+
+                self.logger.info(f"Total positions: {total_positions}, batch size: {batch_size}")
+                self.logger.info(f"Total batches: {num_batches_total}, IO chunk size (entries): {io_chunk_size}, batches per IO chunk: {batches_per_io_chunk}")
+
+                # Create destination HDF5 with same dataset structure
+                with h5py.File(temp_path_writing, 'w') as hf_dest:
+                    board_shape = hf_source['inputs'].shape[1:]
+                    policy_shape = hf_source['policies'].shape[1:]
+
+                    hf_dest.create_dataset('inputs', 
+                                        shape=(total_positions, *board_shape), 
+                                        dtype=np.float16, 
+                                        chunks=(batch_size, *board_shape),
+                                        compression='gzip')
+                    hf_dest.create_dataset('policies', 
+                                        shape=(total_positions, *policy_shape), 
+                                        dtype=np.float16, 
+                                        chunks=(batch_size, *policy_shape),
+                                        compression='gzip')
+                    hf_dest.create_dataset('values', 
+                                        shape=(total_positions,), 
+                                        dtype=np.float16, 
+                                        chunks=(batch_size,),
+                                        compression='gzip')
+
+                # Shuffle batches indices globally once
+                all_batch_indices = list(range(num_batches_total))
+                random.shuffle(all_batch_indices)
+
+                with h5py.File(temp_path_writing, 'r+') as hf_dest:
+
+                    # Process IO chunks by picking batches_per_io_chunk random batches each iteration
+                    for io_chunk_idx, start_batch_idx in enumerate(range(0, num_batches_total, batches_per_io_chunk)):
+                        end_batch_idx = min(start_batch_idx + batches_per_io_chunk, num_batches_total)
+                        current_batches = all_batch_indices[start_batch_idx:end_batch_idx]
+
+                        self.logger.info(f"Processing IO chunk {io_chunk_idx + 1}/{(num_batches_total + batches_per_io_chunk -1)//batches_per_io_chunk} with batches {start_batch_idx} to {end_batch_idx} (total batches in chunk: {len(current_batches)})")
+
+                        # Read these batches from source, concatenate in memory
+                        inputs_chunks = []
+                        policies_chunks = []
+                        values_chunks = []
+
+                        for batch_i in current_batches:
+                            batch_start = batch_i * batch_size
+                            batch_end = batch_start + batch_size
+
+                            inputs_chunks.append(hf_source['inputs'][batch_start:batch_end])
+                            policies_chunks.append(hf_source['policies'][batch_start:batch_end])
+                            values_chunks.append(hf_source['values'][batch_start:batch_end])
+
+                        # Concatenate to form one big IO chunk in RAM
+                        chunk_inputs = np.concatenate(inputs_chunks, axis=0)
+                        chunk_policies = np.concatenate(policies_chunks, axis=0)
+                        chunk_values = np.concatenate(values_chunks, axis=0)
+
+                        # Shuffle indices within this IO chunk
+                        chunk_size = chunk_inputs.shape[0]
+                        local_indices = np.arange(chunk_size)
+                        np.random.shuffle(local_indices)
+
+                        chunk_inputs = chunk_inputs[local_indices]
+                        chunk_policies = chunk_policies[local_indices]
+                        chunk_values = chunk_values[local_indices]
+
+                        # Calculate write indices in destination file
+                        write_start = start_batch_idx * batch_size
+                        write_end = write_start + chunk_size
+
+                        # Write shuffled IO chunk back to destination
+                        hf_dest['inputs'][write_start:write_end] = chunk_inputs
+                        hf_dest['policies'][write_start:write_end] = chunk_policies
+                        hf_dest['values'][write_start:write_end] = chunk_values
+
+                # Rename temp file to final shuffled path
+                os.rename(temp_path_writing, self.shuffled_hdf5_path)
+                self.logger.info(f"Successfully created shuffled HDF5 file at: {self.shuffled_hdf5_path}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to create shuffled HDF5 file: {e}")
+            if os.path.exists(temp_path_writing):
+                os.remove(temp_path_writing)
+            self.shuffled_hdf5_path = None
+            raise
+
+
+    def _clean_up_shuffled_file(self):
+        """Deletes the temporary shuffled HDF5 file."""
+        if self.shuffled_hdf5_path and os.path.exists(self.shuffled_hdf5_path):
+            self.logger.info(f"Deleting temporary shuffled HDF5 file: {self.shuffled_hdf5_path}")
+            os.remove(self.shuffled_hdf5_path)
+
+
     def _get_dataloaders(self):
-        self.logger.info(f"Loading data from HDF5 file: {self.hdf5_path}")
-        full_dataset = ChessDataset(hdf5_path=self.hdf5_path)
-
-        total_samples = len(full_dataset)
-        validation_split = self.training_config['validation_split']
-        val_samples = int(total_samples * validation_split)
-        train_samples = total_samples - val_samples
-
-        train_dataset, val_dataset = random_split(full_dataset, [train_samples, val_samples],
-                                                  generator=torch.Generator().manual_seed(42))
-
-        num_workers = os.cpu_count() // 2 if os.cpu_count() else 0
+        # We now load data from the temporary shuffled HDF5 file
+        self.logger.info(f"Loading data from shuffled HDF5 file: {self.shuffled_hdf5_path}")
         
+        chunk_size = self.training_config['batch_size']
+        # The ChessDataset class should now point to the shuffled file
+        full_dataset = ChessDataset(hdf5_path=self.shuffled_hdf5_path, chunk_size=chunk_size)
+
+        # Split by chunk index
+        total_chunks = len(full_dataset)
+        validation_split = self.training_config['validation_split']
+        val_chunks = int(total_chunks * validation_split)
+        train_chunks = total_chunks - val_chunks
+
+        # Here is the key change: We shuffle the chunk indices themselves
+        all_chunk_indices = list(range(total_chunks))
+        random.shuffle(all_chunk_indices)
+
+        # Now, we split the shuffled chunk indices into training and validation sets
+        train_indices_shuffled = all_chunk_indices[:train_chunks]
+        val_indices_shuffled = all_chunk_indices[train_chunks:]
+
+        train_dataset = Subset(full_dataset, train_indices_shuffled)
+        val_dataset = Subset(full_dataset, val_indices_shuffled)
+
+        num_workers = 4
+
         train_loader = DataLoader(
             train_dataset,
-            batch_size=self.training_config['batch_size'],
+            batch_size=1,
             shuffle=True,
             num_workers=num_workers,
             pin_memory=True,
             prefetch_factor=4 if num_workers > 0 else None,
-            worker_init_fn=_worker_init_fn if num_workers > 0 else None
+            worker_init_fn=_worker_init_fn if num_workers > 0 else None,
+            collate_fn=unwrap_single_batch
         )
+
         val_loader = DataLoader(
             val_dataset,
-            batch_size=self.training_config['batch_size'],
+            batch_size=1,
             shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
             prefetch_factor=4 if num_workers > 0 else None,
-            worker_init_fn=_worker_init_fn if num_workers > 0 else None
+            worker_init_fn=_worker_init_fn if num_workers > 0 else None,
+            collate_fn=unwrap_single_batch
         )
-        
-        self.logger.info(f"Total dataset size: {total_samples} samples")
-        self.logger.info(f"Training set size: {len(train_dataset)} samples ({len(train_loader)} batches)")
-        self.logger.info(f"Validation set size: {len(val_dataset)} samples ({len(val_loader)} batches)")
-        
+
+        self.logger.info(f"Total dataset size: {total_chunks} chunks")
+        self.logger.info(f"Training set size: {len(train_dataset)} chunks ({len(train_loader)} batches)")
+        self.logger.info(f"Validation set size: {len(val_dataset)} chunks ({len(val_loader)} batches)")
+
         return train_loader, val_loader
 
     def run_training_loop(self):
-        train_loader, val_loader = self._get_dataloaders()
+        best_model_path = None
+        training_steps = 0
         
-        model = ChessAIModel(
-            num_input_planes=self.model_config['input_planes'],
-            num_residual_blocks=self.model_config['resblocks'],
-            num_filters=self.model_config['filters'],
-            dropout_rate_conv=self.training_config['dropout_rate_conv'],
-            dropout_rate_fc=self.training_config['dropout_rate_fc'],
-            dropout_conv_start_block=self.training_config['dropout_conv_start_block']
-        ).to(self.device)
-
-        self.logger.info(f"Loading previous model from: {self.model_config['best_model_path']}")
-
-        model.load_state_dict(torch.load(self.model_config['best_model_path'], map_location=self.device, weights_only=True))        
-        self.logger.info("Model initialized.")
-
-        policy_criterion = nn.KLDivLoss(reduction='batchmean')
-        value_criterion = nn.MSELoss()
-        
-        optimizer = optim.AdamW(model.parameters(), lr=float(self.training_config['cosine_eta_max']), weight_decay=float(self.training_config['weight_decay']))
-        total_training_steps = self.training_config['epochs'] * len(train_loader)
-        scheduler = CosineAnnealingLR(optimizer, T_max=total_training_steps, 
-                                     eta_min=float(self.training_config['cosine_eta_min']))
-        
-        scaler = GradScaler('cuda')
-
-        best_val_loss = float('inf')
-        best_model_state_dict = None
-        best_epoch = -1
-
-        for epoch in range(self.training_config['epochs']):
-            # --- Training Phase ---
-            model.train()
-            running_total_loss = 0.0
+        try:
+            self._duplicate_and_shuffle_hdf5()
+            train_loader, val_loader = self._get_dataloaders()
             
-            for batch_idx, (board_tensors, policy_target, value_targets) in enumerate(train_loader):
-                batch_start_time = time.perf_counter()
-                
-                transfer_to_gpu_start = time.perf_counter()
-                board_tensors = board_tensors.to(self.device, non_blocking=True)
-                policy_target = policy_target.to(self.device, non_blocking=True)
-                value_targets = value_targets.to(self.device, non_blocking=True)
-                torch.cuda.synchronize()
-                transfer_to_gpu_end = time.perf_counter()
-                
-                optimizer.zero_grad()
-                
-                forward_pass_start = time.perf_counter()
+            model = ChessAIModel(
+                num_input_planes=self.model_config['input_planes'],
+                num_residual_blocks=self.model_config['resblocks'],
+                num_filters=self.model_config['filters'],
+                dropout_rate_conv=self.training_config['dropout_rate_conv'],
+                dropout_rate_fc=self.training_config['dropout_rate_fc'],
+                dropout_conv_start_block=self.training_config['dropout_conv_start_block']
+            ).to(self.device)
 
-                with autocast('cuda'):
-                    policy_logits, value_outputs = model(board_tensors)
-                    policy_log_softmax = F.log_softmax(policy_logits, dim=1)
-                    value_outputs = value_outputs.squeeze(1)
-                    torch.cuda.synchronize()
-                    forward_pass_end = time.perf_counter()
+            self.logger.info(f"Loading previous model from: {self.model_config['best_model_path']}")
+            model.load_state_dict(torch.load(self.model_config['best_model_path'], map_location=self.device, weights_only=True))       
+            self.logger.info("Model initialized.")
 
-                    policy_loss = policy_criterion(policy_log_softmax, policy_target)
-                    value_loss = value_criterion(value_outputs, value_targets)
+            policy_criterion = nn.KLDivLoss(reduction='batchmean')
+            value_criterion = nn.MSELoss()
+            
+            optimizer = optim.AdamW(model.parameters(), lr=float(self.training_config['cosine_eta_max']), weight_decay=float(self.training_config['weight_decay']))
+            total_training_steps = self.training_config['epochs'] * len(train_loader)
+            scheduler = CosineAnnealingLR(optimizer, T_max=total_training_steps, 
+                                          eta_min=float(self.training_config['cosine_eta_min']))
+            
+            scaler = GradScaler('cuda')
+
+            best_val_loss = float('inf')
+            best_model_state_dict = None
+            best_epoch = -1
+
+            for epoch in range(self.training_config['epochs']):
+                # --- Training Phase ---
+                model.train()
+                running_total_loss = 0.0
+                
+                for batch_idx, (board_tensors, policy_target, value_targets) in enumerate(train_loader):
+                    batch_start_time = time.perf_counter()
                     
-                    total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
-                                (value_loss * self.training_config['value_loss_weight'])
-
-                backward_pass_start = time.perf_counter()
-                scaler.scale(total_loss).backward()
-                if self.device.type == 'cuda':
-                    torch.cuda.synchronize()
-                backward_pass_end = time.perf_counter()
-
-                scaler.step(optimizer)
-                scaler.update()
-                scheduler.step()
-                
-                running_total_loss += total_loss.item()
-                
-                batch_end_time = time.perf_counter()
-                
-                # Log detailed info to file at intervals
-                if (batch_idx + 1) % self.training_config['log_interval'] == 0:
-                    self.logger.info(f"Training Epoch {epoch+1}, Batch {batch_idx+1}: "
-                                     f"P_Loss={policy_loss.item():.4f}, "
-                                     f"V_Loss={value_loss.item():.4f}, "
-                                     f"T_Loss={total_loss.item():.4f}, "
-                                     f"LR={optimizer.param_groups[0]['lr']:.6f}, "
-                                     f"GPU Xfer: {(transfer_to_gpu_end - transfer_to_gpu_start)*1000:.2f}ms, "
-                                     f"FW: {(forward_pass_end - forward_pass_start)*1000:.2f}ms, "
-                                     f"BW: {(backward_pass_end - backward_pass_start)*1000:.2f}ms, "
-                                     f"Batch Total: {(batch_end_time - batch_start_time)*1000:.2f}ms")
-
-            avg_total_loss_train = running_total_loss / len(train_loader)
-            self.logger.info(f"--- Epoch {epoch+1} Train Summary ---")
-            self.logger.info(f"Average Total Loss: {avg_total_loss_train:.4f}")
-            
-            # --- Validation Phase ---
-            model.eval()
-            running_total_loss_val = 0.0
-
-            # Replace tqdm(val_loader, ...) with val_loader
-            with torch.no_grad():
-                for batch_idx, (board_tensors, policy_target, value_targets) in enumerate(val_loader):
+                    transfer_to_gpu_start = time.perf_counter()
                     board_tensors = board_tensors.to(self.device, non_blocking=True)
                     policy_target = policy_target.to(self.device, non_blocking=True)
                     value_targets = value_targets.to(self.device, non_blocking=True)
-
+                    torch.cuda.synchronize()
+                    transfer_to_gpu_end = time.perf_counter()
+                    
+                    optimizer.zero_grad()
+                    
+                    forward_pass_start = time.perf_counter()
                     with autocast('cuda'):
                         policy_logits, value_outputs = model(board_tensors)
-                        value_outputs = value_outputs.squeeze(1)
-                        
                         policy_log_softmax = F.log_softmax(policy_logits, dim=1)
+                        value_outputs = value_outputs.squeeze(1)
+                        torch.cuda.synchronize()
+                        forward_pass_end = time.perf_counter()
+
                         policy_loss = policy_criterion(policy_log_softmax, policy_target)
                         value_loss = value_criterion(value_outputs, value_targets)
                         
                         total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
-                                    (value_loss * self.training_config['value_loss_weight'])
-                        
-                    running_total_loss_val += total_loss.item()
+                                     (value_loss * self.training_config['value_loss_weight'])
+
+                    backward_pass_start = time.perf_counter()
+                    scaler.scale(total_loss).backward()
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize()
+                    backward_pass_end = time.perf_counter()
+
+                    scaler.step(optimizer)
+                    scaler.update()
+                    scheduler.step()
+                    
+                    running_total_loss += total_loss.item()
+                    
+                    batch_end_time = time.perf_counter()
                     
                     # Log detailed info to file at intervals
                     if (batch_idx + 1) % self.training_config['log_interval'] == 0:
-                        self.logger.info(f"Validation Epoch {epoch+1}, Batch {batch_idx+1}: "
+                        self.logger.info(f"Training Epoch {epoch+1}, Batch {batch_idx+1}: "
                                          f"P_Loss={policy_loss.item():.4f}, "
                                          f"V_Loss={value_loss.item():.4f}, "
-                                         f"T_Loss={total_loss.item():.4f}")
+                                         f"T_Loss={total_loss.item():.4f}, "
+                                         f"LR={optimizer.param_groups[0]['lr']:.6f}, "
+                                         f"GPU Xfer: {(transfer_to_gpu_end - transfer_to_gpu_start)*1000:.2f}ms, "
+                                         f"FW: {(forward_pass_end - forward_pass_start)*1000:.2f}ms, "
+                                         f"BW: {(backward_pass_end - backward_pass_start)*1000:.2f}ms, "
+                                         f"Batch Total: {(batch_end_time - batch_start_time)*1000:.2f}ms")
 
-            avg_total_loss_val = running_total_loss_val / len(val_loader)
-            self.logger.info(f"--- Epoch {epoch+1} Validation Summary ---")
-            self.logger.info(f"Average Total Loss: {avg_total_loss_val:.4f}")
+                avg_total_loss_train = running_total_loss / len(train_loader)
+                self.logger.info(f"--- Epoch {epoch+1} Train Summary ---")
+                self.logger.info(f"Average Total Loss: {avg_total_loss_train:.4f}")
+                
+                # --- Validation Phase ---
+                model.eval()
+                running_total_loss_val = 0.0
+                
+                with torch.no_grad():
+                    for batch_idx, (board_tensors, policy_target, value_targets) in enumerate(val_loader):
+                        board_tensors = board_tensors.to(self.device, non_blocking=True)
+                        policy_target = policy_target.to(self.device, non_blocking=True)
+                        value_targets = value_targets.to(self.device, non_blocking=True)
 
-            if avg_total_loss_val < best_val_loss:
-                best_val_loss = avg_total_loss_val
-                best_model_state_dict = model.state_dict()
-                best_epoch = epoch
-                self.logger.info(f"New best validation loss: {best_val_loss:.4f} at epoch {best_epoch+1}. Will save at the end.")
+                        with autocast('cuda'):
+                            policy_logits, value_outputs = model(board_tensors)
+                            value_outputs = value_outputs.squeeze(1)
+                            
+                            policy_log_softmax = F.log_softmax(policy_logits, dim=1)
+                            policy_loss = policy_criterion(policy_log_softmax, policy_target)
+                            value_loss = value_criterion(value_outputs, value_targets)
+                            
+                            total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
+                                         (value_loss * self.training_config['value_loss_weight'])
+                            
+                        running_total_loss_val += total_loss.item()
+                        
+                        # Log detailed info to file at intervals
+                        if (batch_idx + 1) % self.training_config['log_interval'] == 0:
+                            self.logger.info(f"Validation Epoch {epoch+1}, Batch {batch_idx+1}: "
+                                             f"P_Loss={policy_loss.item():.4f}, "
+                                             f"V_Loss={value_loss.item():.4f}, "
+                                             f"T_Loss={total_loss.item():.4f}")
 
-        best_model_path = os.path.join(self.output_dir, f"model_iter_{self.cycle_number}.pth")
-        
-        torch.save(best_model_state_dict, best_model_path)
-        self.logger.info(f"Best model from epoch {best_epoch+1} saved to {best_model_path}")
+                avg_total_loss_val = running_total_loss_val / len(val_loader)
+                self.logger.info(f"--- Epoch {epoch+1} Validation Summary ---")
+                self.logger.info(f"Average Total Loss: {avg_total_loss_val:.4f}")
 
-        self.logger.info("Training complete for this task!")
-        training_steps = len(train_loader) * best_epoch
-        
-        return best_model_path, training_steps  
+                if avg_total_loss_val < best_val_loss:
+                    best_val_loss = avg_total_loss_val
+                    best_model_state_dict = model.state_dict()
+                    best_epoch = epoch
+                    self.logger.info(f"New best validation loss: {best_val_loss:.4f} at epoch {best_epoch+1}. Will save at the end.")
+
+            best_model_path = os.path.join(self.output_dir, f"model_iter_{self.cycle_number}.pth")
+            
+            torch.save(best_model_state_dict, best_model_path)
+            self.logger.info(f"Best model from epoch {best_epoch+1} saved to {best_model_path}")
+
+            self.logger.info("Training complete for this task!")
+            training_steps = len(train_loader) * best_epoch
+            
+        finally:
+            self._clean_up_shuffled_file()
+            
+        return best_model_path, training_steps

@@ -50,9 +50,6 @@ class DataGenerationGameWorker:
 
 
         move_count = 1
-        max_opening_moves = random.randint(self.data_generation_config['opening_min_moves'], self.data_generation_config['opening_max_moves'])
-        self.logger.info(f"Game {game_number} will use an opening book for the first {max_opening_moves} moves.")
-
         raw_training_data = []
         game_length = 0
         total_simulations = 0
@@ -62,32 +59,9 @@ class DataGenerationGameWorker:
 
         while not self.game_over:
             player = self.players[self.current_turn]
-            
-            move = None
-            policy_vector = None
-            root_value = None
-
             current_board = self.board.copy()
             
-            if move_count < max_opening_moves:
-                try:
-                    with chess.polyglot.open_reader(self.data_generation_config['opening_book_path']) as reader:
-                        book_move = reader.weighted_choice(current_board).move
-                        move = book_move
-                        
-                        policy_vector = np.zeros(utils.TOTAL_POLICY_MOVES, dtype=np.float32)
-                        row, col, channel = utils.move_to_policy_components(move, current_board)
-                        flat_index = utils.policy_components_to_flat_index(row, col, channel)
-                        policy_vector[flat_index] = 1.0
-                        root_value = 0.0
-                        simulation_count = 0
-
-                except (IndexError, AttributeError):
-                    move, policy_vector, root_value, simulation_count = player.get_move(current_board, move_count, search_depth, None)
-                    max_opening_moves = 0
-            else:
-                move, policy_vector, root_value, simulation_count = player.get_move(current_board, move_count, search_depth, None)
-            
+            move, policy_vector, root_value, simulation_count = player.get_move(current_board, move_count, search_depth, None)
             board_state_tensor = utils.board_to_tensor_68(current_board)                
 
             raw_training_data.append({
