@@ -31,15 +31,11 @@ class EvaluationTask:
         self.best_model_path = model_config['best_model_path']
 
         self.num_evaluation_workers = self.evaluation_config['workers']
-
-        # Set up loggers
-        self.log_dir = os.path.join(self.output_dir, "logs")
-        os.makedirs(self.log_dir, exist_ok=True)
         
         self.main_logger = self._setup_logger(
             "EvaluationManager", 
             self.evaluation_config['main_logging_level'],
-            os.path.join(self.log_dir, f"evaluation_manager.log")
+            os.path.join(self.output_dir, f"evaluation_manager.log")
         )
 
         # Multiprocessing components for two models (test and best)
@@ -172,7 +168,7 @@ class EvaluationTask:
 
     @staticmethod
     def _eval_worker_main(
-        worker_id, output_dir, evaluation_config,
+        worker_id, core_id, output_dir, evaluation_config,
         current_iter, best_iter,
         game_job_queue, game_result_queue,
         test_inference_queue, test_result_queue_for_this_worker,
@@ -192,17 +188,16 @@ class EvaluationTask:
         torch.set_num_threads(1)
         
         process = psutil.Process()
-        process.cpu_affinity([worker_id])
+        process.cpu_affinity([core_id])
 
         process.nice(psutil.HIGH_PRIORITY_CLASS)
 
 
         # Create a new logger specific to this worker process
-        log_dir = os.path.join(output_dir, "logs")
         worker_logger = EvaluationTask._setup_logger(
             f"EvalWorker_{worker_id}", 
             evaluation_config['worker_logging_level'],
-            os.path.join(log_dir, f"evaluation_worker_{worker_id}.log")
+            os.path.join(output_dir, f"evaluation_worker_{worker_id}.log")
         )
 
         # Instantiate players configured to use the inference queues
@@ -231,9 +226,11 @@ class EvaluationTask:
 
         # Main loop to receive game jobs and play them
         while True:
+            # Dynamic sleep based on worker ID to stop thundering herd issue
+            time.sleep(worker_id*0.4 + 1)
             try:
                 # A job is: (game_idx, test_is_white_flag, opening_move_list)
-                game_idx, test_is_white, opening_move_list = game_job_queue.get(timeout=1.0) 
+                game_idx, test_is_white, opening_move_list = game_job_queue.get_nowait()
                 
                 # Signal to terminate workers
                 if game_idx is None:
@@ -318,8 +315,8 @@ class EvaluationTask:
                     'player_roles': 'N/A'
                 })
                 
-                # The worker can now continue to the next game in the queue.
-                pass
+                # Shutdown the worker
+                break
         
         worker_logger.info(f"Eval Worker {worker_id}: Exiting.")
 
@@ -334,6 +331,8 @@ class EvaluationTask:
         self.main_logger.info(f"Starting evaluation of new model over {n_games} games with {self.num_evaluation_workers} workers...")
         self.main_logger.info(f"Test Model: Iter {self.current_iter} (path: {self.test_model_path}) vs Best Model: Iter {self.best_iter} (path: {self.best_model_path})")
 
+        inference_cores = {12, 13, 14, 15, 28, 29, 30, 31}
+        worker_cores = [i for i in range(32) if i not in inference_cores]
 
         fixed_evaluation_openings = self._generate_openings(
             self.evaluation_config['opening_book_path'],
@@ -344,7 +343,6 @@ class EvaluationTask:
 
         self.main_logger.info(f"Using {len(fixed_evaluation_openings)} fixed openings for evaluation.")
 
-        # --- Start Inference Batcher Processes ---
         # Test Model Inference Batcher
         test_batcher = InferenceBatcher(
             name='eval_test_model',
@@ -352,16 +350,17 @@ class EvaluationTask:
             model_config=self.model_config,
             batch_size=self.evaluation_config['batch_size_per_worker'] * self.num_evaluation_workers,
             batch_timeout=self.evaluation_config['batch_timeout'],
-            log_dir=self.log_dir,
+            log_dir=self.output_dir,
             logging_level=self.evaluation_config['inference_logging_level']
         )
         self.test_inference_process = mp.Process(
             target=test_batcher.run,
-            args=(self.test_inference_queue, self.test_result_queues, self.num_evaluation_workers),
+            args=(self.test_inference_queue, self.test_result_queues, set(sorted(inference_cores)[0*4:(0+1)*4])),
             daemon=True
         )
         self.test_inference_process.start()
         self.main_logger.info(f"Test Model Inference batcher process started (PID: {self.test_inference_process.pid}).")
+        time.sleep(2)
 
         # Best Model Inference Batcher
         best_batcher = InferenceBatcher(
@@ -370,16 +369,17 @@ class EvaluationTask:
             model_config=self.model_config,
             batch_size=self.evaluation_config['batch_size_per_worker'] * self.num_evaluation_workers,
             batch_timeout=self.evaluation_config['batch_timeout'],
-            log_dir=self.log_dir,
+            log_dir=self.output_dir,
             logging_level=self.evaluation_config['inference_logging_level']
         )
         self.best_inference_process = mp.Process(
             target=best_batcher.run,
-            args=(self.best_inference_queue, self.best_result_queues, self.num_evaluation_workers),
+            args=(self.best_inference_queue, self.best_result_queues, set(sorted(inference_cores)[1*4:(1+1)*4])),
             daemon=True
         )
         self.best_inference_process.start()
         self.main_logger.info(f"Best Model Inference batcher process started (PID: {self.best_inference_process.pid}).")
+        time.sleep(2)
 
 
         # --- Create and Start Worker Processes ---
@@ -388,6 +388,7 @@ class EvaluationTask:
                 target=EvaluationTask._eval_worker_main,
                 args=(
                     i, # worker_id
+                    worker_cores[i],
                     self.output_dir, # output_dir
                     self.evaluation_config, # evaluation_config
                     self.current_iter, # current_iter
@@ -407,6 +408,7 @@ class EvaluationTask:
             self.worker_processes.append(p)
             p.start()
             self.main_logger.info(f"Evaluation worker process {i} started (PID: {p.pid}).")
+            time.sleep(2)
         
         # --- MODIFIED: Distribute game jobs with openings ---
         try:
@@ -427,7 +429,7 @@ class EvaluationTask:
             while games_processed < n_games:
                 try:
                     # Get results from any worker
-                    result_data = self.game_result_queue.get(timeout=5.0)
+                    result_data = self.game_result_queue.get(timeout=1.0)
                     games_processed += 1
 
                     self.main_logger.info(

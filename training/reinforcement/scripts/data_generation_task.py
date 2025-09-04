@@ -24,24 +24,27 @@ class DataGenerationTask:
         self.model_config = model_config
         self.data_generation_config = data_generation_config
         self.best_iter = best_iter
-        self.num_workers = data_generation_config['workers']
+        self.num_workers = data_generation_config['game_workers']
+        # Number of inference batchers to create
+        self.num_inference_batchers = data_generation_config['inference_workers']
 
-        self.log_dir = os.path.join(self.output_dir, "logs")
-        os.makedirs(self.log_dir, exist_ok=True)
         self.main_logger = self._setup_logger(
             "SelfPlayManager", 
             self.data_generation_config['main_logging_level'],
-            os.path.join(self.log_dir, f"data_generation_manager.log")
+            os.path.join(self.output_dir, f"data_generation_manager.log")
         )
 
         # Multi-processing components
-        self.inference_queue = mp.Queue()
+        # A list of queues, one for each inference batcher
+        self.inference_queues = [mp.Queue() for _ in range(self.num_inference_batchers)]
+        # A single queue for each worker process
         self.result_queues = [mp.Queue() for _ in range(self.num_workers)]
         self.data_queue = mp.Queue()
         
-        self.inference_process = None
+        self.inference_processes = []
         self.worker_processes = []
         self.game_number_counter = mp.Value('i', 0) 
+
 
     @staticmethod
     def _setup_logger(name: str, level: str, log_file: str):
@@ -57,8 +60,9 @@ class DataGenerationTask:
         logger.addHandler(file_handler)
         return logger
 
+
     @staticmethod
-    def _worker_main(worker_id, output_dir, inference_queue, result_queue, data_queue, data_generation_config, best_iter, game_number_counter):
+    def _worker_main(worker_id, core_id, output_dir, inference_queues, result_queue, data_queue, data_generation_config, best_iter, game_number_counter):
         """Target function for a single self-play worker process."""
 
         os.environ["OMP_NUM_THREADS"] = "1"
@@ -71,24 +75,29 @@ class DataGenerationTask:
 
         torch.set_num_threads(1)
         process = psutil.Process()
-        process.cpu_affinity([worker_id])
+
+        process.cpu_affinity([core_id])
         process.nice(psutil.HIGH_PRIORITY_CLASS)
 
         # Create a new logger specific to this worker process
-        log_dir = os.path.join(output_dir, "logs")
         worker_logger = DataGenerationTask._setup_logger(
             f"SelfPlayWorker_{worker_id}", 
             data_generation_config['worker_logging_level'],
-            os.path.join(log_dir, f"data_generation_worker_{worker_id}.log")
+            os.path.join(output_dir, f"data_generation_worker_{worker_id}.log")
         )
 
+        worker_logger.info(f"Setting core to {core_id}")
+
+        # Distribute workers evenly among inference queues
+        inference_queue_for_worker = inference_queues[worker_id % len(inference_queues)]
+        
         # Instantiate the MCTS player, configured to use the queues
         mcts_player = SelfPlayAgent(
             name=f'best_model_iter_{best_iter} (self-play)',
             logger=worker_logger,
             self_play_config=data_generation_config,
             worker_id=worker_id,
-            inference_queue=inference_queue,
+            inference_queue=inference_queue_for_worker,
             result_queue=result_queue
         )
         
@@ -112,13 +121,13 @@ class DataGenerationTask:
             game_time = game_end - game_start
             num_new_positions = len(training_data)
 
-            if game_time is None:
+            if training_data is None or num_new_positions == 0:
                 continue
 
-            simulations_per_second = simulation_count / (game_end - game_start)
+            simulations_per_second = simulation_count / game_time
             
             worker_logger.critical(
-                f"Game {current_game_number} completed in {game_end - game_start:.2f}s  "
+                f"Game {current_game_number} completed in {game_time:.2f}s  "
                 f"with {simulations_per_second:.2f} simulations per second "
                 f"({num_new_positions} positions). Sending data to main process."
             )
@@ -131,29 +140,47 @@ class DataGenerationTask:
         Starts the multi-process pipeline, yields data in chunks,
         and then terminates the processes gracefully.
         """
+        inference_cores = {12, 13, 14, 15, 28, 29, 30, 31}
+        worker_cores = [i for i in range(32) if i not in inference_cores]
+
+
+        # Create and start all the inference batcher processes
+        for i in range(self.num_inference_batchers):
+            batcher = InferenceBatcher(
+                f'data_generation_{i}',
+                self.model_config['best_model_path'],
+                self.model_config,
+                self.data_generation_config['batch_size_per_worker'] * self.num_workers,
+                self.data_generation_config['batch_timeout'],
+                self.output_dir,
+                self.data_generation_config['inference_logging_level']
+            )
+            p = mp.Process(
+                target=batcher.run,
+                args=(self.inference_queues[i], self.result_queues, set(sorted(inference_cores)[i*4:(i+1)*4])),
+                daemon=True
+            )
+            self.inference_processes.append(p)
+            p.start()
+            self.main_logger.info(f"Inference batcher process {i} started (PID: {p.pid}).")
+            time.sleep(2)
+
         self.main_logger.info(f"Starting pipeline to generate a chunk of up to {total_positions} positions...")
 
-        # Create and start all the worker and inference processes
+
+
+        # Create and start all the worker processes
         for i in range(self.num_workers):
             p = mp.Process(
                 target=DataGenerationTask._worker_main,
-                args=(i, self.output_dir, self.inference_queue, self.result_queues[i], self.data_queue,
-                    self.data_generation_config, self.best_iter, self.game_number_counter),
+                args=(i, worker_cores[i], self.output_dir, self.inference_queues, self.result_queues[i], self.data_queue,
+                      self.data_generation_config, self.best_iter, self.game_number_counter),
                 daemon=True
             )
             self.worker_processes.append(p)
             p.start()
             self.main_logger.info(f"Worker process {i} started (PID: {p.pid}).")
-
-        batcher = InferenceBatcher('data_generation', self.model_config['best_model_path'], self.model_config, self.data_generation_config['batch_size_per_worker'] * self.data_generation_config['workers'],
-                                self.data_generation_config['batch_timeout'], self.log_dir, self.data_generation_config['inference_logging_level'])
-        self.inference_process = mp.Process(
-            target=batcher.run,
-            args=(self.inference_queue, self.result_queues, self.num_workers),
-            daemon=True
-        )
-        self.inference_process.start()
-        self.main_logger.info(f"Inference batcher process started (PID: {self.inference_process.pid}).")
+            time.sleep(2)
 
 
         positions_collected_total = 0
@@ -163,7 +190,7 @@ class DataGenerationTask:
 
         try:
             while positions_collected_total < total_positions:
-                game_data, game_time = self.data_queue.get()                
+                game_data, game_time = self.data_queue.get()              
                 games_in_chunk += 1
                 
                 collected_data.extend(game_data)
@@ -190,15 +217,17 @@ class DataGenerationTask:
             if collected_data:
                 self.main_logger.info(f"Yielding final partial chunk of {len(collected_data)} positions.")
                 yield collected_data, games_in_chunk
-        
+            
             self.main_logger.info(f"Finished collecting {positions_collected_total} positions. Terminating processes...")
 
         finally:
-            self.inference_process.terminate()
+            for p in self.inference_processes:
+                p.terminate()
             for p in self.worker_processes:
                 p.terminate()
 
-            self.inference_process.join()
+            for p in self.inference_processes:
+                p.join()
             for p in self.worker_processes:
                 p.join()
                 

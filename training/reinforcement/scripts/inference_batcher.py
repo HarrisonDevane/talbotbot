@@ -42,7 +42,6 @@ class InferenceBatcher:
 
     def _setup_logger(self):
         """Sets up the logger for this specific process."""
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         log_file = os.path.join(self.log_dir, f"inference_batcher_{self.name}.log")
 
         logger = logging.getLogger("InferenceBatcher")
@@ -95,7 +94,7 @@ class InferenceBatcher:
         torch.set_num_threads(1)
         
         # Pin to one CPU core
-        psutil.Process().cpu_affinity([core_id])
+        psutil.Process().cpu_affinity(core_id)
 
     def run(self, inference_queue, result_queues, core_id):
         """
@@ -108,7 +107,6 @@ class InferenceBatcher:
 
     def _run_loop(self, inference_queue, result_queues):
         """The main loop for the batcher process."""
-        from datetime import datetime # Import here for multiprocessing context
         self._setup_logger()
         self.load_model()
         
@@ -117,7 +115,6 @@ class InferenceBatcher:
             stream = torch.cuda.Stream()
         
         requests = []
-        batch_collection_start_time = time.monotonic() # Time when current batch collection started
         
         # Double-buffering for results.
         pending_results = []
@@ -129,9 +126,6 @@ class InferenceBatcher:
         interval_batches_processed = 0
         interval_total_processing_duration = 0.0 # Sum of batch processing loop times
         interval_total_inferences = 0
-        
-        # Time when the last batch actually finished processing. Used to calculate idle time before next collection begins.
-        last_batch_process_end_time = time.monotonic() 
         
         while True:
             # 1. Non-blocking sending of pending results from the previous batch.
@@ -148,28 +142,21 @@ class InferenceBatcher:
                     break
 
             # 2. Collect requests from the inference queue.
-            # Calculate idle time *before* attempting to get a new request for the batch
-            # This counts time from the last batch end until we try to get a new request.
-            time_before_get = time.monotonic()
             
-            try:
-                # We block for 'batch_timeout' if the queue is empty, to wait for requests
-                new_requests_batch = inference_queue.get(timeout=self.batch_timeout)
-                requests.extend(new_requests_batch)
-            except queue.Empty:
-                # If timeout is reached and no requests were available, proceed to check for processing
-                pass # 'requests' list remains as is
+            while len(requests) < self.batch_size:
+                try:
+                    new_requests_batch = inference_queue.get(timeout=self.batch_timeout)
+                    requests.extend(new_requests_batch)
+                except queue.Empty:
+                    break
 
             # 3. Process the batch if it's full OR if the timeout has elapsed AND there are requests
-            # The condition `len(requests) > 0` is crucial to avoid processing empty batches
-            if requests and (len(requests) >= self.batch_size or (time.monotonic() - batch_collection_start_time) >= self.batch_timeout):
+            if requests:
                 batch_process_start_time = time.monotonic()
                 self.logger.debug(f"Processing a batch of size {len(requests)}...")
 
                 # A. Data Preparation (CPU-bound)
                 start_data_prep = time.monotonic()
-                # Unpack and stack states. Tensors from workers are already .pin_memory() and .share_memory_()
-                # so stacking here should be efficient.
                 worker_ids = [req[0] for req in requests]
                 moves_list_for_results = [req[1] for req in requests] # Store original move lists
                 states_to_process = torch.stack([req[2] for req in requests])
@@ -177,53 +164,34 @@ class InferenceBatcher:
                 data_prep_duration = time.monotonic() - start_data_prep
                 self.logger.debug(f"Time for data preparation: {data_prep_duration:.4f} seconds.")
 
-                # B. Execute GPU operations asynchronously if a stream exists
-                policy_cpu = None
-                value_cpu = None
+                with torch.cuda.stream(stream):
+                    start_gpu_transfer = time.monotonic()
+                    # Convert input tensor to FP16 if enabled, otherwise keep as FP32
+                    states_gpu = states_to_process.to(self.device, non_blocking=True)
+                    if self.use_fp16 and states_gpu.dtype != torch.float16:
+                            states_gpu = states_gpu.half() # Ensure FP16 if flag is true and not already
+                    
+                    gpu_transfer_duration = time.monotonic() - start_gpu_transfer
+                    self.logger.debug(f"Time to initiate GPU transfer: {gpu_transfer_duration:.4f} seconds.")
 
-                if stream:
-                    with torch.cuda.stream(stream):
-                        start_gpu_transfer = time.monotonic()
-                        # Convert input tensor to FP16 if enabled, otherwise keep as FP32
-                        states_gpu = states_to_process.to(self.device, non_blocking=True)
-                        if self.use_fp16 and states_gpu.dtype != torch.float16:
-                             states_gpu = states_gpu.half() # Ensure FP16 if flag is true and not already
-                        
-                        gpu_transfer_duration = time.monotonic() - start_gpu_transfer
-                        self.logger.debug(f"Time to initiate GPU transfer: {gpu_transfer_duration:.4f} seconds.")
+                    with torch.no_grad():
+                        start_inference = time.monotonic()
+                        policy_gpu, value_gpu = self.model(states_gpu)
+                        policy_gpu = F.softmax(policy_gpu, dim=-1)
+                        inference_duration = time.monotonic() - start_inference
+                        self.logger.debug(f"Time to initiate inference: {inference_duration:.4f} seconds.")
 
-                        with torch.no_grad():
-                            start_inference = time.monotonic()
-                            policy_gpu, value_gpu = self.model(states_gpu)
-                            policy_gpu = F.softmax(policy_gpu, dim=-1)
-                            inference_duration = time.monotonic() - start_inference
-                            self.logger.debug(f"Time to initiate inference: {inference_duration:.4f} seconds.")
-
-                        start_cpu_transfer = time.monotonic()
-                        # Move results back to CPU, non-blocking
-                        policy_cpu = policy_gpu.to('cpu', non_blocking=True)
-                        value_cpu = value_gpu.to('cpu', non_blocking=True)
-                        cpu_transfer_duration = time.monotonic() - start_cpu_transfer
-                        self.logger.debug(f"Time to initiate CPU transfer: {cpu_transfer_duration:.4f} seconds.")
+                    start_cpu_transfer = time.monotonic()
+                    # Move results back to CPU, non-blocking
+                    policy_cpu = policy_gpu.to('cpu', non_blocking=True)
+                    value_cpu = value_gpu.to('cpu', non_blocking=True)
+                    cpu_transfer_duration = time.monotonic() - start_cpu_transfer
+                    self.logger.debug(f"Time to initiate CPU transfer: {cpu_transfer_duration:.4f} seconds.")
 
                     # Synchronize the stream to ensure all asynchronous operations are complete
-                    # This is where the batcher waits for GPU computation to finish before proceeding
                     stream.synchronize()
-                
-                else: # Fallback to synchronous execution on CPU
-                    states_on_device = states_to_process.to(self.device)
-                    with torch.no_grad():
-                        policy_output, value_output = self.model(states_on_device)
-                    policy_output = F.softmax(policy_output, dim=-1)
-                    
-                    policy_cpu = policy_output.cpu()
-                    value_cpu = value_output.cpu()
 
                 # C. Finalize and store results for sending
-                # Ensure results are on CPU and potentially in shared memory before queuing
-                policy_cpu.share_memory_()
-                value_cpu.share_memory_()
-
                 for i, worker_id in enumerate(worker_ids):
                     # Store original worker_id and move_list to return to the correct worker
                     # pending_results will be sent via put_nowait in the next iteration
@@ -244,7 +212,7 @@ class InferenceBatcher:
 
             # --- Periodic Performance Logging ---
             current_monotonic_time = time.monotonic()
-            if current_monotonic_time - last_report_time >= 60.0: # Log every 60 seconds
+            if current_monotonic_time - last_report_time >= 60.0: # Log every 15 seconds
                 elapsed_interval_time = current_monotonic_time - last_report_time
 
                 if interval_batches_processed > 0:

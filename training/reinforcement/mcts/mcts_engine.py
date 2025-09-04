@@ -251,7 +251,6 @@ class MCTSEngine:
                     board_input = board_input.half()
 
                 board_input = board_input.pin_memory()
-                board_input.share_memory_() 
 
                 move_list = [n.move for n in path if n.move is not None]
                 batch_buffer.append((self.worker_id, move_list, board_input))
@@ -415,7 +414,6 @@ class MCTSEngine:
         if self.use_fp16:
             board_input = board_input.half()
         board_input = board_input.pin_memory()
-        board_input.share_memory_()
         self.inference_queue.put([(self.worker_id, [], board_input)])
 
         while True:
@@ -527,9 +525,9 @@ class MCTSEngine:
 
             
             # RAVE backprop
-            for rave_move in path_moves:
-                if rave_move in current_node.children:
-                    child_for_rave_update = current_node.children[rave_move]
+            for child_move, child_node in current_node.children.items():
+                if child_move in path_moves:
+                    child_for_rave_update = current_node.children[child_move]
                     child_for_rave_update.rave_visits += 1
                     child_for_rave_update.rave_value_sum -= value_for_backprop
 
@@ -540,7 +538,7 @@ class MCTSEngine:
                     f"Current node move: {current_node.move}. "
                     f"Child node move: {child_for_rave_update.move}. "
                     f"Full simulation path: {path_moves}. "
-                    f"Updating move: {rave_move} with value: {-value_for_backprop:.4f}. "
+                    f"Updating move: {child_move} with value: {-value_for_backprop:.4f}. "
                     f"Path to updated child: {' -> '.join(path_to_child)}"
                 )
                 

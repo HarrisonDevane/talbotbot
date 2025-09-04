@@ -17,9 +17,10 @@ pyyaml = "*"
 python-lichess = "*"
 bs4 = "*"
 matplotlib = "*"
-torch = "==2.8.0"
 psutil = "*"
 py-spy = "*"
+cython-chess = "*"
+torch = {version = "*", index = "pytorch_cuda_129"}
 
 [dev-packages]
 
