@@ -30,7 +30,7 @@ class EvaluationTask:
         # Extract best model path from model_config for clarity
         self.best_model_path = model_config['best_model_path']
 
-        self.num_evaluation_workers = self.evaluation_config['workers']
+        self.num_evaluation_workers = self.evaluation_config['game_workers']
         
         self.main_logger = self._setup_logger(
             "EvaluationManager", 

@@ -1,9 +1,5 @@
-import chess
 import os
 import sys
-import logging
-import random
-import uuid
 import numpy as np
 import time
 

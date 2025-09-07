@@ -36,7 +36,7 @@ class RLOrchestrator:
         self.buffer_file_path = buffer_file_name
 
     def _setup_cycle_logger(self, cycle_dir):
-        
+        # Create a 'logs' subdirectory within the cycle directory
         logger = logging.getLogger(f"RLOrchestrator_Cycle_{self.current_cycle}")
         logger.setLevel(logging.INFO)
         
@@ -70,11 +70,9 @@ class RLOrchestrator:
     def _update_circular_buffer(self, new_data):
         max_positions = self.params_config['global']['buffer_positions_total']
         
-        boards = np.array([item['board_state'] for item in new_data], dtype=np.int8)
+        boards = np.array([item['board_state'] for item in new_data], dtype=np.float16)
         policies = np.array([item['policy'] for item in new_data], dtype=np.float16)
         values = np.array([item['value_target'] for item in new_data], dtype=np.float16)
-        final_size = None
-        iterations = np.full(len(new_data), self.state_config['state']['best_model_cycle'], dtype=np.int8)
 
         self.logger.info(f"Appending new data ({len(new_data)} positions) to the circular buffer: {self.buffer_file_path}")
         
@@ -82,7 +80,7 @@ class RLOrchestrator:
         if os.path.exists(self.buffer_file_path):
             try:
                 with h5py.File(self.buffer_file_path, 'r') as hf_check:
-                    if not all(dset in hf_check for dset in ['inputs', 'policies', 'values', 'iterations']):
+                    if not all(dset in hf_check for dset in ['inputs', 'policies', 'values']):
                         raise Exception(
                             f"Buffer file is logically corrupted. Missing one or more datasets: {list(hf_check.keys())}."
                         )
@@ -95,18 +93,16 @@ class RLOrchestrator:
         current_write_head = self.state_config['state']['buffer_write_head']
         
         with h5py.File(self.buffer_file_path, 'a') as hf:
-            if 'inputs' in hf and 'policies' in hf and 'values' in hf and 'iterations' in hf:
+            if 'inputs' in hf and 'policies' in hf and 'values' in hf:
                 self.logger.debug(f"Existing datasets (headers) are: {list(hf.keys())}.")
 
                 inputs_dset = hf['inputs']
                 policies_dset = hf['policies']
                 values_dset = hf['values']
-                iterations_dset = hf['iterations']
 
                 boards_remaining = boards
                 policies_remaining = policies
                 values_remaining = values
-                iterations_remaining = iterations
 
                 ### STEP 1: APPEND to unfilled part of buffer ###
                 if current_size < max_positions:
@@ -116,19 +112,16 @@ class RLOrchestrator:
                     boards_to_append = boards_remaining[:append_count]
                     policies_to_append = policies_remaining[:append_count]
                     values_to_append = values_remaining[:append_count]
-                    iterations_to_append = iterations_remaining[:append_count]
 
                     # Resize datasets to accommodate append
                     new_size = current_size + append_count
                     inputs_dset.resize(new_size, axis=0)
                     policies_dset.resize(new_size, axis=0)
                     values_dset.resize(new_size, axis=0)
-                    iterations_dset.resize(new_size, axis=0)
 
                     inputs_dset[current_size : current_size + append_count] = boards_to_append
                     policies_dset[current_size : current_size + append_count] = policies_to_append
                     values_dset[current_size : current_size + append_count] = values_to_append
-                    iterations_dset[current_size : current_size + append_count] = iterations_to_append
 
                     self.state_config['state']['buffer_positions_current'] = new_size
 
@@ -136,9 +129,8 @@ class RLOrchestrator:
                     boards_remaining = boards_remaining[append_count:]
                     policies_remaining = policies_remaining[append_count:]
                     values_remaining = values_remaining[append_count:]
-                    iterations_remaining = iterations_remaining[append_count:]
 
-                    current_write_head = new_size % max_positions
+                    current_write_head = new_size % max_positions  # Important: update write head if it wrapped to max
 
                 ### STEP 2: CIRCULAR OVERWRITE for remaining data ###
                 num_remaining = len(boards_remaining)
@@ -148,7 +140,6 @@ class RLOrchestrator:
                         inputs_dset[current_write_head : current_write_head + num_remaining] = boards_remaining
                         policies_dset[current_write_head : current_write_head + num_remaining] = policies_remaining
                         values_dset[current_write_head : current_write_head + num_remaining] = values_remaining
-                        iterations_dset[current_write_head : current_write_head + num_remaining] = iterations_remaining
                     else:
                         # wraparound
                         first_part_len = max_positions - current_write_head
@@ -157,30 +148,33 @@ class RLOrchestrator:
                         inputs_dset[current_write_head:] = boards_remaining[:first_part_len]
                         policies_dset[current_write_head:] = policies_remaining[:first_part_len]
                         values_dset[current_write_head:] = values_remaining[:first_part_len]
-                        iterations_dset[current_write_head:] = iterations_remaining[:first_part_len]
 
                         inputs_dset[:second_part_len] = boards_remaining[first_part_len:]
                         policies_dset[:second_part_len] = policies_remaining[first_part_len:]
                         values_dset[:second_part_len] = values_remaining[first_part_len:]
-                        iterations_dset[:second_part_len] = iterations_remaining[first_part_len:]
 
+                    # Write head moves forward circularly
                     new_write_head = (current_write_head + num_remaining) % max_positions
                     self.state_config['state']['buffer_write_head'] = new_write_head
 
-                    self.state_config['state']['buffer_positions_current'] = min(
-                        self.state_config['state']['buffer_positions_current'] + num_remaining, max_positions
-                    )
-                    final_size = self.state_config['state']['buffer_positions_current']
+                # final size is always clamped to max_positions
+                self.state_config['state']['buffer_positions_current'] = min(
+                    self.state_config['state']['buffer_positions_current'] + num_remaining, max_positions
+                )
+                final_size = self.state_config['state']['buffer_positions_current']
 
             else:
                 # File is brand new or was just created
                 self.logger.info("Creating new HDF5 datasets for the buffer with explicit chunking.")
                 
+                # Get the batch size from your config
                 batch_size = self.params_config['training']['batch_size']
                 
+                # Use the shape of the first data chunk to define the rest of the dimensions
                 board_shape = boards.shape[1:]
                 policy_shape = policies.shape[1:]
                 
+                # Create datasets with an explicit chunk shape
                 hf.create_dataset('inputs', 
                                 data=boards, 
                                 maxshape=(None, *board_shape), 
@@ -188,6 +182,7 @@ class RLOrchestrator:
                                 compression='gzip', 
                                 chunks=(batch_size, *board_shape))
                 
+                # Policies are a single dimension
                 hf.create_dataset('policies', 
                                 data=policies, 
                                 maxshape=(None, *policy_shape), 
@@ -195,6 +190,7 @@ class RLOrchestrator:
                                 compression='gzip', 
                                 chunks=(batch_size, *policy_shape))
                 
+                # Values are a single dimension
                 hf.create_dataset('values', 
                                 data=values, 
                                 maxshape=(None,),
@@ -202,14 +198,7 @@ class RLOrchestrator:
                                 compression='gzip', 
                                 chunks=(batch_size,))
                 
-                # New: Create the iterations dataset
-                hf.create_dataset('iterations',
-                                data=iterations,
-                                maxshape=(None,),
-                                dtype=np.int32,
-                                compression='gzip',
-                                chunks=(batch_size,))
-
+                # Update the new state variables
                 self.state_config['state']['buffer_positions_current'] = len(new_data)
                 final_size = len(new_data)
 
@@ -233,10 +222,11 @@ class RLOrchestrator:
             self.logger = self._setup_cycle_logger(cycle_dir)
 
             # Initial messages are now logged here, inside the first cycle's log
-            self.logger.info(f"Orchestrator initialized. Reading state from: {CONFIG_RL_STATE_FILE}")
-            self.logger.info(f"Last completed cycle: {self.current_cycle}. Total cycles to run: {self.total_cycles - self.current_cycle}.")
-            self.logger.info(f"Last saved self-play positions: {self.state_config['state']['data_generation_positions_current']}")
-            self.logger.info(f"Current buffer size: {self.state_config['state']['buffer_positions_current']}")
+            if self.current_cycle == self.state_config['state']['current_cycle']:
+                self.logger.info(f"Orchestrator initialized. Reading state from: {CONFIG_RL_STATE_FILE}")
+                self.logger.info(f"Last completed cycle: {self.current_cycle}. Total cycles to run: {self.total_cycles - self.current_cycle}.")
+                self.logger.info(f"Last saved self-play positions: {self.state_config['state']['data_generation_positions_current']}")
+                self.logger.info(f"Current buffer size: {self.state_config['state']['buffer_positions_current']}")
             
             self.logger.info(f"\n--- Starting RL Cycle {self.current_cycle} (run {self.current_cycle} of {self.total_cycles}) ---")
             self.logger.info(f"Cycle-specific logs will be stored in: {cycle_dir}")
@@ -260,23 +250,22 @@ class RLOrchestrator:
                 best_iter = self.state_config['state']['best_model_cycle']
             )
 
-            if self.state_config['state']['data_generation_positions_current'] < total_positions_for_cycle:
-                for new_data_chunk, games_in_chunk in data_generation_task.run_for_n_positions(remaining_positions_this_cycle, save_interval):
-                    
-                    # Process the new chunk of data
-                    self._update_circular_buffer(new_data_chunk)
-                    
-                    positions_generated_this_cycle += len(new_data_chunk)
-                    self.state_config['state']['data_generation_positions_current'] = positions_generated_this_cycle
-                    self.state_config['state']['total_positions'] += len(new_data_chunk)
-                    self.state_config['state']['total_games'] += games_in_chunk
+            for new_data_chunk, games_in_chunk in data_generation_task.run_for_n_positions(remaining_positions_this_cycle, save_interval):
+                
+                # Process the new chunk of data
+                self._update_circular_buffer(new_data_chunk)
+                
+                positions_generated_this_cycle += len(new_data_chunk)
+                self.state_config['state']['data_generation_positions_current'] = positions_generated_this_cycle
+                self.state_config['state']['total_positions'] += len(new_data_chunk)
+                self.state_config['state']['total_games'] += games_in_chunk
 
-                    # Periodically save the state to the YAML file
-                    self.logger.info(
-                        f"Chunk saved. Total positions for cycle {self.current_cycle}: "
-                        f"{positions_generated_this_cycle}/{remaining_positions_this_cycle}. Saving state..."
-                    )
-                    self._save_state()
+                # Periodically save the state to the YAML file
+                self.logger.info(
+                    f"Chunk saved. Total positions for cycle {self.current_cycle}: "
+                    f"{positions_generated_this_cycle}/{remaining_positions_this_cycle}. Saving state..."
+                )
+                self._save_state()
 
             self.logger.info(f"--- Cycle {self.current_cycle} self-play completed successfully! ---")
             self._save_state()
@@ -289,15 +278,14 @@ class RLOrchestrator:
                 output_dir=cycle_dir,
                 model_config=self.params_config['model'],
                 training_config=self.params_config['training'],
-                buffer_size=self.state_config['state']['buffer_positions_current'],
                 hdf5_path=self.buffer_file_path,
-                best_model_cycle=self.state_config['state']['best_model_cycle'],
                 cycle_number=self.current_cycle
             )
             model_path, steps = train_task.run_training_loop()
 
             train_task = None
             self.logger.info(f"2. Model has trained successfully for {steps} steps.")
+
 
             # # Step 3. Evaluation
             self.logger.info(f"3. Initiating evaluation by self play for {self.params_config['global']['eval_games']} games against current best model...")
@@ -344,8 +332,6 @@ class RLOrchestrator:
                 shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(rl_dir, f'rl_cycles/backup/state_cycle_{self.current_cycle}.yaml'))
 
 
-            # Delete model
-            os.remove(model_path)
 
             # After the loop is complete, update the state for the next cycle
             self.current_cycle = next_cycle
