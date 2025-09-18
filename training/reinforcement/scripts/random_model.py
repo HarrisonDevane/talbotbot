@@ -27,7 +27,7 @@ if __name__ == "__main__":
     # Create a new, seeded instance of the model
     model = ChessAIModel(
         num_input_planes=68,
-        num_residual_blocks=16,
+        num_residual_blocks=20,
         num_filters=128,
         dropout_rate_conv=0,
         dropout_rate_fc=0,

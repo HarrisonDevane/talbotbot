@@ -2,6 +2,7 @@ import os
 import sys
 import numpy as np
 import time
+import chess
 
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 rl_root = os.path.abspath(os.path.join(current_script_dir, ".."))
@@ -34,11 +35,13 @@ class SelfPlayAgent:
         self.mcts = None
         self.our_last_move = None
     
-    def get_move(self, board, move_number, search_depth, last_move_played):
+    def get_move(self, board, ply_count, search_depth, last_move_played):
         """
         Runs MCTS simulations and selects a move based on a temperature schedule.
         """
-        self.logger.info(f"\n{'='*60}\n{' '*20}--- MOVE {move_number} STARTED ---\n{'='*60}\n")
+        move_number = ((ply_count - 1) // 2) + 1
+
+        self.logger.info(f"\n{'='*60}\n{' '*20}--- MOVE {move_number}: {'White' if board.turn == chess.WHITE else 'Black'}, PLY {ply_count} STARTED ---\n{'='*60}\n")
         move_start_time = time.time()
         
         if board.is_game_over():
@@ -87,7 +90,7 @@ class SelfPlayAgent:
             best_move = np.random.choice(moves, p=probabilities)
         
         self.our_last_move = best_move
-        policy_vector, root_value = self.mcts.get_target_vectors()
+        policy_vector = self.mcts.get_target_vectors()
 
         move_end_time = time.time()
         total_move_time = move_end_time - move_start_time
@@ -95,7 +98,7 @@ class SelfPlayAgent:
 
         self.logger.info(f"Total move time: {total_move_time:.4f}, with {simulation_speed:.4f} simulations per second")
 
-        return best_move, policy_vector, root_value, simulation_count
+        return best_move, policy_vector, simulation_count
     
     def reset_for_new_game(self):
         """

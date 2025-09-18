@@ -212,8 +212,6 @@ class RLOrchestrator:
         The main orchestration loop.
         """
         while self.current_cycle <= self.total_cycles:
-            next_cycle = self.current_cycle + 1
-
             # --- Setup cycle-specific directories and logger ---
             cycle_dir = os.path.join(RL_CYCLES_DIR, f"iteration_{self.current_cycle}")
             os.makedirs(cycle_dir, exist_ok=True)
@@ -250,6 +248,7 @@ class RLOrchestrator:
                 best_iter = self.state_config['state']['best_model_cycle']
             )
 
+            start_time = time.time()
             for new_data_chunk, games_in_chunk in data_generation_task.run_for_n_positions(remaining_positions_this_cycle, save_interval):
                 
                 # Process the new chunk of data
@@ -259,6 +258,9 @@ class RLOrchestrator:
                 self.state_config['state']['data_generation_positions_current'] = positions_generated_this_cycle
                 self.state_config['state']['total_positions'] += len(new_data_chunk)
                 self.state_config['state']['total_games'] += games_in_chunk
+
+                elapsed_time_seconds = time.time() - start_time
+                self.state_config['state']['total_data_generation_time_hours'] = elapsed_time_seconds / 3600
 
                 # Periodically save the state to the YAML file
                 self.logger.info(
@@ -301,22 +303,29 @@ class RLOrchestrator:
             test_score, best_score = evaluation_task.run_for_n_games(self.params_config['global']['eval_games'])
 
             self.logger.info(f"3. Evaluation finished with result: {test_score}-{best_score}")
-            self.state_config['state']['total_training_steps'] += steps
 
             # Step 4. Save best model
             win_rate = test_score / self.params_config['global']['eval_games']
             if win_rate > self.params_config['global']['eval_cutoff']:
-                self.logger.info(f"New model has a win rate of {win_rate:.2f} (> {self.params_config['global']['eval_cutoff']}), accepting it as the new best model.")
+                self.logger.info(f"New model has a win rate of {win_rate:.3f} (> {self.params_config['global']['eval_cutoff']}), accepting it as the new best model.")
                                 
                 
                 # Override the best model with the new, better model
                 self.logger.info(f"Saving new model from {model_path} to {best_model_path}...")
                 shutil.copy(model_path, best_model_path)
 
-                self.state_config['state']['best_training_steps'] += steps
+                self.state_config['state']['best_model_updates'] += 1
+                self.state_config['state']['total_training_steps'] += steps
                 self.state_config['state']['best_model_cycle'] = self.current_cycle
                 
             self.logger.info(f"Current best cycle: {self.state_config['state']['best_model_cycle']}...")
+
+            # After the loop is complete, update the state for the next cycle
+            self.state_config['state']['data_generation_positions_current'] = 0
+            self.state_config['state']['current_cycle'] = self.current_cycle+1
+            
+            self.logger.info("Saving state for the next cycle...")
+            self._save_state()
 
             # Save copy of best model and replay buffer every save interval
             if self.current_cycle > 0 and self.current_cycle % self.params_config['global']['best_model_save_interval'] == 0:
@@ -331,23 +340,14 @@ class RLOrchestrator:
                 self.logger.info(f"Saving current state as backup")
                 shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(rl_dir, f'rl_cycles/backup/state_cycle_{self.current_cycle}.yaml'))
 
-
-
-            # After the loop is complete, update the state for the next cycle
-            self.current_cycle = next_cycle
-            self.state_config['state']['data_generation_positions_current'] = 0
-            self.state_config['state']['current_cycle'] = self.current_cycle
-            
-            self.logger.info("Saving state for the next cycle...")
-            self._save_state()
+            self.current_cycle += 1
+            os.remove(model_path)
 
             # Increment loop
             if self.current_cycle < self.total_cycles:
                 self.logger.info(f"Sleeping for 10 seconds before starting cycle {self.current_cycle}...")
                 time.sleep(10)
         
-        self.logger.info("\n--- All requested RL cycles have been completed. The orchestrator will now shut down. ---")
-
 
 if __name__ == "__main__":
     orchestrator = RLOrchestrator()

@@ -113,6 +113,39 @@ class MCTSEngine:
         time_misc = 0
         time_shutdown = 0
 
+        # Check if there are any game winning moves. Manually set visit counts for training + return
+        winning_children = []
+    
+        # Identify all immediate winning moves from the current position
+        for move, child_node in self.root.children.items():
+            # Temporarily apply the move to check for checkmate
+            temp_board = self.root.board.copy()
+            temp_board.push(move)
+            
+            if temp_board.is_checkmate():
+                winning_children.append(child_node)
+
+        num_winning_moves = len(winning_children)
+        
+        # If one or more winning moves are found, adjust visit counts
+        if num_winning_moves > 0:
+            # Set avg val = 1
+            self.root.value_sum = self.root.visits
+            simulation_count = search_depth
+            win_visits = max(1, int(search_depth / num_winning_moves))
+            
+            for move, child_node in self.root.children.items():
+                if child_node in winning_children:
+                    # Set visit count for winning moves
+                    child_node.visits = win_visits
+                else:
+                    # Set visit count for all other moves to 1
+                    child_node.visits = 1
+            
+            self.logger.info(f"Identified {num_winning_moves} winning move(s). "
+                            f"Manually set winning moves to {win_visits} visits.")
+            
+
         while simulation_count < search_depth:
             # Process any available results first (non-blocking)
             while not self.result_queue.empty():
@@ -145,8 +178,6 @@ class MCTSEngine:
                     self._backpropagate(node, value_output)
                     time_backpropagation_end = time.perf_counter()
                     time_backpropagation += (time_backpropagation_end - time_backpropagation_start)
-
-                    self.logger.debug(f"[Backpropagation] Expansion and backpropagation complete for node ID: {id(node)}")
                                                 
                 except queue.Empty:
                     break
@@ -180,8 +211,8 @@ class MCTSEngine:
                 time_inference_end = time.perf_counter()
                 time_inference += (time_inference_end - time_inference_start)
 
-            # Check if root is queued for inference (this handles initial root expansion and prevents re-queuing)
-            if self.root.is_queued_for_inference and not batch_buffer:
+            # Check if root is queued for inference (this handles when all nodes in tree are queued)
+            if self.root.is_queued_for_inference:
                 time.sleep(0.001)
                 continue
 
@@ -266,16 +297,27 @@ class MCTSEngine:
                 simulation_count += 1
                 self.logger.debug(f"[Misc] Node queued for inference. Simulation count: {simulation_count}, batch size: {len(batch_buffer)}")
 
-                # If all legal children of the parent are now queued, mark parent too
+                # If all legal children of the parent are now queued/terminal, mark parent too
                 time_misc_start = time.perf_counter()
                 current_node = node.parent
 
                 while current_node is not None:
-                    all_legal_children_queued = all(child.is_queued_for_inference for child in current_node.children.values())
+                    # A parent is fully processed if all its children are either:
+                    # 1. Queued for inference
+                    # 2. Terminal nodes
+                    # This stops terminal nodes from continually being selected when awaiting inference
 
-                    if all_legal_children_queued:
+                    is_fully_processed = all(
+                        child.is_queued_for_inference or child.is_terminal
+                        for child in current_node.children.values()
+                    )
+
+                    if is_fully_processed:
                         current_node.is_queued_for_inference = True
-                        self.logger.debug(f"[Misc] Node {current_node.move} (parent of a fully queued subtree) also marked as queued for inference.")
+                        self.logger.debug(
+                            f"[Misc] Node {current_node.move} (parent of a fully processed subtree) "
+                            "also marked as queued for inference."
+                        )
                     else:
                         break
                     
@@ -327,14 +369,27 @@ class MCTSEngine:
 
         # Log root children stats at the end of run_simulations
         self.logger.info(f"\n--- MCTS Root Children Analysis (Final State) ---")
+        self.logger.info(
+                f"Root node: Visits: {self.root.visits}, "
+                f"Average Value: {self.root.value_sum / self.root.visits if self.root.visits > 0 else 0.0:.4f}, "
+            )
+
         sorted_children = sorted(self.root.children.items(), key=lambda item: item[1].visits, reverse=True)
-                        
+        
+        # Only calculate this if set to info
         for move, child_node in sorted_children:
+            sqrt_parent_visits_term = math.sqrt(child_node.visits) if child_node.visits > 0 else 0.0
             prior_prob = child_node.prior_probability_from_parent
+            uct = child_node.uct_score(self.cpuct, self.k_rave, prior_prob, sqrt_parent_visits_term)
+
             log_message = (
-                f"Move: {move.uci()}, Visits: {child_node.visits}, "
+                f"Move: {move.uci()}, "
                 f"Prior Probability: {prior_prob:.4f}, "
+                f"Visits: {child_node.visits}, "
                 f"Average Value: {-child_node.value_sum / child_node.visits if child_node.visits > 0 else 0.0:.4f}, "
+                f"Rave Visits: {child_node.rave_visits}, "
+                f"Rave Average Value: {-child_node.rave_value_sum / child_node.rave_visits if child_node.rave_visits > 0 else 0.0:.4f}, "
+                f"UCT Score: {uct:.4f}"
             )
             self.logger.info(log_message)
 
@@ -500,50 +555,38 @@ class MCTSEngine:
         """
         Update visit counts and value sums along the path from the node up to the root.
         Value is from the perspective of the player whose turn it is at 'node.board'.
-        Incorporate Random Action Value Estimation (RAVE)
+        Incorporate Random Action Value Estimation (RAVE).
         """
-        path_moves = []
-        
-        current = node
-        
-        # Get list of all moves from node -> root
-        while current is not None:
-            if current.move is not None:
-                path_moves.append(current.move)
-            current = current.parent
-
-
         current_node = node
         value_for_backprop = value
+        path_moves = []  # Build path incrementally from leaf up to root
 
         while current_node is not None:
-            
-            # Normal backprop
+            # Normal MCTS backpropagation
             current_node.is_queued_for_inference = False
             current_node.visits += 1
             current_node.value_sum += value_for_backprop
 
-            
-            # RAVE backprop
+            # RAVE update for child moves that appear later in the simulation
             for child_move, child_node in current_node.children.items():
                 if child_move in path_moves:
-                    child_for_rave_update = current_node.children[child_move]
-                    child_for_rave_update.rave_visits += 1
-                    child_for_rave_update.rave_value_sum -= value_for_backprop
+                    child_node.rave_visits += 1
+                    child_node.rave_value_sum -= value_for_backprop  # Flip for opponent
 
-                    path_to_child = self._get_moves_to_root(child_for_rave_update)
-
+                    path_to_child = self._get_moves_to_root(child_node)
                     self.logger.debug(
-                    f"RAVE update on another branch. "
-                    f"Current node move: {current_node.move}. "
-                    f"Child node move: {child_for_rave_update.move}. "
-                    f"Full simulation path: {path_moves}. "
-                    f"Updating move: {child_move} with value: {-value_for_backprop:.4f}. "
-                    f"Path to updated child: {' -> '.join(path_to_child)}"
-                )
-                
+                        f"RAVE update on another branch. "
+                        f"Current node move: {current_node.move}. "
+                        f"Child node move: {child_node.move}. "
+                        f"Full simulation path (below current): {path_moves}. "
+                        f"Updating move: {child_move} with value: {-value_for_backprop:.4f}. "
+                        f"Path to updated child: Root -> {' -> '.join(path_to_child)}"
+                    )
 
+            # Add the current node's move *after* using it, so it's not in scope for its own RAVE update
+            path_moves.append(current_node.move)
 
+            # Alternate perspective for next node up
             value_for_backprop = -value_for_backprop
             current_node = current_node.parent
             
@@ -588,7 +631,4 @@ class MCTSEngine:
             flat_index = utils.policy_components_to_flat_index(from_row, from_col, channel)
             policy_vector[flat_index] = normalized_prob
 
-        # Ensure root_value is converted to a standard Python float for consistency
-        root_value = -float(self.root.value_sum) / self.root.visits if self.root.visits > 0 else 0.0
-
-        return policy_vector, root_value
+        return policy_vector

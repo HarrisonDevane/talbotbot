@@ -15,6 +15,7 @@ class MCTSNode:
         self.prior_probabilities = None
         self.prior_probability_from_parent = 0.0
         self.is_expanded = False
+        self.is_terminal = False
         self.is_queued_for_inference = False
 
         # Random action value estimation (RAVE) params

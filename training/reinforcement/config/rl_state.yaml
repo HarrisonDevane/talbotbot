@@ -1,6 +1,6 @@
 state:
   best_model_cycle: 0
-  best_training_steps: 0
+  best_model_updates: 0
   buffer_positions_current: 0
   buffer_write_head: 0
   current_cycle: 1
@@ -8,3 +8,4 @@ state:
   total_games: 0
   total_positions: 0
   total_training_steps: 0
+  total_data_generation_time_hours: 0

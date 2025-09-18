@@ -49,9 +49,8 @@ class DataGenerationGameWorker:
             player.reset_for_new_game()
 
 
-        move_count = 1
+        ply_count = 1
         raw_training_data = []
-        game_length = 0
         total_simulations = 0
 
         search_depth = random.choices(self.data_generation_config['search_depth'], weights=self.data_generation_config['search_depth_weights'], k=1)[0]
@@ -60,16 +59,14 @@ class DataGenerationGameWorker:
         while not self.game_over:
             player = self.players[self.current_turn]
             current_board = self.board.copy()
-            
-            move, policy_vector, root_value, simulation_count = player.get_move(current_board, move_count, search_depth, None)
+
+            move, policy_vector, simulation_count = player.get_move(current_board, ply_count, search_depth, None)
             board_state_tensor = utils.board_to_tensor_68(current_board)                
 
             raw_training_data.append({
                 "board_state": board_state_tensor,
                 "policy": policy_vector,
-                "root_value": root_value,
                 "turn": current_board.turn,
-                "move_count": move_count,
                 "simulation_count": simulation_count
             })
             
@@ -77,8 +74,8 @@ class DataGenerationGameWorker:
             self.current_turn = not self.current_turn
             self.logger.info(f"Game {game_number} - Move made: {move.uci()}")
             total_simulations += simulation_count
-            move_count += 1
-            
+            ply_count += 1
+                    
             self._check_game_over(game_number)
 
 
@@ -88,37 +85,16 @@ class DataGenerationGameWorker:
             final_game_value = -1.0
         else:
             final_game_value = 0.0
-
-        game_length = move_count
         
         final_training_data = []
-        for i, move_num in enumerate(raw_training_data):
-            final_value_for_player = final_game_value if move_num['turn'] == chess.WHITE else -final_game_value
-            
-            blended_value_target = self._calculate_blended_value(
-                mcts_value=move_num['root_value'],
-                final_game_value=final_value_for_player,
-                move_count=move_num['move_count'],
-                game_length=game_length
-            )
-            
+        for i, move_num in enumerate(raw_training_data):            
             final_training_data.append({
                 'board_state': move_num['board_state'],
                 'policy': move_num['policy'],
-                'value_target': blended_value_target
+                'value_target': final_game_value if move_num['turn'] == chess.WHITE else -final_game_value
             })
-
+            
         return final_training_data, total_simulations
-
-
-    def _calculate_blended_value(self, mcts_value, final_game_value, move_count, game_length):
-        """
-        Calculates a blended value target using a hyperbolic tangent (tanh) function.
-        """
-        transition_center = min(int(game_length * self.data_generation_config['value_transition_factor']), self.data_generation_config['value_max_transition_move'])
-        final_result_blend_factor = (math.tanh(self.data_generation_config['value_transition_steepness'] * (move_count - transition_center)) + 1.0) / 2.0
-        mcts_blend_factor = 1.0 - final_result_blend_factor
-        return (mcts_blend_factor * mcts_value) + (final_result_blend_factor * final_game_value)
 
 
     def _check_game_over(self, game_number):

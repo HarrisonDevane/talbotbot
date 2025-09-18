@@ -1,5 +1,5 @@
 global:
-  total_cycles: 20
+  total_cycles: 40
   best_model_save_interval: 5
   buffer_file_path: "/Users/hpdev/Projects/talbot/training/reinforcement/rl_cycles/circular_buffer.hdf5"
   buffer_positions_total: 1024000
@@ -9,33 +9,30 @@ global:
   eval_cutoff: 0.52
 
 model:
-  best_model_path: "/Users/hpdev/Projects/talbot/training/reinforcement/rl_cycles/best_models/best_model.pth"
+  best_model_path: "/Users/hpdev/Projects/talbot/training/reinforcement/rl_cycles/best_models/supervised_model.pth"
   input_planes: 68
   filters: 128
-  resblocks: 16
+  resblocks: 20
 
 data_generation:
-  inference_workers: 2
-  game_workers: 20
+  inference_workers: 1
+  game_workers: 10
   batch_size_per_worker: 16
   batch_timeout: 0.001
   cpuct: 2.0
   k_rave: 200
-  search_depth: [304, 608]
-  search_depth_weights: [0.75, 0.25]
+  search_depth: [800]
+  search_depth_weights: [1.0]
   virtual_loss: 0.1
-  value_transition_factor: 0.5
-  value_max_transition_move: 40
-  value_transition_steepness: 0.1
-  temperature_threshold_move: 30
+  temperature_threshold_move: 24
   temperature_high: 1.0
-  temperature_low: 0.1
+  temperature_low: 0.0
   dirichlet_alpha: 0.25
   dirichlet_epsilon: 0.3
   early_cutoff_simulations: 100
   early_cutoff_threshold: 0.7
   main_logging_level: 20
-  worker_logging_level: 50
+  worker_logging_level: 20
   inference_logging_level: 20
 
 training:
@@ -58,13 +55,10 @@ evaluation:
   batch_size_per_worker: 16
   batch_timeout: 0.001
   cpuct: 2.0
-  k_rave: 200
+  k_rave: 1
   search_depth: [304]
   search_depth_weights: [1.0]
   virtual_loss: 0.1
-  value_transition_factor: 0
-  value_max_transition_move: 0
-  value_transition_steepness: 0
   opening_book_path: "/Users/hpdev/Projects/talbot/data/opening_books/gm2600.bin"
   opening_moves: 12
   temperature_threshold_move: 0

@@ -32,7 +32,7 @@ class EvaluationGameWorker:
             player.reset_for_new_game()
 
 
-        move_count = 1
+        ply_count = 1
         search_depth = random.choices(self.evaluation_config['search_depth'], weights=self.evaluation_config['search_depth_weights'], k=1)[0]
         self.logger.info(f"Game {game_number} will use a search depth of {search_depth}")
 
@@ -48,19 +48,19 @@ class EvaluationGameWorker:
                 best_move = opening_move_list[opening_index]
                 opening_index += 1
             else:
-                self.logger.info(f"Opening line exhausted at move {move_count}. Switching to search.")
+                self.logger.info(f"Opening line exhausted at move {ply_count}. Switching to search.")
                 opening = False
-                best_move, policy_vector, root_value, simulation_count = player.get_move(current_board, move_count, search_depth, last_move)
+                best_move, policy_vector, simulation_count = player.get_move(current_board, ply_count, search_depth, last_move)
 
             self.board.push(best_move)
             self.current_turn = not self.current_turn
-            self.logger.info(f"Game {game_number} - Move {move_count}: {best_move.uci()}")
+            self.logger.info(f"Game {game_number} - Move {ply_count}: {best_move.uci()}")
             last_move = best_move
-            move_count += 1
+            ply_count += 1
 
             self._check_game_over(game_number)
 
-        return self.result, move_count
+        return self.result, (ply_count-1)
 
 
     def update_players(self, player_white, player_black):
