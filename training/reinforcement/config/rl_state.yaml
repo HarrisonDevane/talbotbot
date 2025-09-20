@@ -6,6 +6,9 @@ state:
   current_cycle: 1
   data_generation_positions_current: 0
   total_games: 0
+  total_hours: 0
+  total_hours_data_generation: 0
+  total_hours_evaluation: 0
+  total_hours_training: 0
   total_positions: 0
   total_training_steps: 0
-  total_data_generation_time_hours: 0

@@ -81,7 +81,7 @@ class MCTSEngine:
                     self._expand_root()
 
         # After updating the root, we check if it's already expanded.
-        if self.root.is_expanded:
+        if self.root.expanded:
             self._add_dirichlet_noise(self.root)
         else:
             self.logger.warning("MCTSE Engine: New root node created due to no matching branch or initial state.")
@@ -97,7 +97,7 @@ class MCTSEngine:
         """
         
         # Ensure the root is expanded at the start of a game, or if a new tree was created.
-        if not self.root.is_expanded:
+        if not self.root.expanded:
             self._expand_root()
 
         simulation_count = 0
@@ -112,40 +112,7 @@ class MCTSEngine:
         time_inference = 0
         time_misc = 0
         time_shutdown = 0
-
-        # Check if there are any game winning moves. Manually set visit counts for training + return
-        winning_children = []
-    
-        # Identify all immediate winning moves from the current position
-        for move, child_node in self.root.children.items():
-            # Temporarily apply the move to check for checkmate
-            temp_board = self.root.board.copy()
-            temp_board.push(move)
             
-            if temp_board.is_checkmate():
-                winning_children.append(child_node)
-
-        num_winning_moves = len(winning_children)
-        
-        # If one or more winning moves are found, adjust visit counts
-        if num_winning_moves > 0:
-            # Set avg val = 1
-            self.root.value_sum = self.root.visits
-            simulation_count = search_depth
-            win_visits = max(1, int(search_depth / num_winning_moves))
-            
-            for move, child_node in self.root.children.items():
-                if child_node in winning_children:
-                    # Set visit count for winning moves
-                    child_node.visits = win_visits
-                else:
-                    # Set visit count for all other moves to 1
-                    child_node.visits = 1
-            
-            self.logger.info(f"Identified {num_winning_moves} winning move(s). "
-                            f"Manually set winning moves to {win_visits} visits.")
-            
-
         while simulation_count < search_depth:
             # Process any available results first (non-blocking)
             while not self.result_queue.empty():
@@ -167,7 +134,7 @@ class MCTSEngine:
                     time_inference_end = time.perf_counter()
                     time_inference += (time_inference_end - time_inference_start)
 
-                    if not node.is_expanded:
+                    if not node.expanded:
                         time_expansion_start = time.perf_counter()
                         self._expand(node, policy_probs)
                         time_expansion_end = time.perf_counter()
@@ -175,7 +142,7 @@ class MCTSEngine:
                     
                     time_backpropagation_start = time.perf_counter()
                     self._virtual_loss(node, is_applying=False)
-                    self._backpropagate(node, value_output)
+                    self._backpropagate_inference(node, value_output)
                     time_backpropagation_end = time.perf_counter()
                     time_backpropagation += (time_backpropagation_end - time_backpropagation_start)
                                                 
@@ -210,27 +177,36 @@ class MCTSEngine:
                 batch_buffer = []
                 time_inference_end = time.perf_counter()
                 time_inference += (time_inference_end - time_inference_start)
-
+            
             # Check if root is queued for inference (this handles when all nodes in tree are queued)
-            if self.root.is_queued_for_inference:
+            if self.root.queued_for_inference:
+                if len(batch_buffer) > 0:
+                    self.inference_queue.put_nowait(batch_buffer)
+                    inference_sent += len(batch_buffer)
+                    self.logger.debug(f"[Misc] Pushed a full batch of size {len(batch_buffer)} to inference queue. Inferences sent: {inference_sent}")
+                    batch_buffer = []
                 time.sleep(0.001)
                 continue
 
             node = self.root
-            self.logger.debug(f"[Selection] Node selection/traversal starting.")
             path = [node]
 
             time_selection_start = time.perf_counter()
+            uct = None
 
-            while not node.is_leaf() and node.is_expanded and not node.is_queued_for_inference:
+            while not node.is_leaf() and node.expanded and not node.queued_for_inference and not node.terminal:
                 best_child = None
                 best_uct_score = -float('inf')
                 best_prior_for_tie_break = -1.0
 
-                eligible_children = [(move, child) for move, child in node.children.items() if not child.is_queued_for_inference]
+                eligible_children = [(move, child) for move, child in node.children.items() if not (child.queued_for_inference or child.terminal)]
 
                 # UCT selection
                 sqrt_parent_visits_term = math.sqrt(node.visits) if node.visits > 0 else 0.0
+
+                if not eligible_children:
+                    node = None
+                    break
 
                 for move, child in eligible_children:
                     prior_prob_for_child = child.prior_probability_from_parent
@@ -247,11 +223,14 @@ class MCTSEngine:
             time_selection_end = time.perf_counter()
             time_selection += (time_selection_end - time_selection_start)
 
+            if node in (self.root, None):
+                break
+
             # Expansion/Simulation: Check for game-over or queue for inference
             if node.board.is_game_over(claim_draw=True):
-
                 time_expansion_start = time.perf_counter()
                 result = node.board.result(claim_draw=True)
+                node.terminal = True
                 value = 0.0
                 if result == "1-0":
                     value = 1.0 if node.board.turn == chess.WHITE else -1.0
@@ -262,7 +241,7 @@ class MCTSEngine:
                 time_expansion += (time_expansion_end - time_expansion_start)
 
                 time_backpropagation_start = time.perf_counter()
-                self._backpropagate(node, value)
+                self._backpropagate_terminal(node, value)
                 time_backpropagation_end = time.perf_counter()
                 time_backpropagation += (time_backpropagation_end - time_backpropagation_start)
 
@@ -272,7 +251,7 @@ class MCTSEngine:
             # Otherwise -> queue for inference
             else:
                 time_inference_start = time.perf_counter()
-                node.is_queued_for_inference = True
+                node.queued_for_inference = True
                 
                 # Board to tensor conversion
                 numpy_board = utils.board_to_tensor_68(node.board)
@@ -297,35 +276,24 @@ class MCTSEngine:
                 simulation_count += 1
                 self.logger.debug(f"[Misc] Node queued for inference. Simulation count: {simulation_count}, batch size: {len(batch_buffer)}")
 
-                # If all legal children of the parent are now queued/terminal, mark parent too
+                # If all legal children of the parent are now queued, mark parent too
                 time_misc_start = time.perf_counter()
                 current_node = node.parent
 
                 while current_node is not None:
-                    # A parent is fully processed if all its children are either:
-                    # 1. Queued for inference
-                    # 2. Terminal nodes
-                    # This stops terminal nodes from continually being selected when awaiting inference
-
-                    is_fully_processed = all(
-                        child.is_queued_for_inference or child.is_terminal
-                        for child in current_node.children.values()
-                    )
-
-                    if is_fully_processed:
-                        current_node.is_queued_for_inference = True
-                        self.logger.debug(
-                            f"[Misc] Node {current_node.move} (parent of a fully processed subtree) "
-                            "also marked as queued for inference."
-                        )
+                    all_legal_children_queued = all(child.queued_for_inference for child in current_node.children.values())
+                    if all_legal_children_queued:
+                        current_node.queued_for_inference = True
+                        self.logger.debug(f"[Misc] Node {current_node.move} (parent of a fully queued subtree) also marked as queued for inference.")
                     else:
                         break
-                    
+
                     # Move up to the next parent to continue the check
                     current_node = current_node.parent
 
                 time_misc_end = time.perf_counter()
                 time_misc += (time_misc_end - time_misc_start)
+
         
         # Cleanup
         time_shutdown_start = time.perf_counter()
@@ -353,11 +321,11 @@ class MCTSEngine:
                 for move in move_list:
                     node = node.children[move]
                 
-                if not node.is_expanded:
+                if not node.expanded:
                     self._expand(node, policy_probs)
                 
                 self._virtual_loss(node, is_applying=False)
-                self._backpropagate(node, value_output)                
+                self._backpropagate_inference(node, value_output)                
                 self.logger.debug(f"[Backpropagation] Expanding and backpropagating on node during final wait.")
                         
             except queue.Empty:
@@ -482,7 +450,7 @@ class MCTSEngine:
                 value_output = raw_value_output.float().item()
 
                 self._expand(self.root, policy_probs)
-                self._backpropagate(self.root, value_output)
+                self._backpropagate_inference(self.root, value_output)
                 self._add_dirichlet_noise(self.root)
                 break
             except queue.Empty:
@@ -535,35 +503,26 @@ class MCTSEngine:
             for i, child_node in enumerate(child_nodes_in_order):
                 child_node.prior_probability_from_parent = normalized_priors_list[i]
 
-        node.is_expanded = True
-        node.is_queued_for_inference = False
-        
-
-    def _get_moves_to_root(self, node: MCTSNode):
-        """
-        Helper function to get the moves from a node up to the root.
-        """
-        path = []
-        current = node
-        while current is not None and current.move is not None:
-            path.append(str(current.move))
-            current = current.parent
-        return path[::-1] # Reverse the list to show path from root
+        node.expanded = True
+        node.queued_for_inference = False
 
 
-    def _backpropagate(self, node: MCTSNode, value: float):
+    def _backpropagate_terminal(self, node: MCTSNode, value: float):
         """
-        Update visit counts and value sums along the path from the node up to the root.
-        Value is from the perspective of the player whose turn it is at 'node.board'.
-        Incorporate Random Action Value Estimation (RAVE).
+        Update visit counts and terminal values
+        Added recursive minimax for determining DTM and forced game outcomes
         """
+        # Set terminal values
+        node.forced_outcome = int(value)
+        node.distance_to_mate = 0
+
         current_node = node
         value_for_backprop = value
-        path_moves = []  # Build path incrementally from leaf up to root
+        path_moves = set()
 
         while current_node is not None:
             # Normal MCTS backpropagation
-            current_node.is_queued_for_inference = False
+            current_node.queued_for_inference = False
             current_node.visits += 1
             current_node.value_sum += value_for_backprop
 
@@ -573,23 +532,68 @@ class MCTSEngine:
                     child_node.rave_visits += 1
                     child_node.rave_value_sum -= value_for_backprop  # Flip for opponent
 
-                    path_to_child = self._get_moves_to_root(child_node)
-                    self.logger.debug(
-                        f"RAVE update on another branch. "
-                        f"Current node move: {current_node.move}. "
-                        f"Child node move: {child_node.move}. "
-                        f"Full simulation path (below current): {path_moves}. "
-                        f"Updating move: {child_move} with value: {-value_for_backprop:.4f}. "
-                        f"Path to updated child: Root -> {' -> '.join(path_to_child)}"
-                    )
+            # Add the current node's move *after* using it, so it's not in scope for its own RAVE update
+            path_moves.add(current_node.move)
+
+            # Only apply minimax logic if node has children
+            if current_node.children:
+
+                # Rule 1: Check for a winning move (any child is a loss for opponent)
+                winning_children = [c for c in current_node.children.values() if c.forced_outcome == -1]
+                if winning_children:
+                    current_node.forced_outcome = 1
+                    best_win = min(winning_children, key=lambda c: c.distance_to_mate)
+                    current_node.distance_to_mate = best_win.distance_to_mate + 1
+
+                # Rule 2: Check for draw (only if no win above)
+                elif all(child.forced_outcome in [0, 1] for child in current_node.children.values()) and any(child.forced_outcome == 0 for child in current_node.children.values()):
+                    current_node.forced_outcome = 0
+                    current_node.distance_to_mate = 0
+
+                # Rule 3: Check for forced loss (only if no win or draw)
+                elif all(c.forced_outcome == 1 for c in current_node.children.values()):
+                    losing_children = [c for c in current_node.children.values() if c.forced_outcome == 1]
+                    if losing_children:
+                        current_node.forced_outcome = -1
+                        worst_loss = max(losing_children, key=lambda c: c.distance_to_mate)
+                        current_node.distance_to_mate = worst_loss.distance_to_mate + 1
+
+
+            # Alternate perspective for next node up
+            value_for_backprop = -value_for_backprop
+            current_node = current_node.parent
+
+
+    def _backpropagate_inference(self, node: MCTSNode, value: float):
+        """
+        Update visit counts and value sums along the path from the node up to the root.
+        Value is from the perspective of the player whose turn it is at 'node.board'.
+        Incorporate Random Action Value Estimation (RAVE).
+        """
+        current_node = node
+        value_for_backprop = value
+        path_moves = set()
+
+        while current_node is not None:
+            # Normal MCTS backpropagation
+            current_node.queued_for_inference = False
+            current_node.visits += 1
+            current_node.value_sum += value_for_backprop
+
+            # RAVE update for child moves that appear later in the simulation
+            for child_move, child_node in current_node.children.items():
+                if child_move in path_moves:
+                    child_node.rave_visits += 1
+                    child_node.rave_value_sum -= value_for_backprop  # Flip for opponent
 
             # Add the current node's move *after* using it, so it's not in scope for its own RAVE update
-            path_moves.append(current_node.move)
+            path_moves.add(current_node.move)
 
             # Alternate perspective for next node up
             value_for_backprop = -value_for_backprop
             current_node = current_node.parent
             
+
             
     def _virtual_loss(self, node: MCTSNode, is_applying: bool):
         """
@@ -603,32 +607,16 @@ class MCTSEngine:
         current_node = node
         original_turn = node.board.turn
         
+        # Also update RAVE values with virtual loss
         while current_node is not None:
+            current_node.rave_visits += 1 * multiplier
             current_node.visits += 1 * multiplier
             
             if current_node.board.turn == original_turn:
-                current_node.value_sum += self.virtual_loss * multiplier
-            else:
                 current_node.value_sum -= self.virtual_loss * multiplier
-            
+                current_node.rave_value_sum -= self.virtual_loss * multiplier
+            else:
+                current_node.value_sum += self.virtual_loss * multiplier
+                current_node.rave_value_sum += self.virtual_loss * multiplier
+
             current_node = current_node.parent
-            
-
-    def get_target_vectors(self):
-        """
-        Computes the policy vector from the visit counts of the root's children.
-        """
-        # Target vectors for training data are typically float32
-        policy_vector = np.zeros(utils.TOTAL_POLICY_MOVES, dtype=np.float32)
-        total_visits = sum(child.visits for child in self.root.children.values())
-        
-        if total_visits == 0:
-            return policy_vector, 0.0
-
-        for move, child_node in self.root.children.items():
-            normalized_prob = child_node.visits / total_visits
-            from_row, from_col, channel = utils.move_to_policy_components(move, self.root.board)
-            flat_index = utils.policy_components_to_flat_index(from_row, from_col, channel)
-            policy_vector[flat_index] = normalized_prob
-
-        return policy_vector

@@ -241,40 +241,44 @@ class RLOrchestrator:
             remaining_positions_this_cycle = total_positions_for_cycle - positions_generated_this_cycle
             
             # Instantiate the DataGenerationTask once for the cycle
-            data_generation_task = DataGenerationTask(
-                output_dir=cycle_dir,
-                model_config=self.params_config['model'],
-                data_generation_config=self.params_config['data_generation'],
-                best_iter = self.state_config['state']['best_model_cycle']
-            )
-
-            start_time = time.time()
-            for new_data_chunk, games_in_chunk in data_generation_task.run_for_n_positions(remaining_positions_this_cycle, save_interval):
-                
-                # Process the new chunk of data
-                self._update_circular_buffer(new_data_chunk)
-                
-                positions_generated_this_cycle += len(new_data_chunk)
-                self.state_config['state']['data_generation_positions_current'] = positions_generated_this_cycle
-                self.state_config['state']['total_positions'] += len(new_data_chunk)
-                self.state_config['state']['total_games'] += games_in_chunk
-
-                elapsed_time_seconds = time.time() - start_time
-                self.state_config['state']['total_data_generation_time_hours'] = elapsed_time_seconds / 3600
-
-                # Periodically save the state to the YAML file
-                self.logger.info(
-                    f"Chunk saved. Total positions for cycle {self.current_cycle}: "
-                    f"{positions_generated_this_cycle}/{remaining_positions_this_cycle}. Saving state..."
+            if remaining_positions_this_cycle > 0:
+                data_generation_task = DataGenerationTask(
+                    output_dir=cycle_dir,
+                    model_config=self.params_config['model'],
+                    data_generation_config=self.params_config['data_generation'],
+                    best_iter = self.state_config['state']['best_model_cycle']
                 )
-                self._save_state()
 
-            self.logger.info(f"--- Cycle {self.current_cycle} self-play completed successfully! ---")
-            self._save_state()
-            data_generation_task = None
-            
+                start_data_gen_time = time.time()
+                for new_data_chunk, games_in_chunk in data_generation_task.run_for_n_positions(remaining_positions_this_cycle, save_interval):
+                    
+                    # Process the new chunk of data
+                    self._update_circular_buffer(new_data_chunk)
+                    
+                    positions_generated_this_cycle += len(new_data_chunk)
+                    self.state_config['state']['data_generation_positions_current'] = positions_generated_this_cycle
+                    self.state_config['state']['total_positions'] += len(new_data_chunk)
+                    self.state_config['state']['total_games'] += games_in_chunk
+
+                    total_data_gen_time = time.time() - start_data_gen_time
+                    self.state_config['state']['total_hours_data_generation'] += (total_data_gen_time / 3600)
+                    start_data_gen_time = time.time()
+
+
+                    # Periodically save the state to the YAML file
+                    self.logger.info(
+                        f"Chunk saved. Total positions for cycle {self.current_cycle}: "
+                        f"{positions_generated_this_cycle}/{remaining_positions_this_cycle}. Saving state..."
+                    )
+                    self._save_state()
+
+                self.logger.info(f"--- Cycle {self.current_cycle} self-play completed successfully! ---")
+                self._save_state()
+                data_generation_task = None
+                
             # Step 2. Training
             self.logger.info("2. Training a new model on the updated data buffer...")
+            start_train_time = time.time()
 
             train_task = TrainTask(
                 output_dir=cycle_dir,
@@ -284,13 +288,15 @@ class RLOrchestrator:
                 cycle_number=self.current_cycle
             )
             model_path, steps = train_task.run_training_loop()
+            total_train_time = time.time() - start_train_time
+            self.state_config['state']['total_hours_training'] += (total_train_time / 3600)
 
             train_task = None
             self.logger.info(f"2. Model has trained successfully for {steps} steps.")
-
-
+            
             # # Step 3. Evaluation
             self.logger.info(f"3. Initiating evaluation by self play for {self.params_config['global']['eval_games']} games against current best model...")
+            start_eval_time = time.time()
 
             evaluation_task = EvaluationTask(
                 output_dir=cycle_dir,
@@ -302,6 +308,11 @@ class RLOrchestrator:
             )
             test_score, best_score = evaluation_task.run_for_n_games(self.params_config['global']['eval_games'])
 
+            total_eval_time = time.time() - start_eval_time
+            self.state_config['state']['total_hours_evaluation'] += (total_eval_time / 3600)
+            self.state_config['state']['total_hours'] = self.state_config['state']['total_hours_data_generation'] + self.state_config['state']['total_hours_training'] + self.state_config['state']['total_hours_evaluation']
+
+            evaluation_task = None
             self.logger.info(f"3. Evaluation finished with result: {test_score}-{best_score}")
 
             # Step 4. Save best model

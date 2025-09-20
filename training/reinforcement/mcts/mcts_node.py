@@ -14,13 +14,17 @@ class MCTSNode:
         self.value_sum = 0.0
         self.prior_probabilities = None
         self.prior_probability_from_parent = 0.0
-        self.is_expanded = False
-        self.is_terminal = False
-        self.is_queued_for_inference = False
+        self.expanded = False
+        self.queued_for_inference = False
 
         # Random action value estimation (RAVE) params
         self.rave_visits = 0
         self.rave_value_sum = 0.0
+
+        # Terminal params
+        self.terminal = False
+        self.forced_outcome = None
+        self.distance_to_mate = None
 
 
     @property
@@ -33,7 +37,7 @@ class MCTSNode:
 
 
     def is_leaf(self) -> bool:
-        return not self.children and not self.is_expanded
+        return not self.children and not self.expanded
 
 
     def is_root(self) -> bool:

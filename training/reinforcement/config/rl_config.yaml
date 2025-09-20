@@ -2,28 +2,28 @@ global:
   total_cycles: 40
   best_model_save_interval: 5
   buffer_file_path: "/Users/hpdev/Projects/talbot/training/reinforcement/rl_cycles/circular_buffer.hdf5"
-  buffer_positions_total: 1024000
-  data_generation_positions_per_cycle: 204800
+  buffer_positions_total: 2048000
+  data_generation_positions_per_cycle: 409600
   data_generation_save_interval: 10240
   eval_games: 400
   eval_cutoff: 0.52
 
 model:
-  best_model_path: "/Users/hpdev/Projects/talbot/training/reinforcement/rl_cycles/best_models/supervised_model.pth"
+  best_model_path: "/Users/hpdev/Projects/talbot/training/reinforcement/rl_cycles/best_models/best_model.pth"
   input_planes: 68
   filters: 128
   resblocks: 20
 
 data_generation:
-  inference_workers: 1
-  game_workers: 10
+  inference_workers: 2
+  game_workers: 22
   batch_size_per_worker: 16
   batch_timeout: 0.001
   cpuct: 2.0
   k_rave: 200
-  search_depth: [800]
+  search_depth: [304]
   search_depth_weights: [1.0]
-  virtual_loss: 0.1
+  virtual_loss: 0.4
   temperature_threshold_move: 24
   temperature_high: 1.0
   temperature_low: 0.0
@@ -54,11 +54,11 @@ evaluation:
   game_workers: 20
   batch_size_per_worker: 16
   batch_timeout: 0.001
-  cpuct: 2.0
+  cpuct: 1.5
   k_rave: 1
   search_depth: [304]
   search_depth_weights: [1.0]
-  virtual_loss: 0.1
+  virtual_loss: 0.4
   opening_book_path: "/Users/hpdev/Projects/talbot/data/opening_books/gm2600.bin"
   opening_moves: 12
   temperature_threshold_move: 0
