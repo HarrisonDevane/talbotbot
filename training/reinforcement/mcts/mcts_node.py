@@ -15,14 +15,13 @@ class MCTSNode:
         self.prior_probabilities = None
         self.prior_probability_from_parent = 0.0
         self.expanded = False
-        self.queued_for_inference = False
+        self.selected = False
 
         # Random action value estimation (RAVE) params
         self.rave_visits = 0
         self.rave_value_sum = 0.0
 
         # Terminal params
-        self.terminal = False
         self.forced_outcome = None
         self.distance_to_mate = None
 

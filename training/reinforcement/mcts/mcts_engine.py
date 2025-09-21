@@ -179,12 +179,19 @@ class MCTSEngine:
                 time_inference += (time_inference_end - time_inference_start)
             
             # Check if root is queued for inference (this handles when all nodes in tree are queued)
-            if self.root.queued_for_inference:
+            if self.root.selected:
                 if len(batch_buffer) > 0:
                     self.inference_queue.put_nowait(batch_buffer)
                     inference_sent += len(batch_buffer)
-                    self.logger.debug(f"[Misc] Pushed a full batch of size {len(batch_buffer)} to inference queue. Inferences sent: {inference_sent}")
+                    self.logger.debug(f"[Misc] Pushed a batch of size {len(batch_buffer)} to inference queue. Inferences sent: {inference_sent}")
                     batch_buffer = []
+
+                # Root is queued + not waiting for inference results -> break
+                # Happens when all nodes are terminal
+                if inference_received >= inference_sent:
+                    self.logger.info(f"Only terminal nodes remaning - breaking MCTS loop")
+                    break
+
                 time.sleep(0.001)
                 continue
 
@@ -194,18 +201,17 @@ class MCTSEngine:
             time_selection_start = time.perf_counter()
             uct = None
 
-            while not node.is_leaf() and node.expanded and not node.queued_for_inference and not node.terminal:
+            while not node.is_leaf() and node.expanded and not node.selected:
                 best_child = None
                 best_uct_score = -float('inf')
                 best_prior_for_tie_break = -1.0
 
-                eligible_children = [(move, child) for move, child in node.children.items() if not (child.queued_for_inference or child.terminal)]
+                eligible_children = [(move, child) for move, child in node.children.items() if not child.selected]
 
                 # UCT selection
                 sqrt_parent_visits_term = math.sqrt(node.visits) if node.visits > 0 else 0.0
 
                 if not eligible_children:
-                    node = None
                     break
 
                 for move, child in eligible_children:
@@ -223,14 +229,16 @@ class MCTSEngine:
             time_selection_end = time.perf_counter()
             time_selection += (time_selection_end - time_selection_start)
 
-            if node in (self.root, None):
-                break
+            if node == self.root:
+                self.logger.info(f"Root chosen - restaring loop")
+                time.sleep(0.001)
+                continue
 
             # Expansion/Simulation: Check for game-over or queue for inference
             if node.board.is_game_over(claim_draw=True):
                 time_expansion_start = time.perf_counter()
                 result = node.board.result(claim_draw=True)
-                node.terminal = True
+                node.selected = True
                 value = 0.0
                 if result == "1-0":
                     value = 1.0 if node.board.turn == chess.WHITE else -1.0
@@ -251,7 +259,7 @@ class MCTSEngine:
             # Otherwise -> queue for inference
             else:
                 time_inference_start = time.perf_counter()
-                node.queued_for_inference = True
+                node.selected = True
                 
                 # Board to tensor conversion
                 numpy_board = utils.board_to_tensor_68(node.board)
@@ -276,23 +284,23 @@ class MCTSEngine:
                 simulation_count += 1
                 self.logger.debug(f"[Misc] Node queued for inference. Simulation count: {simulation_count}, batch size: {len(batch_buffer)}")
 
-                # If all legal children of the parent are now queued, mark parent too
-                time_misc_start = time.perf_counter()
-                current_node = node.parent
+            # If all legal children of the parent are now queued, mark parent too
+            time_misc_start = time.perf_counter()
+            current_node = node.parent
 
-                while current_node is not None:
-                    all_legal_children_queued = all(child.queued_for_inference for child in current_node.children.values())
-                    if all_legal_children_queued:
-                        current_node.queued_for_inference = True
-                        self.logger.debug(f"[Misc] Node {current_node.move} (parent of a fully queued subtree) also marked as queued for inference.")
-                    else:
-                        break
+            while current_node is not None:
+                # If all children have been selected, mark parent as selected too
+                if all(child.selected for child in current_node.children.values()):
+                    current_node.selected = True
+                    self.logger.debug(f"[Misc] Node {current_node.move} (parent of a fully queued subtree) also marked as selected.")
+                else:
+                    break
 
-                    # Move up to the next parent to continue the check
-                    current_node = current_node.parent
+                # Move up to the next parent to continue the check
+                current_node = current_node.parent
 
-                time_misc_end = time.perf_counter()
-                time_misc += (time_misc_end - time_misc_start)
+            time_misc_end = time.perf_counter()
+            time_misc += (time_misc_end - time_misc_start)
 
         
         # Cleanup
@@ -357,7 +365,9 @@ class MCTSEngine:
                 f"Average Value: {-child_node.value_sum / child_node.visits if child_node.visits > 0 else 0.0:.4f}, "
                 f"Rave Visits: {child_node.rave_visits}, "
                 f"Rave Average Value: {-child_node.rave_value_sum / child_node.rave_visits if child_node.rave_visits > 0 else 0.0:.4f}, "
-                f"UCT Score: {uct:.4f}"
+                f"UCT Score: {uct:.4f}, "
+                f"Forced outcome: {child_node.forced_outcome}, "
+                f"Distance to mate: {child_node.distance_to_mate}"
             )
             self.logger.info(log_message)
 
@@ -381,8 +391,6 @@ class MCTSEngine:
         """
 
         self.logger.debug("[Dirichlet Noise] Starting to add noise...")
-        # Clone to ensure original policy_probs_tensor remains unchanged for the calculation
-        # and to match the dtype of node.prior_probabilities
         policy_probs_tensor = node.prior_probabilities.clone() 
         legal_indices = (policy_probs_tensor > 0).nonzero(as_tuple=True)[0]
 
@@ -504,7 +512,6 @@ class MCTSEngine:
                 child_node.prior_probability_from_parent = normalized_priors_list[i]
 
         node.expanded = True
-        node.queued_for_inference = False
 
 
     def _backpropagate_terminal(self, node: MCTSNode, value: float):
@@ -522,7 +529,6 @@ class MCTSEngine:
 
         while current_node is not None:
             # Normal MCTS backpropagation
-            current_node.queued_for_inference = False
             current_node.visits += 1
             current_node.value_sum += value_for_backprop
 
@@ -576,7 +582,7 @@ class MCTSEngine:
 
         while current_node is not None:
             # Normal MCTS backpropagation
-            current_node.queued_for_inference = False
+            current_node.selected = False
             current_node.visits += 1
             current_node.value_sum += value_for_backprop
 

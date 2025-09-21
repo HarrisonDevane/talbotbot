@@ -310,7 +310,6 @@ class RLOrchestrator:
 
             total_eval_time = time.time() - start_eval_time
             self.state_config['state']['total_hours_evaluation'] += (total_eval_time / 3600)
-            self.state_config['state']['total_hours'] = self.state_config['state']['total_hours_data_generation'] + self.state_config['state']['total_hours_training'] + self.state_config['state']['total_hours_evaluation']
 
             evaluation_task = None
             self.logger.info(f"3. Evaluation finished with result: {test_score}-{best_score}")

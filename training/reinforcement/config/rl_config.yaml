@@ -19,9 +19,9 @@ data_generation:
   game_workers: 22
   batch_size_per_worker: 16
   batch_timeout: 0.001
-  cpuct: 2.0
+  cpuct: 1.5
   k_rave: 200
-  search_depth: [304]
+  search_depth: [800]
   search_depth_weights: [1.0]
   virtual_loss: 0.4
   temperature_threshold_move: 24
@@ -31,8 +31,9 @@ data_generation:
   dirichlet_epsilon: 0.3
   early_cutoff_simulations: 100
   early_cutoff_threshold: 0.7
+  draw_cutoff: -0.1
   main_logging_level: 20
-  worker_logging_level: 20
+  worker_logging_level: 50
   inference_logging_level: 20
 
 training:
@@ -56,7 +57,7 @@ evaluation:
   batch_timeout: 0.001
   cpuct: 1.5
   k_rave: 1
-  search_depth: [304]
+  search_depth: [800]
   search_depth_weights: [1.0]
   virtual_loss: 0.4
   opening_book_path: "/Users/hpdev/Projects/talbot/data/opening_books/gm2600.bin"
@@ -68,6 +69,7 @@ evaluation:
   dirichlet_epsilon: 0.0001
   early_cutoff_simulations: 100
   early_cutoff_threshold: 0.7
+  draw_cutoff: -0.1
   main_logging_level: 20
   worker_logging_level: 20
   inference_logging_level: 20
