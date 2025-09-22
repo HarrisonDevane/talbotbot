@@ -12,6 +12,7 @@ class MCTSNode:
         self.children = {}
         self.visits = 0
         self.value_sum = 0.0
+        self.uid = None
         self.prior_probabilities = None
         self.prior_probability_from_parent = 0.0
         self.expanded = False

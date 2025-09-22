@@ -25,7 +25,7 @@ class MCTSEngine:
     pipeline. It submits nodes for batched inference and waits
     for results.
     """
-    def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, k_rave: float, virtual_loss: float, dirichlet_alpha: float, dirichlet_epsilon: float):
+    def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, k_rave: float, virtual_loss: float, dirichlet_alpha: float, dirichlet_epsilon: float, draw_cutoff: float):
         self.logger = logger
         self.worker_batch_size = worker_batch_size
         self.inference_queue = inference_queue
@@ -36,7 +36,11 @@ class MCTSEngine:
         self.virtual_loss = virtual_loss
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
+        self.draw_cutoff = draw_cutoff
+
         self.root = None
+        self.next_uid = 0
+        self.in_flight_nodes = {}
         
         # Set the number of threads for internal PyTorch CPU operations.
         torch.set_num_threads(1)
@@ -119,17 +123,15 @@ class MCTSEngine:
                 try:
                     # Retrieve raw outputs from the queue
                     time_inference_start = time.perf_counter()
-                    move_list, raw_policy_probs, raw_value_output = self.result_queue.get_nowait()
+                    node_uid, raw_policy_probs, raw_value_output = self.result_queue.get_nowait()
+
+                    node = self.in_flight_nodes.pop(node_uid)
                     inference_received += 1
 
                     # Convert dtypes if necessary
                     policy_probs_dtype = torch.float16 if self.use_fp16 else torch.float32
                     policy_probs = raw_policy_probs.to(policy_probs_dtype)
                     value_output = raw_value_output.float().item()
-
-                    node = self.root
-                    for move in move_list:
-                        node = node.children[move]
                     
                     time_inference_end = time.perf_counter()
                     time_inference += (time_inference_end - time_inference_start)
@@ -260,6 +262,9 @@ class MCTSEngine:
             else:
                 time_inference_start = time.perf_counter()
                 node.selected = True
+                node.uid = self.next_uid
+                self.next_uid += 1
+                self.in_flight_nodes[node.uid] = node
                 
                 # Board to tensor conversion
                 numpy_board = utils.board_to_tensor_68(node.board)
@@ -270,8 +275,7 @@ class MCTSEngine:
 
                 board_input = board_input.pin_memory()
 
-                move_list = [n.move for n in path if n.move is not None]
-                batch_buffer.append((self.worker_id, move_list, board_input))
+                batch_buffer.append((self.worker_id, node.uid, board_input))
 
                 time_inference_end = time.perf_counter()
                 time_inference += (time_inference_end - time_inference_start)
@@ -317,17 +321,15 @@ class MCTSEngine:
         # Wait for remaining nodes - this is explicitly acknowledged as a blocking shutdown step
         while inference_received < inference_sent:
             try:
-                move_list, raw_policy_probs, raw_value_output = self.result_queue.get(timeout=0.01)
+                node_uid, raw_policy_probs, raw_value_output = self.result_queue.get(timeout=0.01)
+
+                node = self.in_flight_nodes.pop(node_uid)
                 inference_received += 1
                 
                 policy_probs_dtype = torch.float16 if self.use_fp16 else torch.float32
                 policy_probs = raw_policy_probs.to(policy_probs_dtype)         
                 
                 value_output = raw_value_output.float().item()
-                
-                node = self.root
-                for move in move_list:
-                    node = node.children[move]
                 
                 if not node.expanded:
                     self._expand(node, policy_probs)
@@ -441,11 +443,14 @@ class MCTSEngine:
         when the tree is first created or reset.
         """
         # Cast board input to FP16 if `use_fp16` is true for inference batcher
+        self.root.uid = self.next_uid
+        self.next_uid += 1
+
         board_input = torch.from_numpy(utils.board_to_tensor_68(self.root.board)).float()
         if self.use_fp16:
             board_input = board_input.half()
         board_input = board_input.pin_memory()
-        self.inference_queue.put([(self.worker_id, [], board_input)])
+        self.inference_queue.put([(self.worker_id, self.root.uid, board_input)])
 
         while True:
             try:
@@ -519,7 +524,6 @@ class MCTSEngine:
         Update visit counts and terminal values
         Added recursive minimax for determining DTM and forced game outcomes
         """
-        # Set terminal values
         node.forced_outcome = int(value)
         node.distance_to_mate = 0
 
@@ -536,12 +540,10 @@ class MCTSEngine:
             for child_move, child_node in current_node.children.items():
                 if child_move in path_moves:
                     child_node.rave_visits += 1
-                    child_node.rave_value_sum -= value_for_backprop  # Flip for opponent
+                    child_node.rave_value_sum -= value_for_backprop
 
-            # Add the current node's move *after* using it, so it's not in scope for its own RAVE update
             path_moves.add(current_node.move)
 
-            # Only apply minimax logic if node has children
             if current_node.children:
 
                 # Rule 1: Check for a winning move (any child is a loss for opponent)
@@ -551,8 +553,9 @@ class MCTSEngine:
                     best_win = min(winning_children, key=lambda c: c.distance_to_mate)
                     current_node.distance_to_mate = best_win.distance_to_mate + 1
 
-                # Rule 2: Check for draw (only if no win above)
-                elif all(child.forced_outcome in [0, 1] for child in current_node.children.values()) and any(child.forced_outcome == 0 for child in current_node.children.values()):
+                # Rule 2: Check for draw (only if no win above), and the current position is losing
+                # This is draw by decision. If the bot thinks this position is losing, and a forced draw is available, take the draw
+                elif any(child.forced_outcome == 0 for child in current_node.children.values()) and (current_node.value_sum / current_node.visits < self.draw_cutoff):
                     current_node.forced_outcome = 0
                     current_node.distance_to_mate = 0
 
@@ -563,6 +566,10 @@ class MCTSEngine:
                         current_node.forced_outcome = -1
                         worst_loss = max(losing_children, key=lambda c: c.distance_to_mate)
                         current_node.distance_to_mate = worst_loss.distance_to_mate + 1
+
+                else:
+                    current_node.forced_outcome = None
+                    current_node.distance_to_mate = None
 
 
             # Alternate perspective for next node up
@@ -594,6 +601,14 @@ class MCTSEngine:
 
             # Add the current node's move *after* using it, so it's not in scope for its own RAVE update
             path_moves.add(current_node.move)
+
+            if any(child.forced_outcome == 0 for child in current_node.children.values()) and (current_node.value_sum / current_node.visits < self.draw_cutoff):
+                current_node.forced_outcome = 0
+                current_node.distance_to_mate = 0
+ 
+            elif current_node.forced_outcome not in [1, -1]:
+                current_node.forced_outcome = None
+                current_node.distance_to_mate = None
 
             # Alternate perspective for next node up
             value_for_backprop = -value_for_backprop

@@ -132,11 +132,11 @@ class InferenceBatcher:
             # This should ideally empty quickly if workers are consuming results.
             while pending_results:
                 try:
-                    worker_id, moves, policy, value = pending_results.pop(0)
-                    result_queues[worker_id].put_nowait((moves, policy, value))
+                    worker_id, node_uid, policy, value = pending_results.pop(0)
+                    result_queues[worker_id].put_nowait((node_uid, policy, value))
                 except queue.Full:
                     # If a result queue is full, put the item back and try again later
-                    pending_results.insert(0, (worker_id, moves, policy, value))
+                    pending_results.insert(0, (worker_id, node_uid, policy, value))
                     self.logger.warning(f"Worker {worker_id} result queue is full. Retrying send.")
                     time.sleep(0.001)
                     break
@@ -158,7 +158,7 @@ class InferenceBatcher:
                 # A. Data Preparation (CPU-bound)
                 start_data_prep = time.monotonic()
                 worker_ids = [req[0] for req in requests]
-                moves_list_for_results = [req[1] for req in requests] # Store original move lists
+                node_uid_list_for_results = [req[1] for req in requests] # Store original move lists
                 states_to_process = torch.stack([req[2] for req in requests])
                 
                 data_prep_duration = time.monotonic() - start_data_prep
@@ -195,7 +195,7 @@ class InferenceBatcher:
                 for i, worker_id in enumerate(worker_ids):
                     # Store original worker_id and move_list to return to the correct worker
                     # pending_results will be sent via put_nowait in the next iteration
-                    pending_results.append((worker_ids[i], moves_list_for_results[i], policy_cpu[i], value_cpu[i]))
+                    pending_results.append((worker_ids[i], node_uid_list_for_results[i], policy_cpu[i], value_cpu[i]))
 
                 batch_total_duration = time.monotonic() - batch_process_start_time
                 self.logger.debug(f"Total batch processing loop time: {batch_total_duration:.4f} seconds. (Batch size: {len(requests)})")
