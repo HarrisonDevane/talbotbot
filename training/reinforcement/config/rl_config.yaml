@@ -21,8 +21,8 @@ data_generation:
   batch_timeout: 0.001
   cpuct: 2.0
   k_rave: 200
-  search_depth: [304, 608]
-  search_depth_weights: [0.75, 0.25]
+  search_depth: [800]
+  search_depth_weights: [1.0]
   virtual_loss: 0.5
   temperature_threshold_move: 24
   temperature_high: 1.0
@@ -33,7 +33,7 @@ data_generation:
   early_cutoff_threshold: 0.7
   draw_cutoff: 0.0
   main_logging_level: 20
-  worker_logging_level: 20
+  worker_logging_level: 50
   inference_logging_level: 20
 
 training:
@@ -57,7 +57,7 @@ evaluation:
   batch_timeout: 0.001
   cpuct: 2.0
   k_rave: 1
-  search_depth: [304]
+  search_depth: [800]
   search_depth_weights: [1.0]
   virtual_loss: 0.5
   opening_book_path: "/Users/hpdev/Projects/talbot/data/opening_books/gm2600.bin"

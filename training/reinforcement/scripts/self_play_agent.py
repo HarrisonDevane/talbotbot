@@ -72,7 +72,7 @@ class SelfPlayAgent:
             policy_vector = np.zeros(utils.TOTAL_POLICY_MOVES, dtype=np.float32)
 
             # If a forced win is detected, choose the fastest winning move.
-            if self.mcts.root.forced_outcome == 1:
+            if (self.mcts.root.forced_outcome == 1) and any(c.forced_outcome == -1 for c in self.mcts.root.children.values()):
                 winning_moves = [
                     move for move, child in self.mcts.root.children.items() 
                     if child.forced_outcome == -1
@@ -93,22 +93,38 @@ class SelfPlayAgent:
                 self.logger.info(f"{len(best_winning_moves)} forced win/s in {min_dtm} moves were found.")
 
             # If a position is losing (defined by the average root node value) but has a forced draw available, take the draw.
-            elif self.mcts.root.forced_outcome == 0:
+            elif (self.mcts.root.forced_outcome == 0) and any(c.forced_outcome == 0 for c in self.mcts.root.children.values()):
                 draw_moves = [
-                    move for move, child in self.mcts.root.children.items() 
+                    move for move, child in self.mcts.root.children.items()
                     if child.forced_outcome == 0
                 ]
-                best_move = np.random.choice(draw_moves)
-                prob_per_draw = 1.0 / len(draw_moves)
+
+                # Calculate the average value for each draw move
+                draw_move_values = {}
                 for move in draw_moves:
+                    child = self.mcts.root.children[move]
+                    average_value = child.value_sum / child.visits
+                    draw_move_values[move] = average_value
+
+                # Find the maximum average value
+                max_avg_value = max(draw_move_values.values())
+                best_draw_moves = [
+                    move for move, avg_value in draw_move_values.items()
+                    if abs(avg_value - max_avg_value) < 1e-6
+                ]
+
+                best_move = np.random.choice(best_draw_moves)
+
+                prob_per_move = 1.0 / len(best_draw_moves)
+                for move in best_draw_moves:
                     from_row, from_col, channel = utils.move_to_policy_components(move, self.mcts.root.board)
                     flat_index = utils.policy_components_to_flat_index(from_row, from_col, channel)
-                    policy_vector[flat_index] = prob_per_draw
-                
-                self.logger.info("A forced draw is the best possible outcome.")
+                    policy_vector[flat_index] = prob_per_move
+
+                self.logger.info(f"A forced draw is the best possible outcome. Choosing one of {len(best_draw_moves)} moves with the highest average value ({max_avg_value:.4f}).")
 
             # If a forced loss is detected, choose the move that leads to the longest mate for the opponent.
-            elif self.mcts.root.forced_outcome == -1:
+            elif (self.mcts.root.forced_outcome == -1) and any(c.forced_outcome == 1 for c in self.mcts.root.children.values()):
                 losing_child_for_parent = max(
                     (child for child in self.mcts.root.children.values()),
                     key=lambda c: c.distance_to_mate

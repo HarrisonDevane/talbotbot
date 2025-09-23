@@ -143,8 +143,7 @@ class MCTSEngine:
                         time_expansion += (time_expansion_end - time_expansion_start)
                     
                     time_backpropagation_start = time.perf_counter()
-                    self._virtual_loss(node, is_applying=False)
-                    self._backpropagate_inference(node, value_output)
+                    self._backpropagate(node, value_output, is_terminal=False)
                     time_backpropagation_end = time.perf_counter()
                     time_backpropagation += (time_backpropagation_end - time_backpropagation_start)
                                                 
@@ -251,7 +250,7 @@ class MCTSEngine:
                 time_expansion += (time_expansion_end - time_expansion_start)
 
                 time_backpropagation_start = time.perf_counter()
-                self._backpropagate_terminal(node, value)
+                self._backpropagate(node, value, is_terminal=True)
                 time_backpropagation_end = time.perf_counter()
                 time_backpropagation += (time_backpropagation_end - time_backpropagation_start)
 
@@ -334,8 +333,7 @@ class MCTSEngine:
                 if not node.expanded:
                     self._expand(node, policy_probs)
                 
-                self._virtual_loss(node, is_applying=False)
-                self._backpropagate_inference(node, value_output)                
+                self._backpropagate(node, value_output, is_terminal=False)                
                 self.logger.debug(f"[Backpropagation] Expanding and backpropagating on node during final wait.")
                         
             except queue.Empty:
@@ -450,6 +448,7 @@ class MCTSEngine:
         if self.use_fp16:
             board_input = board_input.half()
         board_input = board_input.pin_memory()
+        self._virtual_loss(self.root, is_applying=True)
         self.inference_queue.put([(self.worker_id, self.root.uid, board_input)])
 
         while True:
@@ -463,7 +462,7 @@ class MCTSEngine:
                 value_output = raw_value_output.float().item()
 
                 self._expand(self.root, policy_probs)
-                self._backpropagate_inference(self.root, value_output)
+                self._backpropagate(self.root, value_output, is_terminal=False)
                 self._add_dirichlet_noise(self.root)
                 break
             except queue.Empty:
@@ -519,77 +518,58 @@ class MCTSEngine:
         node.expanded = True
 
 
-    def _backpropagate_terminal(self, node: MCTSNode, value: float):
+    def _backpropagate_minimax(self, node: MCTSNode):
         """
-        Update visit counts and terminal values
-        Added recursive minimax for determining DTM and forced game outcomes
+        Checks for forced wins, forced losses and draws by decision
         """
-        node.forced_outcome = int(value)
-        node.distance_to_mate = 0
+        if node.children:
+            # Rule 1: Check for a winning move (any child is a loss for opponent)
+            winning_children = [c for c in node.children.values() if c.forced_outcome == -1]
+            if winning_children:
+                node.forced_outcome = 1
+                best_win = min(winning_children, key=lambda c: c.distance_to_mate)
+                node.distance_to_mate = best_win.distance_to_mate + 1
 
-        current_node = node
-        value_for_backprop = value
-        path_moves = set()
+            # Rule 2: Check for draw (only if no win above), and the current position is losing
+            # This is draw by decision. If the bot thinks this position is losing, and a forced draw is available, take the draw
+            elif any(child.forced_outcome == 0 for child in node.children.values()) and (node.value_sum / node.visits <= self.draw_cutoff):
+                node.forced_outcome = 0
+                node.distance_to_mate = 0
 
-        while current_node is not None:
-            # Normal MCTS backpropagation
-            current_node.visits += 1
-            current_node.value_sum += value_for_backprop
-
-            # RAVE update for child moves that appear later in the simulation
-            for child_move, child_node in current_node.children.items():
-                if child_move in path_moves:
-                    child_node.rave_visits += 1
-                    child_node.rave_value_sum -= value_for_backprop
-
-            path_moves.add(current_node.move)
-
-            if current_node.children:
-
-                # Rule 1: Check for a winning move (any child is a loss for opponent)
-                winning_children = [c for c in current_node.children.values() if c.forced_outcome == -1]
-                if winning_children:
-                    current_node.forced_outcome = 1
-                    best_win = min(winning_children, key=lambda c: c.distance_to_mate)
-                    current_node.distance_to_mate = best_win.distance_to_mate + 1
-
-                # Rule 2: Check for draw (only if no win above), and the current position is losing
-                # This is draw by decision. If the bot thinks this position is losing, and a forced draw is available, take the draw
-                elif any(child.forced_outcome == 0 for child in current_node.children.values()) and (current_node.value_sum / current_node.visits < self.draw_cutoff):
-                    current_node.forced_outcome = 0
-                    current_node.distance_to_mate = 0
-
-                # Rule 3: Check for forced loss (only if no win or draw)
-                elif all(c.forced_outcome == 1 for c in current_node.children.values()):
-                    losing_children = [c for c in current_node.children.values() if c.forced_outcome == 1]
-                    if losing_children:
-                        current_node.forced_outcome = -1
-                        worst_loss = max(losing_children, key=lambda c: c.distance_to_mate)
-                        current_node.distance_to_mate = worst_loss.distance_to_mate + 1
-
-                else:
-                    current_node.forced_outcome = None
-                    current_node.distance_to_mate = None
+            # Rule 3: Check for forced loss (only if no win or draw)
+            elif all(c.forced_outcome == 1 for c in node.children.values()):
+                losing_children = [c for c in node.children.values() if c.forced_outcome == 1]
+                if losing_children:
+                    node.forced_outcome = -1
+                    worst_loss = max(losing_children, key=lambda c: c.distance_to_mate)
+                    node.distance_to_mate = worst_loss.distance_to_mate + 1
+            else:
+                node.forced_outcome = None
+                node.distance_to_mate = None 
 
 
-            # Alternate perspective for next node up
-            value_for_backprop = -value_for_backprop
-            current_node = current_node.parent
-
-
-    def _backpropagate_inference(self, node: MCTSNode, value: float):
+    def _backpropagate(self, node: MCTSNode, value: float, is_terminal: bool):
         """
-        Update visit counts and value sums along the path from the node up to the root.
-        Value is from the perspective of the player whose turn it is at 'node.board'.
-        Incorporate Random Action Value Estimation (RAVE).
+        Updates visit counts, value sums, and RAVE values along the path from a node up to the root.
+        Handles both terminal and inference-based backpropagation.
         """
         current_node = node
         value_for_backprop = value
         path_moves = set()
 
+        # If this is the start of a terminal backpropagation, set the initial forced outcome.
+        if is_terminal:
+            current_node.forced_outcome = int(value)
+            current_node.distance_to_mate = 0
+        else:
+            # For inference backpropagation, remove the virtual loss.
+            self._virtual_loss(current_node, is_applying=False)
+
         while current_node is not None:
-            # Normal MCTS backpropagation
-            current_node.selected = False
+            # Standard MCTS updates
+            if not is_terminal:
+                 current_node.selected = False 
+            
             current_node.visits += 1
             current_node.value_sum += value_for_backprop
 
@@ -599,21 +579,14 @@ class MCTSEngine:
                     child_node.rave_visits += 1
                     child_node.rave_value_sum -= value_for_backprop  # Flip for opponent
 
-            # Add the current node's move *after* using it, so it's not in scope for its own RAVE update
             path_moves.add(current_node.move)
-
-            if any(child.forced_outcome == 0 for child in current_node.children.values()) and (current_node.value_sum / current_node.visits < self.draw_cutoff):
-                current_node.forced_outcome = 0
-                current_node.distance_to_mate = 0
- 
-            elif current_node.forced_outcome not in [1, -1]:
-                current_node.forced_outcome = None
-                current_node.distance_to_mate = None
+            
+            # Call the minimax helper to update forced outcomes and DTM
+            self._backpropagate_minimax(current_node)
 
             # Alternate perspective for next node up
             value_for_backprop = -value_for_backprop
             current_node = current_node.parent
-            
 
             
     def _virtual_loss(self, node: MCTSNode, is_applying: bool):
