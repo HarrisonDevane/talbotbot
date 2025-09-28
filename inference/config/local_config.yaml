@@ -7,12 +7,12 @@ game:
   initial_fen: Null
 
 talbot:
-  model_path: "/Users/User/Projects/talbot/training/reinforcement/best_models/best_model.pth"
+  model_path: "/Users/hpdev/Projects/talbot/training/reinforcement/rl_cycles/best_models/best_model.pth"
   input_planes: 68
   filters: 128
   resblocks: 20
-  cpuct: 5.0
-  batchsize: 32
+  cpuct: 2.0
+  batchsize: 16
 
 logging:
   main_logging: True

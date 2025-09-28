@@ -25,13 +25,12 @@ class MCTSEngine:
     pipeline. It submits nodes for batched inference and waits
     for results.
     """
-    def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, k_rave: float, virtual_loss: float, dirichlet_alpha: float, dirichlet_epsilon: float, draw_cutoff: float):
+    def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, virtual_loss: float, dirichlet_alpha: float, dirichlet_epsilon: float, draw_cutoff: float):
         self.logger = logger
         self.worker_batch_size = worker_batch_size
         self.inference_queue = inference_queue
         self.result_queue = result_queue
         self.worker_id = worker_id
-        self.k_rave = k_rave
         self.cpuct = cpuct
         self.virtual_loss = virtual_loss
         self.dirichlet_alpha = dirichlet_alpha
@@ -93,7 +92,7 @@ class MCTSEngine:
             self._expand_root()
 
 
-    def run_simulations(self, search_depth: int, early_cutoff_simulations: int, early_cutoff_threshold: int):
+    def run_simulations(self, search_depth: int):
         """
         Runs a specified number of MCTS simulations. Each simulation involves
         selection, queuing for inference, waiting for a result, and finally
@@ -150,25 +149,6 @@ class MCTSEngine:
                 except queue.Empty:
                     break
 
-            if simulation_count >= early_cutoff_simulations:
-                check_for_cutoff = True
-
-            # Early cutoff if one child dominates
-            if check_for_cutoff:
-                time_misc_start = time.perf_counter()
-                children = list(self.root.children.values())
-                total_visits = sum(child.visits for child in children)
-                if total_visits > 0:
-                    max_visits = max(child.visits for child in children)
-                    if (max_visits / total_visits) > early_cutoff_threshold:
-                        time_misc_end = time.perf_counter()
-                        time_misc += (time_misc_end - time_misc_start)
-                        self.logger.info(f"[Misc] Early cutoff due to a single child having > {early_cutoff_threshold * 100:.1f}% of visits. Visits: {max_visits}/{total_visits}")
-                        break
-
-                time_misc_end = time.perf_counter()
-                time_misc += (time_misc_end - time_misc_start)
-
             # Put batch on queue if worker_batch_size is reached
             if len(batch_buffer) >= self.worker_batch_size:
                 time_inference_start = time.perf_counter()
@@ -202,7 +182,7 @@ class MCTSEngine:
             time_selection_start = time.perf_counter()
             uct = None
 
-            while not node.is_leaf() and node.expanded and not node.selected:
+            while node.children and node.expanded and not node.selected:
                 best_child = None
                 best_uct_score = -float('inf')
                 best_prior_for_tie_break = -1.0
@@ -217,7 +197,7 @@ class MCTSEngine:
 
                 for move, child in eligible_children:
                     prior_prob_for_child = child.prior_probability_from_parent
-                    uct = child.uct_score(self.cpuct, self.k_rave, prior_prob_for_child, sqrt_parent_visits_term)
+                    uct = child.uct_score(self.cpuct, prior_prob_for_child, sqrt_parent_visits_term)
 
                     if uct > best_uct_score or (uct == best_uct_score and prior_prob_for_child > best_prior_for_tie_break):
                         best_uct_score = uct
@@ -304,7 +284,6 @@ class MCTSEngine:
 
             time_misc_end = time.perf_counter()
             time_misc += (time_misc_end - time_misc_start)
-
         
         # Cleanup
         time_shutdown_start = time.perf_counter()
@@ -356,15 +335,13 @@ class MCTSEngine:
         for move, child_node in sorted_children:
             sqrt_parent_visits_term = math.sqrt(child_node.visits) if child_node.visits > 0 else 0.0
             prior_prob = child_node.prior_probability_from_parent
-            uct = child_node.uct_score(self.cpuct, self.k_rave, prior_prob, sqrt_parent_visits_term)
+            uct = child_node.uct_score(self.cpuct, prior_prob, sqrt_parent_visits_term)
 
             log_message = (
                 f"Move: {move.uci()}, "
                 f"Prior Probability: {prior_prob:.4f}, "
                 f"Visits: {child_node.visits}, "
                 f"Average Value: {-child_node.value_sum / child_node.visits if child_node.visits > 0 else 0.0:.4f}, "
-                f"Rave Visits: {child_node.rave_visits}, "
-                f"Rave Average Value: {-child_node.rave_value_sum / child_node.rave_visits if child_node.rave_visits > 0 else 0.0:.4f}, "
                 f"UCT Score: {uct:.4f}, "
                 f"Forced outcome: {child_node.forced_outcome}, "
                 f"Distance to mate: {child_node.distance_to_mate}"
@@ -573,12 +550,6 @@ class MCTSEngine:
             current_node.visits += 1
             current_node.value_sum += value_for_backprop
 
-            # RAVE update for child moves that appear later in the simulation
-            for child_move, child_node in current_node.children.items():
-                if child_move in path_moves:
-                    child_node.rave_visits += 1
-                    child_node.rave_value_sum -= value_for_backprop  # Flip for opponent
-
             path_moves.add(current_node.move)
             
             # Call the minimax helper to update forced outcomes and DTM
@@ -595,22 +566,10 @@ class MCTSEngine:
         """
         multiplier = 1 if is_applying else -1
 
-        action = "Applying" if is_applying else "Removing"
-        self.logger.debug(f"[{action}] virtual loss for move: {node.move}")
-
         current_node = node
-        original_turn = node.board.turn
-        
-        # Also update RAVE values with virtual loss
-        while current_node is not None:
-            current_node.rave_visits += 1 * multiplier
-            current_node.visits += 1 * multiplier
-            
-            if current_node.board.turn == original_turn:
-                current_node.value_sum -= self.virtual_loss * multiplier
-                current_node.rave_value_sum -= self.virtual_loss * multiplier
-            else:
-                current_node.value_sum += self.virtual_loss * multiplier
-                current_node.rave_value_sum += self.virtual_loss * multiplier
 
+        while current_node is not None:
+            current_node.visits += 1 * multiplier
+            current_node.value_sum += self.virtual_loss * multiplier
+                 
             current_node = current_node.parent

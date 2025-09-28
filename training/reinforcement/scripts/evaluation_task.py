@@ -15,7 +15,6 @@ from evaluation_game_worker import EvaluationGameWorker
 from inference_batcher import InferenceBatcher
 
 import chess
-import chess.polyglot
 
 
 class EvaluationTask:
@@ -73,48 +72,47 @@ class EvaluationTask:
     
 
     @staticmethod
-    def _generate_openings(book_path, num_openings, max_depth, logger):
+    def _generate_openings(book_path, num_openings, logger):
         """
-        Generates a specified number of diverse opening lines by first performing a
-        breadth-first search to find unique starting positions, and then for each
-        of those positions, performs a depth-first search to find the most
-        popular continuation.
+        Generates a specified number of diverse opening lines using a Breadth-First 
+        Search (BFS). The search continues until the book runs out or num_openings
+        is reached.
         """
 
-        logger.info(f"Generating top {num_openings} diverse openings (max depth: {max_depth})...")
+        from collections import deque
+        import chess.polyglot
 
-        # --- Phase 1: Find unique starting positions using a BFS ---
-        # This phase stops once it has found num_openings unique positions.
+        logger.info(f"Generating top {num_openings} diverse opening lines, following book depth...")
+
+        # --- BFS to find unique opening lines ---
         
         queue = deque()
-        # Queue stores tuples of (board, move_list)
         queue.append((chess.Board(), [])) 
 
-        unique_start_lines = []
+        final_openings = [] # Stores the completed move lists
         seen_positions = set()
         
-        logger.info(f"Phase 1: Searching for {num_openings} unique starting positions...")
+        logger.info(f"Searching for {num_openings} unique opening lines...")
 
-        while queue and len(unique_start_lines) < num_openings:
+        while queue and len(final_openings) < num_openings:
             board, move_list = queue.popleft()
-            
-            # Use FEN string as a hashable representation of the board state
             fen = board.fen()
-            if fen in seen_positions:
-                continue
             
-            seen_positions.add(fen)
-            unique_start_lines.append(move_list)
-            
-            # Don't explore past the max_depth in this phase
-            if len(move_list) >= max_depth:
+            if fen in seen_positions: 
                 continue
                 
+            seen_positions.add(fen)
+            
+            # Find possible continuations from the book
             with chess.polyglot.open_reader(book_path) as reader:
                 entries = list(reader.find_all(board))
-
             
-            # Add all possible next moves to the queue for BFS exploration
+            has_continuations = len(entries) > 0
+
+            if not has_continuations:
+                final_openings.append(move_list)
+                continue
+                
             for entry in entries:
                 new_board = board.copy()
                 new_board.push(entry.move)
@@ -122,49 +120,8 @@ class EvaluationTask:
                 queue.append((new_board, new_move_list))
 
         
-        logger.info(f"Phase 1 complete: Found {len(unique_start_lines)} unique starting positions.")
-
-        # --- Phase 2: Extend each unique start line to max_depth using a DFS-like approach ---
-        # This phase follows the single most popular move from the book at each step.
-
-        final_openings = []
-        for start_line in unique_start_lines:
-            board = chess.Board()
-            current_line = []
-            
-            # Recreate the starting position for this line
-            for move in start_line:
-                board.push(move)
-                current_line.append(move)
-
-            # Extend the line until max_depth is reached
-            while len(current_line) < max_depth:
-                try:
-                    with chess.polyglot.open_reader(book_path) as reader:
-                        entries = list(reader.find_all(board))
-                except Exception:
-                    # End of a book line, can't continue.
-                    break
-                
-                if not entries:
-                    # No more moves in the book from this position.
-                    break
-
-                # Find the single most popular move by weight
-                entries.sort(key=lambda x: -x.weight)
-                best_move = entries[0].move
-                
-                board.push(best_move)
-                current_line.append(best_move)
-            
-            final_openings.append(current_line)
-
-        # Sort final openings by length (optional, for readability)
-        final_openings.sort(key=len, reverse=True)
-
         logger.info(f"Generated {len(final_openings)} full opening lines successfully.")
         return final_openings
-
 
     @staticmethod
     def _eval_worker_main(
@@ -337,7 +294,6 @@ class EvaluationTask:
         fixed_evaluation_openings = self._generate_openings(
             self.evaluation_config['opening_book_path'],
             num_openings=n_games//2,
-            max_depth=self.evaluation_config['opening_moves'],
             logger=self.main_logger
         )
 

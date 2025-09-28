@@ -53,7 +53,6 @@ class SelfPlayAgent:
                     inference_queue=self.inference_queue,
                     result_queue=self.result_queue,
                     cpuct=self.self_play_config['cpuct'], 
-                    k_rave=self.self_play_config['k_rave'],
                     virtual_loss=self.self_play_config['virtual_loss'],
                     dirichlet_alpha=self.self_play_config['dirichlet_alpha'],
                     dirichlet_epsilon=self.self_play_config['dirichlet_epsilon'],
@@ -66,7 +65,7 @@ class SelfPlayAgent:
             self.logger.info(f"Current player: {self.name}")
             self.logger.info(f"Our last move: {self.our_last_move}. Last move played {last_move_played}")
 
-            simulation_count = self.mcts.run_simulations(search_depth, self.self_play_config['early_cutoff_simulations'], self.self_play_config['early_cutoff_threshold'])
+            simulation_count = self.mcts.run_simulations(search_depth)
 
             best_move = None
             policy_vector = np.zeros(utils.TOTAL_POLICY_MOVES, dtype=np.float32)
@@ -203,7 +202,6 @@ class SelfPlayAgent:
             inference_queue=self.inference_queue,
             result_queue=self.result_queue,
             cpuct=self.self_play_config['cpuct'],
-            k_rave=self.self_play_config['k_rave'],
             virtual_loss=self.self_play_config['virtual_loss'],
             dirichlet_alpha=self.self_play_config['dirichlet_alpha'],
             dirichlet_epsilon=self.self_play_config['dirichlet_epsilon'],
