@@ -53,6 +53,12 @@ coverage.xml
 # Windows thumbnail cache
 Thumbs.db
 
+C compiled code
+Thumbs.db
+build/*
+*.c
+*.pyd
+
 # Model paths
 training/supervised/v1_pol_mvplayed_val_result_nsearch/model/
 training/supervised/v2_pol_mvplayed_val_sfeval/model/

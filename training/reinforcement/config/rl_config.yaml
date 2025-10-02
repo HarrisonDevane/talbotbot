@@ -15,15 +15,16 @@ model:
   resblocks: 20
 
 data_generation:
-  inference_workers: 1
-  game_workers: 2
+  inference_workers: 3
+  game_workers: 24
   batch_size_per_worker: 16
+  batch_size_factor: 6
   batch_timeout: 0.001
   cpuct: 2.0
   search_depth: [800]
   search_depth_weights: [1.0]
   virtual_loss: 0.3
-  temperature_threshold_move: 24
+  temperature_threshold_move: 20
   temperature_high: 1.0
   temperature_low: 0.0
   dirichlet_alpha: 0.25
@@ -51,6 +52,7 @@ training:
 evaluation:
   game_workers: 20
   batch_size_per_worker: 16
+  batch_size_factor: 3
   batch_timeout: 0.001
   cpuct: 2.0
   search_depth: [800]

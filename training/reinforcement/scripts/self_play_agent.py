@@ -1,19 +1,14 @@
-import os
-import sys
+import os, sys
 import numpy as np
 import time
 import chess
 
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
-rl_root = os.path.abspath(os.path.join(current_script_dir, ".."))
 project_root = os.path.abspath(os.path.join(current_script_dir, "../../.."))
-
-sys.path.insert(0, rl_root)
 sys.path.insert(0, project_root)
 
-import src_shared.utils as utils
-from mcts.mcts_engine import MCTSEngine
-
+import src_shared.utils
+from src_shared.mcts_engine import MCTSEngine
 
 class SelfPlayAgent:
     """
@@ -68,7 +63,7 @@ class SelfPlayAgent:
             simulation_count = self.mcts.run_simulations(search_depth)
 
             best_move = None
-            policy_vector = np.zeros(utils.TOTAL_POLICY_MOVES, dtype=np.float32)
+            policy_vector = np.zeros(src_shared.utils.TOTAL_POLICY_MOVES, dtype=np.float32)
 
             # If a forced win is detected, choose the fastest winning move.
             if (self.mcts.root.forced_outcome == 1) and any(c.forced_outcome == -1 for c in self.mcts.root.children.values()):
@@ -85,8 +80,8 @@ class SelfPlayAgent:
                 best_move = np.random.choice(best_winning_moves)
                 prob_per_move = 1.0 / len(best_winning_moves)
                 for move in best_winning_moves:
-                    from_row, from_col, channel = utils.move_to_policy_components(move, self.mcts.root.board)
-                    flat_index = utils.policy_components_to_flat_index(from_row, from_col, channel)
+                    from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
+                    flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                     policy_vector[flat_index] = prob_per_move
                 
                 self.logger.info(f"{len(best_winning_moves)} forced win/s in {min_dtm} moves were found.")
@@ -116,8 +111,8 @@ class SelfPlayAgent:
 
                 prob_per_move = 1.0 / len(best_draw_moves)
                 for move in best_draw_moves:
-                    from_row, from_col, channel = utils.move_to_policy_components(move, self.mcts.root.board)
-                    flat_index = utils.policy_components_to_flat_index(from_row, from_col, channel)
+                    from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
+                    flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                     policy_vector[flat_index] = prob_per_move
 
                 self.logger.info(f"A forced draw is the best possible outcome. Choosing one of {len(best_draw_moves)} moves with the highest average value ({max_avg_value:.4f}).")
@@ -139,8 +134,8 @@ class SelfPlayAgent:
                 
                 prob_per_move = 1.0 / len(longest_mate_moves)
                 for move in longest_mate_moves:
-                    from_row, from_col, channel = utils.move_to_policy_components(move, self.mcts.root.board)
-                    flat_index = utils.policy_components_to_flat_index(from_row, from_col, channel)
+                    from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
+                    flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                     policy_vector[flat_index] = prob_per_move
 
                 self.logger.info(f"Forced loss detected at the root. Selecting move that delays the loss the longest ({losing_child_for_parent.distance_to_mate} moves).")
@@ -174,8 +169,8 @@ class SelfPlayAgent:
                         best_move = moves[np.random.choice(len(moves), p=probabilities)]
                     
                     for move, prob in zip(moves, probabilities):
-                        from_row, from_col, channel = utils.move_to_policy_components(move, self.mcts.root.board)
-                        flat_index = utils.policy_components_to_flat_index(from_row, from_col, channel)
+                        from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
+                        flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                         policy_vector[flat_index] = prob
 
                 self.logger.info("Using standard temperature-based selection and visit counts.")

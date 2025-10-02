@@ -1,16 +1,18 @@
-import os
+import os, sys
 import time
 import logging
-import numpy as np
 import multiprocessing as mp
 import os
 import psutil
 import torch
-from datetime import datetime
+
+current_script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_script_dir, "../../.."))
+sys.path.insert(0, project_root)
 
 from self_play_agent import SelfPlayAgent
 from data_generation_game_worker import DataGenerationGameWorker
-from inference_batcher import InferenceBatcher
+from src_shared.inference_batcher import InferenceBatcher
 
 
 class DataGenerationTask:
@@ -36,7 +38,8 @@ class DataGenerationTask:
 
         # Multi-processing components
         # A list of queues, one for each inference batcher
-        self.inference_queues = [mp.Queue() for _ in range(self.num_inference_batchers)]
+        # Max size prevents stale selection
+        self.inference_queues = [mp.Queue(maxsize=self.num_workers*2) for _ in range(self.num_inference_batchers)]
         # A single queue for each worker process
         self.result_queues = [mp.Queue() for _ in range(self.num_workers)]
         self.data_queue = mp.Queue()
@@ -140,33 +143,39 @@ class DataGenerationTask:
         Starts the multi-process pipeline, yields data in chunks,
         and then terminates the processes gracefully.
         """
-        inference_cores = {12, 13, 14, 15, 28, 29, 30, 31}
-        worker_cores = [i for i in range(32) if i not in inference_cores]
 
+        # Define physical core pairs used for inference (2 hyperthreads each)
+        inference_core_pairs = [(13, 29), (14, 30), (15, 31)]
+        inference_cores = {core for pair in inference_core_pairs for core in pair}
 
-        # Create and start all the inference batcher processes
+        # Remaining logical cores go to self-play workers
+        total_logical_cores = 32
+        worker_cores = sorted(set(range(1, total_logical_cores)) - inference_cores)
+
+        # Start inference batchers
         for i in range(self.num_inference_batchers):
             batcher = InferenceBatcher(
                 f'data_generation_{i}',
                 self.model_config['best_model_path'],
                 self.model_config,
-                self.data_generation_config['batch_size_per_worker'] * self.num_workers,
+                self.data_generation_config['batch_size_per_worker'] * self.num_workers * self.data_generation_config['batch_size_factor'],
                 self.data_generation_config['batch_timeout'],
                 self.output_dir,
                 self.data_generation_config['inference_logging_level']
             )
+            assigned_cores = set(inference_core_pairs[i])  # 1 physical core (2 hyperthreads)
+
             p = mp.Process(
                 target=batcher.run,
-                args=(self.inference_queues[i], self.result_queues, set(sorted(inference_cores)[i*4:(i+1)*4])),
+                args=(self.inference_queues[i], self.result_queues, assigned_cores),
                 daemon=True
             )
             self.inference_processes.append(p)
             p.start()
-            self.main_logger.info(f"Inference batcher process {i} started (PID: {p.pid}).")
+            self.main_logger.info(f"Inference batcher process {i} started (PID: {p.pid}, Cores: {assigned_cores})")
             time.sleep(2)
 
         self.main_logger.info(f"Starting pipeline to generate a chunk of up to {total_positions} positions...")
-
 
 
         # Create and start all the worker processes

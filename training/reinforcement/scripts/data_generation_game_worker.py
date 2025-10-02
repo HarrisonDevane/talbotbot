@@ -1,11 +1,7 @@
 import chess
 import chess.pgn
-import logging
 import random
-import chess.polyglot
 import sys, os
-import math
-import numpy as np
 
 # Assuming these imports are in your project structure
 current_script_dir = os.path.dirname(os.path.abspath(__file__))

@@ -1,20 +1,19 @@
-import os
+import os, sys
 import time
 import logging
-import numpy as np
 import multiprocessing as mp
 import psutil
 import torch
 import queue
-from collections import deque
-from datetime import datetime
+import chess
 
-# Assuming these imports are in your project structure
+current_script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_script_dir, "../../.."))
+sys.path.insert(0, project_root)
+
 from self_play_agent import SelfPlayAgent
 from evaluation_game_worker import EvaluationGameWorker
-from inference_batcher import InferenceBatcher
-
-import chess
+from src_shared.inference_batcher import InferenceBatcher
 
 
 class EvaluationTask:
@@ -38,10 +37,10 @@ class EvaluationTask:
         )
 
         # Multiprocessing components for two models (test and best)
-        self.test_inference_queue = mp.Queue()
+        self.test_inference_queue = mp.Queue(maxsize=self.num_evaluation_workers)
         self.test_result_queues = [mp.Queue() for _ in range(self.num_evaluation_workers)]
         
-        self.best_inference_queue = mp.Queue()
+        self.best_inference_queue = mp.Queue(maxsize=self.num_evaluation_workers)
         self.best_result_queues = [mp.Queue() for _ in range(self.num_evaluation_workers)]
         
         self.game_job_queue = mp.Queue() 
@@ -304,7 +303,7 @@ class EvaluationTask:
             name='eval_test_model',
             model_path=self.test_model_path,
             model_config=self.model_config,
-            batch_size=self.evaluation_config['batch_size_per_worker'] * self.num_evaluation_workers,
+            batch_size=(self.evaluation_config['batch_size_per_worker'] * self.num_evaluation_workers * self.evaluation_config['batch_size_factor']),
             batch_timeout=self.evaluation_config['batch_timeout'],
             log_dir=self.output_dir,
             logging_level=self.evaluation_config['inference_logging_level']
@@ -323,7 +322,7 @@ class EvaluationTask:
             name='eval_best_model',
             model_path=self.best_model_path,
             model_config=self.model_config,
-            batch_size=self.evaluation_config['batch_size_per_worker'] * self.num_evaluation_workers,
+            batch_size=(self.evaluation_config['batch_size_per_worker'] * self.num_evaluation_workers * self.evaluation_config['batch_size_factor']),
             batch_timeout=self.evaluation_config['batch_timeout'],
             log_dir=self.output_dir,
             logging_level=self.evaluation_config['inference_logging_level']
