@@ -48,6 +48,7 @@ class SelfPlayAgent:
                 self.mcts = MCTSEngine(
                     logger=self.logger, 
                     worker_id=self.worker_id,
+                    training=self.self_play_config['training'],
                     worker_batch_size=self.worker_batch_size,
                     inference_queue=self.inference_queue,
                     result_queue=self.result_queue,
@@ -202,6 +203,7 @@ class SelfPlayAgent:
         self.mcts = MCTSEngine(
             logger=self.logger, 
             worker_id=self.worker_id,
+            training=self.self_play_config['training'],
             worker_batch_size=self.worker_batch_size,
             inference_queue=self.inference_queue,
             result_queue=self.result_queue,

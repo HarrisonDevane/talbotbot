@@ -20,7 +20,6 @@ cdef class MCTSNode:
         self.parent = parent
         self.move = move
         self.children = {}
-        self.prior_probabilities = None
         self.forced_outcome = None
         
         # Initialize C-typed numeric values

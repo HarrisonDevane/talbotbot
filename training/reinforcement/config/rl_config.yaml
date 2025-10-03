@@ -15,6 +15,7 @@ model:
   resblocks: 20
 
 data_generation:
+  training: True
   inference_workers: 2
   inference_worker_cores: 
     - [14, 30]
@@ -31,7 +32,7 @@ data_generation:
   temperature_threshold_move: 20
   temperature_high: 1.0
   temperature_low: 0.0
-  dirichlet_alpha: 0.25
+  dirichlet_alpha: 0.05
   dirichlet_epsilon: 0.3
   draw_cutoff: 0.0
   main_logging_level: 20
@@ -54,10 +55,11 @@ training:
   main_logging_level: 20
 
 evaluation:
+  training: False
   inference_worker_cores: 
     - [14, 30]
     - [15, 31]
-  game_workers: 20
+  game_workers: 22
   game_worker_cores: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
   batch_size_per_worker: 16
   batch_size_factor: 4
@@ -70,8 +72,8 @@ evaluation:
   temperature_threshold_move: 0
   temperature_high: 0
   temperature_low: 0
-  dirichlet_alpha: 0.0001
-  dirichlet_epsilon: 0.0001
+  dirichlet_alpha: 0.0
+  dirichlet_epsilon: 0.0
   draw_cutoff: 0.0
   main_logging_level: 20
   worker_logging_level: 20

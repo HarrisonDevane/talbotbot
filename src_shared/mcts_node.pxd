@@ -16,8 +16,6 @@ cdef class MCTSNode:
     # --- FIXES: Attributes that need to be None (CHANGE FROM int TO object) ---
     cdef public object forced_outcome
     cdef public object distance_to_mate
-    
-    cdef public object prior_probabilities
     cdef public object children
     
     # --- C-Typed Method signature accessed by MCTSEngine ---

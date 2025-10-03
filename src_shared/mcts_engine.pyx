@@ -49,6 +49,7 @@ cdef class MCTSEngine:
     cdef public int inference_sent
     cdef public int inference_received
     cdef public bint use_fp16
+    cdef public bint training
     cdef public double dirichlet_alpha
     cdef public double dirichlet_epsilon
 
@@ -74,10 +75,11 @@ cdef class MCTSEngine:
     cdef public object shared_value_buffer
     cdef public object buffer_free_slots
 
-    def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, virtual_loss: float, dirichlet_alpha: float, 
+    def __init__(self, logger: logging.Logger, training: bool, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, virtual_loss: float, dirichlet_alpha: float, 
                 dirichlet_epsilon: float, draw_cutoff: float, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
 
         self.logger = logger
+        self.training = training
         self.worker_batch_size = worker_batch_size
         self.inference_queue = inference_queue
         self.result_queue = result_queue
@@ -165,7 +167,8 @@ cdef class MCTSEngine:
 
         # After updating the root, we check if it's already expanded.
         if self.root.expanded:
-            self._add_dirichlet_noise(self.root)
+            if self.training:
+                self._add_dirichlet_noise(self.root)
         else:
             self.logger.warning("MCTSE Engine: New root node created due to no matching branch or initial state.")
             self.root = MCTSNode_c.MCTSNode(board.copy())
@@ -491,55 +494,41 @@ cdef class MCTSEngine:
 
     cdef _add_dirichlet_noise(self, MCTSNode_c.MCTSNode node):
         """
-        Adds Dirichlet noise to the policy probabilities for the root node,
-        only for legal moves (non-zero probabilities), and adjusts child prior probabilities accordingly.
-        This is done only once at the start of a new search.
+        Adds Dirichlet noise directly to the prior probabilities stored on the 
+        root's children (the legal moves), then updates the children.
         """
         cdef double time_misc_start = time.perf_counter()
-        cdef object policy_probs_tensor, legal_indices, legal_probs_float32, alpha, dirichlet_noise
-        cdef object noisy_legal_probs_float32, noisy_policy_tensor
-        cdef object from_row_t, from_col_t, channel_t
-        cdef list from_row_list, from_col_list, channel_list, noisy_legal_probs_list
-        cdef int i, from_row, from_col, channel
-        cdef object move
+        cdef object child_nodes_list, legal_probs_list, legal_probs_tensor, alpha, dirichlet_noise
+        cdef object noisy_legal_probs_tensor
+        cdef int i
+        cdef MCTSNode_c.MCTSNode child_node
         
-        self.logger.debug("[Dirichlet Noise] Starting to add noise...")
+        self.logger.debug("[Dirichlet Noise] Starting to add noise to root children...")
 
-        policy_probs_tensor = node.prior_probabilities.clone() 
-        legal_indices = (policy_probs_tensor > 0).nonzero(as_tuple=True)[0]
-
-        # Always convert legal_probs to float32 before computations involving Dirichlet distribution
-        legal_probs_float32 = policy_probs_tensor[legal_indices].float() 
-        alpha = torch.full((len(legal_indices),), self.dirichlet_alpha, device=policy_probs_tensor.device, dtype=torch.float32)
+        child_nodes_list_py = list(node.children.values())
+        
+        # Create a Float32 tensor on CPU for the Dirichlet distribution calculation
+        legal_probs_list = [c.prior_probability_from_parent for c in child_nodes_list_py]
+        legal_probs_tensor = torch.tensor(legal_probs_list, dtype=torch.float32)
+        
+        # Generate Dirichlet noise
+        alpha = torch.full((len(legal_probs_list),), self.dirichlet_alpha, dtype=torch.float32)
         dirichlet_noise = torch.distributions.dirichlet.Dirichlet(alpha).sample()
 
-        noisy_legal_probs_float32 = (
-            (1.0 - self.dirichlet_epsilon) * legal_probs_float32 +
+        # Mix the original priors and the noise
+        noisy_legal_probs_tensor = (
+            (1.0 - self.dirichlet_epsilon) * legal_probs_tensor +
             self.dirichlet_epsilon * dirichlet_noise
         )
 
-        noisy_policy_tensor = policy_probs_tensor.clone()
-        noisy_policy_tensor[legal_indices] = noisy_legal_probs_float32.to(noisy_policy_tensor.dtype)
+        # Write the new noisy priors back to the children
+        noisy_legal_probs_list = noisy_legal_probs_tensor.tolist()
 
-        if node.children:
-            from_row_t, from_col_t, channel_t = src_shared.utils.policy_flat_index_to_components_torch(legal_indices)
+        for i in range(len(child_nodes_list_py)):
+            child_node = <MCTSNode_c.MCTSNode>child_nodes_list_py[i] 
+            child_node.prior_probability_from_parent = noisy_legal_probs_list[i]
 
-            from_row_list = from_row_t.tolist()
-            from_col_list = from_col_t.tolist()
-            channel_list = channel_t.tolist()
-            noisy_legal_probs_list = noisy_legal_probs_float32.to(policy_probs_tensor.dtype).tolist()
-
-            for i in range(len(legal_indices)):
-                from_row = from_row_list[i]
-                from_col = from_col_list[i]
-                channel = channel_list[i]
-
-                move = src_shared.utils.policy_components_to_move(from_row, from_col, channel, node.board)
-
-                if move is not None and move in node.children:
-                    node.children[move].prior_probability_from_parent = noisy_legal_probs_list[i]
-
-        self.logger.debug(f"[Dirichlet Noise] Added Dirichlet noise to root")
+        self.logger.debug(f"[Dirichlet Noise] Added Dirichlet noise to root children.")
         self.time_misc += (time.perf_counter() - time_misc_start)
 
 
@@ -576,7 +565,9 @@ cdef class MCTSEngine:
         
         self._expand(self.root, policy_probs)
         self._backpropagate(self.root, value_output, is_terminal=False)
-        self._add_dirichlet_noise(self.root)
+
+        if self.training:
+            self._add_dirichlet_noise(self.root)
 
 
     cpdef _expand(self, MCTSNode_c.MCTSNode node, policy_probs: torch.Tensor):
@@ -603,8 +594,6 @@ cdef class MCTSEngine:
             child_node = MCTSNode_c.MCTSNode(board=None, parent=node, move=move)
             node.children[move] = child_node
             child_nodes_in_order.append(child_node)
-
-        node.prior_probabilities = torch.zeros_like(policy_probs, dtype=policy_probs.dtype)
 
         cdef object normalized_legal_priors_pyobj = None
         cdef cnp.ndarray[cnp.float32_t, ndim=1] prior_array = None
