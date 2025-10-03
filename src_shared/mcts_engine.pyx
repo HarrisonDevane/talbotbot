@@ -45,7 +45,6 @@ cdef class MCTSEngine:
     cdef public double cpuct
     cdef public double virtual_loss
     cdef public double draw_cutoff
-    cdef public int next_uid
     cdef public int simulation_count
     cdef public int inference_sent
     cdef public int inference_received
@@ -69,12 +68,23 @@ cdef class MCTSEngine:
     cdef public object in_flight_nodes
     cdef public object batch_buffer
     cdef public object device
+    cdef public object policy_probs_dtype
+    cdef public object shared_input_buffer
+    cdef public object shared_policy_buffer
+    cdef public object shared_value_buffer
+    cdef public object buffer_free_slots
 
-    def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, virtual_loss: float, dirichlet_alpha: float, dirichlet_epsilon: float, draw_cutoff: float):
+    def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, virtual_loss: float, dirichlet_alpha: float, 
+                dirichlet_epsilon: float, draw_cutoff: float, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+
         self.logger = logger
         self.worker_batch_size = worker_batch_size
         self.inference_queue = inference_queue
         self.result_queue = result_queue
+        self.shared_input_buffer = shared_input_buffer
+        self.shared_policy_buffer = shared_policy_buffer
+        self.shared_value_buffer = shared_value_buffer
+        self.buffer_free_slots = buffer_free_slots
         self.worker_id = worker_id
         self.cpuct = cpuct
         self.virtual_loss = virtual_loss
@@ -83,7 +93,6 @@ cdef class MCTSEngine:
         self.draw_cutoff = draw_cutoff
 
         self.root = None
-        self.next_uid = 0
         self.in_flight_nodes = {}
 
         # Initializing for run simulations method
@@ -107,6 +116,7 @@ cdef class MCTSEngine:
         # Determine the device here to inform data type handling
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.use_fp16 = self.device.type == 'cuda'
+        self.policy_probs_dtype = torch.float16 if self.use_fp16 else torch.float32
 
 
     cpdef set_new_root(self, board: chess.Board, our_move: chess.Move, opponent_move: chess.Move):
@@ -118,25 +128,31 @@ cdef class MCTSEngine:
         cdef MCTSNode_c.MCTSNode new_root         
         cdef object current_our_move = our_move
         cdef object current_opponent_move = opponent_move
+        self.logger.debug("A")
 
         if self.root is None:
             self.logger.info("MCTSEngine: New root node created.")
             self.root = MCTSNode_c.MCTSNode(board.copy())
             self._expand_root()
             return
+
+        self.logger.debug("B")
         
         # If our last move is a child of the root, we update the root to that child.
         if current_our_move and current_our_move in self.root.children:
+            self.logger.debug("C")
             new_root = self.root.children[current_our_move] 
             new_root.move = None
             new_root.parent = None
             self.root = new_root
+            self.logger.debug("D")
 
             self.logger.info(f"MCTSEngine: Root changed to child for our move {current_our_move.uci()}.")
 
             # If opponent move also exists, we further update the root to our move's child node.
             if current_opponent_move:
                 if current_opponent_move in self.root.children:
+                    self.logger.debug("E")
                     new_root = self.root.children[current_opponent_move]
                     new_root.move = None
                     new_root.parent = None
@@ -162,11 +178,10 @@ cdef class MCTSEngine:
         remaining results to complete backpropagation.
         """             
         cdef double time_shutdown_start = time.perf_counter()
-        cdef int node_uid
+        cdef int buffer_index
         cdef object raw_policy_probs, raw_value_output
         cdef MCTSNode_c.MCTSNode node
         cdef double value_output
-        cdef object policy_probs_dtype
         cdef object policy_probs
 
         cdef int batch_buffer_size = len(self.batch_buffer)
@@ -179,22 +194,25 @@ cdef class MCTSEngine:
         # Wait for remaining nodes - this is explicitly acknowledged as a blocking shutdown step
         while self.inference_received < self.inference_sent:
             try:
-                node_uid, raw_policy_probs, raw_value_output = self.result_queue.get(timeout=0.01)
+                buffer_index = self.result_queue.get(timeout=0.01)
 
-                node = self.in_flight_nodes.pop(node_uid)
+                node = self.in_flight_nodes.pop(buffer_index)
                 self.inference_received += 1
-                
-                # Convert dtypes and extract value
-                policy_probs_dtype = torch.float16 if self.use_fp16 else torch.float32
-                policy_probs = raw_policy_probs.to(policy_probs_dtype)
+
+                raw_policy_probs = self.shared_policy_buffer[buffer_index] 
+                raw_value_output = self.shared_value_buffer[buffer_index]
+
+                policy_probs = raw_policy_probs.to(self.policy_probs_dtype)
                 value_output = raw_value_output.item()
+
+                self.buffer_free_slots.put(buffer_index) 
                 
                 if not node.expanded:
                     self._expand(node, policy_probs)
                 
                 self._backpropagate(node, value_output, is_terminal=False)                
                 self.logger.debug(f"[Backpropagation] Expanding and backpropagating on node during final wait.")
-                        
+
             except queue.Empty:
                 self.logger.debug(f"[Misc] Result queue empty during final wait (self.inference_received={self.inference_received}, self.inference_sent={self.inference_sent}). Waiting for more results...")
                 time.sleep(0.01)
@@ -273,27 +291,27 @@ cdef class MCTSEngine:
 
     cdef _retrieve_infernce(self):
         cdef double time_retrieval_start
-        cdef int node_uid
+        cdef int buffer_index
         cdef object raw_policy_probs, raw_value_output
         cdef MCTSNode_c.MCTSNode node
         cdef double value_output
-        cdef object policy_probs_dtype
         cdef object policy_probs
 
         while True:
             try:
                 time_retrieval_start = time.perf_counter()
-                node_uid, raw_policy_probs, raw_value_output = self.result_queue.get_nowait()
+                buffer_index = self.result_queue.get_nowait()
 
-                node = self.in_flight_nodes.pop(node_uid)
+                node = self.in_flight_nodes.pop(buffer_index)
                 self.inference_received += 1
 
-                # Convert dtypes if necessary
-                policy_probs_dtype = torch.float16 if self.use_fp16 else torch.float32
-                policy_probs = raw_policy_probs.to(policy_probs_dtype)
+                raw_policy_probs = self.shared_policy_buffer[buffer_index] 
+                raw_value_output = self.shared_value_buffer[buffer_index]
+
+                policy_probs = raw_policy_probs.to(self.policy_probs_dtype)
                 value_output = raw_value_output.item()
 
-                self.time_retrieval += (time.perf_counter() - time_retrieval_start)
+                self.buffer_free_slots.put(buffer_index) 
 
                 if not node.expanded:
                     self._expand(node, policy_probs)
@@ -370,7 +388,12 @@ cdef class MCTSEngine:
             node = self._select()
 
             if node == self.root:
-                self.logger.info(f"Root chosen - restaring loop")
+                self.logger.debug(f"Root chosen - restaring loop")
+                time.sleep(0.001)
+                continue
+
+            if self.buffer_free_slots.qsize() == 0:
+                self.logger.debug(f"No free buffer indicies")
                 time.sleep(0.001)
                 continue
 
@@ -395,10 +418,10 @@ cdef class MCTSEngine:
             # Otherwise -> queue for inference
             else:
                 time_misc_start = time.perf_counter()
+                buffer_index = self.buffer_free_slots.get() 
                 node.selected = True
-                node.uid = self.next_uid
-                self.next_uid += 1
-                self.in_flight_nodes[node.uid] = node
+                self.in_flight_nodes[buffer_index] = node
+                self.logger.debug(f"Free Nodes: {self.buffer_free_slots.qsize()}")
                 
                 numpy_board = src_shared.utils.board_to_tensor_68(node.board)
                 board_input = torch.from_numpy(numpy_board).float()
@@ -406,8 +429,9 @@ cdef class MCTSEngine:
                 if self.use_fp16:
                     board_input = board_input.half()
 
-                board_input = board_input.pin_memory()
-                self.batch_buffer.append((self.worker_id, node.uid, board_input))
+                self.shared_input_buffer[buffer_index].copy_(board_input)
+    
+                self.batch_buffer.append((self.worker_id, buffer_index))
                 self.time_misc = (time.perf_counter() - time_misc_start) 
                 self._virtual_loss(node, is_applying=True)
 
@@ -432,6 +456,8 @@ cdef class MCTSEngine:
         cdef MCTSNode_c.MCTSNode child_node
         cdef object move_obj
         cdef object log_message
+
+        self.logger.debug(f"Free Nodes: {self.buffer_free_slots.qsize()}")
         
         sorted_children = sorted(self.root.children.items(), key=_visits_key_func, reverse=True)
 
@@ -522,29 +548,32 @@ cdef class MCTSEngine:
         A helper method to perform a single initial expansion of the root node
         when the tree is first created or reset.
         """
-        cdef object board_input, raw_policy_probs, raw_value_output
-        cdef object policy_probs_dtype
+        cdef object board_input, raw_policy_probs
         cdef object policy_probs 
-        cdef double value_output
-        cdef int node_uid_placeholder
+        cdef object raw_value_output
+        cdef int buffer_index
 
-        self.root.uid = self.next_uid
-        self.next_uid += 1
+        buffer_index = self.buffer_free_slots.get() 
 
         board_input = torch.from_numpy(src_shared.utils.board_to_tensor_68(self.root.board)).float()
         if self.use_fp16:
             board_input = board_input.half()
-        board_input = board_input.pin_memory()
+        self.shared_input_buffer[buffer_index].copy_(board_input)
         
         self._virtual_loss(self.root, is_applying=True)
-        self.inference_queue.put([(self.worker_id, self.root.uid, board_input)])
+        self.inference_queue.put([(self.worker_id, buffer_index)])
 
-        node_uid_placeholder, raw_policy_probs, raw_value_output = self.result_queue.get()
-        
-        policy_probs_dtype = torch.float16 if self.use_fp16 else torch.float32
-        policy_probs = raw_policy_probs.to(policy_probs_dtype)
+        buffer_index = self.result_queue.get()
+        self.inference_received += 1
+
+        raw_policy_probs = self.shared_policy_buffer[buffer_index] 
+        raw_value_output = self.shared_value_buffer[buffer_index]
+
+        policy_probs = raw_policy_probs.to(self.policy_probs_dtype)
         value_output = raw_value_output.item()
 
+        self.buffer_free_slots.put(buffer_index) 
+        
         self._expand(self.root, policy_probs)
         self._backpropagate(self.root, value_output, is_terminal=False)
         self._add_dirichlet_noise(self.root)

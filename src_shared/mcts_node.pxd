@@ -17,9 +17,6 @@ cdef class MCTSNode:
     cdef public object forced_outcome
     cdef public object distance_to_mate
     
-    # Check your code and ensure 'uid' is also object if set to None.
-    # Assuming uid is one of the "Python objects" previously declared:
-    cdef public object uid
     cdef public object prior_probabilities
     cdef public object children
     

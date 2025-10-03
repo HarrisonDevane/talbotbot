@@ -13,6 +13,7 @@ sys.path.insert(0, project_root)
 from self_play_agent import SelfPlayAgent
 from data_generation_game_worker import DataGenerationGameWorker
 from src_shared.inference_batcher import InferenceBatcher
+import src_shared.utils
 
 
 class DataGenerationTask:
@@ -30,6 +31,27 @@ class DataGenerationTask:
         # Number of inference batchers to create
         self.num_inference_batchers = data_generation_config['inference_workers']
 
+        self.max_batch_size = self.num_workers * self.data_generation_config['batch_size_per_worker'] * self.data_generation_config['batch_size_factor']
+
+        # Create Global Shared Buffers (Single Instance)
+        # Policy (float16)
+        self.shared_input_buffer = torch.zeros(
+            self.max_batch_size, src_shared.utils.INPUT_CHANNELS, src_shared.utils.BOARD_DIM, src_shared.utils.BOARD_DIM, dtype=torch.float32
+        ).share_memory_()
+
+        self.shared_policy_buffer = torch.zeros(
+            self.max_batch_size, src_shared.utils.TOTAL_POLICY_MOVES, dtype=torch.float16
+        ).share_memory_()
+        # Value (float32)
+        self.shared_value_buffer = torch.zeros(
+            self.max_batch_size, 1, dtype=torch.float32
+        ).share_memory_()
+    
+        # Create Global Free Index Queue
+        self.buffer_free_slots = mp.Queue()
+        for i in range(self.max_batch_size):
+            self.buffer_free_slots.put(i)
+
         self.main_logger = self._setup_logger(
             "SelfPlayManager", 
             self.data_generation_config['main_logging_level'],
@@ -39,7 +61,7 @@ class DataGenerationTask:
         # Multi-processing components
         # A list of queues, one for each inference batcher
         # Max size prevents stale selection
-        self.inference_queues = [mp.Queue(maxsize=self.num_workers*2) for _ in range(self.num_inference_batchers)]
+        self.inference_queues = [mp.Queue() for _ in range(self.num_inference_batchers)]
         # A single queue for each worker process
         self.result_queues = [mp.Queue() for _ in range(self.num_workers)]
         self.data_queue = mp.Queue()
@@ -65,7 +87,7 @@ class DataGenerationTask:
 
 
     @staticmethod
-    def _worker_main(worker_id, core_id, output_dir, inference_queues, result_queue, data_queue, data_generation_config, best_iter, game_number_counter):
+    def _worker_main(worker_id, core_id, output_dir, inference_queues, result_queue, data_queue, data_generation_config, best_iter, game_number_counter, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
         """Target function for a single self-play worker process."""
 
         os.environ["OMP_NUM_THREADS"] = "1"
@@ -101,7 +123,11 @@ class DataGenerationTask:
             self_play_config=data_generation_config,
             worker_id=worker_id,
             inference_queue=inference_queue_for_worker,
-            result_queue=result_queue
+            result_queue=result_queue,
+            shared_input_buffer=shared_input_buffer,
+            shared_policy_buffer=shared_policy_buffer,
+            shared_value_buffer=shared_value_buffer,
+            buffer_free_slots=buffer_free_slots
         )
         
         game_manager = DataGenerationGameWorker(
@@ -144,35 +170,26 @@ class DataGenerationTask:
         and then terminates the processes gracefully.
         """
 
-        # Define physical core pairs used for inference (2 hyperthreads each)
-        inference_core_pairs = [(13, 29), (14, 30), (15, 31)]
-        inference_cores = {core for pair in inference_core_pairs for core in pair}
-
-        # Remaining logical cores go to self-play workers
-        total_logical_cores = 32
-        worker_cores = sorted(set(range(1, total_logical_cores)) - inference_cores)
-
         # Start inference batchers
         for i in range(self.num_inference_batchers):
             batcher = InferenceBatcher(
                 f'data_generation_{i}',
                 self.model_config['best_model_path'],
                 self.model_config,
-                self.data_generation_config['batch_size_per_worker'] * self.num_workers * self.data_generation_config['batch_size_factor'],
+                self.data_generation_config['batch_size_per_worker'] * self.num_workers,
                 self.data_generation_config['batch_timeout'],
                 self.output_dir,
                 self.data_generation_config['inference_logging_level']
             )
-            assigned_cores = set(inference_core_pairs[i])  # 1 physical core (2 hyperthreads)
 
             p = mp.Process(
                 target=batcher.run,
-                args=(self.inference_queues[i], self.result_queues, assigned_cores),
+                args=(self.inference_queues[i], self.result_queues, self.data_generation_config['inference_worker_cores'][i], self.shared_input_buffer, self.shared_policy_buffer, self.shared_value_buffer),
                 daemon=True
             )
             self.inference_processes.append(p)
             p.start()
-            self.main_logger.info(f"Inference batcher process {i} started (PID: {p.pid}, Cores: {assigned_cores})")
+            self.main_logger.info(f"Inference batcher process {i} started (PID: {p.pid}, Cores: {self.data_generation_config['inference_worker_cores'][i]})")
             time.sleep(2)
 
         self.main_logger.info(f"Starting pipeline to generate a chunk of up to {total_positions} positions...")
@@ -182,8 +199,8 @@ class DataGenerationTask:
         for i in range(self.num_workers):
             p = mp.Process(
                 target=DataGenerationTask._worker_main,
-                args=(i, worker_cores[i], self.output_dir, self.inference_queues, self.result_queues[i], self.data_queue,
-                      self.data_generation_config, self.best_iter, self.game_number_counter),
+                args=(i, self.data_generation_config['game_worker_cores'][i], self.output_dir, self.inference_queues, self.result_queues[i], self.data_queue,
+                      self.data_generation_config, self.best_iter, self.game_number_counter, self.shared_input_buffer, self.shared_policy_buffer, self.shared_value_buffer, self.buffer_free_slots),
                 daemon=True
             )
             self.worker_processes.append(p)

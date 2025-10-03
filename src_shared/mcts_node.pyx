@@ -29,7 +29,6 @@ cdef class MCTSNode:
         self.prior_probability_from_parent = 0.0
         
         # Initialize Python object variables to None
-        self.uid = None
         self.distance_to_mate = None
         
         # Initialize C-typed booleans

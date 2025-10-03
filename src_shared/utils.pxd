@@ -3,6 +3,8 @@
 
 # C-level constants (must match internal names in .pyx)
 cdef int _BOARD_DIM
+cdef int _INPUT_CHANNELS
+cdef int _TOTAL_INPUT_SIZE
 cdef int _POLICY_CHANNELS
 cdef int _TOTAL_POLICY_MOVES
 

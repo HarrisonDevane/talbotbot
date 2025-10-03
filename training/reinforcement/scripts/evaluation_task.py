@@ -14,6 +14,7 @@ sys.path.insert(0, project_root)
 from self_play_agent import SelfPlayAgent
 from evaluation_game_worker import EvaluationGameWorker
 from src_shared.inference_batcher import InferenceBatcher
+import src_shared.utils
 
 
 class EvaluationTask:
@@ -29,7 +30,29 @@ class EvaluationTask:
         self.best_model_path = model_config['best_model_path']
 
         self.num_evaluation_workers = self.evaluation_config['game_workers']
-        
+
+        self.max_batch_size = self.num_evaluation_workers * self.evaluation_config['batch_size_per_worker'] * self.evaluation_config['batch_size_factor']
+
+        # Create Global Shared Buffers (Single Instance)
+        # Policy (float16)
+        self.shared_input_buffer = torch.zeros(
+            self.max_batch_size, src_shared.utils.INPUT_CHANNELS, src_shared.utils.BOARD_DIM, src_shared.utils.BOARD_DIM, dtype=torch.float32
+        ).share_memory_()
+
+        self.shared_policy_buffer = torch.zeros(
+            self.max_batch_size, src_shared.utils.TOTAL_POLICY_MOVES, dtype=torch.float16
+        ).share_memory_()
+        # Value (float32)
+        self.shared_value_buffer = torch.zeros(
+            self.max_batch_size, 1, dtype=torch.float32
+        ).share_memory_()
+    
+        # Create Global Free Index Queue
+        self.buffer_free_slots = mp.Queue()
+        for i in range(self.max_batch_size):
+            self.buffer_free_slots.put(i)
+
+
         self.main_logger = self._setup_logger(
             "EvaluationManager", 
             self.evaluation_config['main_logging_level'],
@@ -37,10 +60,10 @@ class EvaluationTask:
         )
 
         # Multiprocessing components for two models (test and best)
-        self.test_inference_queue = mp.Queue(maxsize=self.num_evaluation_workers)
+        self.test_inference_queue = mp.Queue()
         self.test_result_queues = [mp.Queue() for _ in range(self.num_evaluation_workers)]
         
-        self.best_inference_queue = mp.Queue(maxsize=self.num_evaluation_workers)
+        self.best_inference_queue = mp.Queue()
         self.best_result_queues = [mp.Queue() for _ in range(self.num_evaluation_workers)]
         
         self.game_job_queue = mp.Queue() 
@@ -128,8 +151,9 @@ class EvaluationTask:
         current_iter, best_iter,
         game_job_queue, game_result_queue,
         test_inference_queue, test_result_queue_for_this_worker,
-        best_inference_queue, best_result_queue_for_this_worker,
-        test_model_wins_shared, best_model_wins_shared, draws_shared
+        best_inference_queue, best_result_queue_for_this_worker, 
+        shared_input_buffer, shared_policy_buffer, shared_value_buffer,
+        buffer_free_slots, test_model_wins_shared, best_model_wins_shared, draws_shared
     ):
         """Target function for a single evaluation worker process."""
         
@@ -163,7 +187,11 @@ class EvaluationTask:
             self_play_config=evaluation_config,
             worker_id=worker_id,
             inference_queue=best_inference_queue,
-            result_queue=best_result_queue_for_this_worker
+            result_queue=best_result_queue_for_this_worker,
+            shared_input_buffer=shared_input_buffer, 
+            shared_policy_buffer=shared_policy_buffer, 
+            shared_value_buffer=shared_value_buffer,
+            buffer_free_slots=buffer_free_slots
         )
 
         mcts_player_test = SelfPlayAgent(
@@ -172,7 +200,11 @@ class EvaluationTask:
             self_play_config=evaluation_config,
             worker_id=worker_id,
             inference_queue=test_inference_queue,
-            result_queue=test_result_queue_for_this_worker
+            result_queue=test_result_queue_for_this_worker,
+            shared_input_buffer=shared_input_buffer, 
+            shared_policy_buffer=shared_policy_buffer, 
+            shared_value_buffer=shared_value_buffer,
+            buffer_free_slots=buffer_free_slots
         )
         
         game_manager = EvaluationGameWorker(
@@ -287,9 +319,6 @@ class EvaluationTask:
         self.main_logger.info(f"Starting evaluation of new model over {n_games} games with {self.num_evaluation_workers} workers...")
         self.main_logger.info(f"Test Model: Iter {self.current_iter} (path: {self.test_model_path}) vs Best Model: Iter {self.best_iter} (path: {self.best_model_path})")
 
-        inference_cores = {12, 13, 14, 15, 28, 29, 30, 31}
-        worker_cores = [i for i in range(32) if i not in inference_cores]
-
         fixed_evaluation_openings = self._generate_openings(
             self.evaluation_config['opening_book_path'],
             num_openings=n_games//2,
@@ -303,14 +332,14 @@ class EvaluationTask:
             name='eval_test_model',
             model_path=self.test_model_path,
             model_config=self.model_config,
-            batch_size=(self.evaluation_config['batch_size_per_worker'] * self.num_evaluation_workers * self.evaluation_config['batch_size_factor']),
+            batch_size=(self.evaluation_config['batch_size_per_worker'] * self.num_evaluation_workers),
             batch_timeout=self.evaluation_config['batch_timeout'],
             log_dir=self.output_dir,
             logging_level=self.evaluation_config['inference_logging_level']
         )
         self.test_inference_process = mp.Process(
             target=test_batcher.run,
-            args=(self.test_inference_queue, self.test_result_queues, set(sorted(inference_cores)[0*4:(0+1)*4])),
+            args=(self.test_inference_queue, self.test_result_queues, self.evaluation_config['inference_worker_cores'][0], self.shared_input_buffer, self.shared_policy_buffer, self.shared_value_buffer),
             daemon=True
         )
         self.test_inference_process.start()
@@ -322,14 +351,14 @@ class EvaluationTask:
             name='eval_best_model',
             model_path=self.best_model_path,
             model_config=self.model_config,
-            batch_size=(self.evaluation_config['batch_size_per_worker'] * self.num_evaluation_workers * self.evaluation_config['batch_size_factor']),
+            batch_size=(self.evaluation_config['batch_size_per_worker'] * self.num_evaluation_workers),
             batch_timeout=self.evaluation_config['batch_timeout'],
             log_dir=self.output_dir,
             logging_level=self.evaluation_config['inference_logging_level']
         )
         self.best_inference_process = mp.Process(
             target=best_batcher.run,
-            args=(self.best_inference_queue, self.best_result_queues, set(sorted(inference_cores)[1*4:(1+1)*4])),
+            args=(self.best_inference_queue, self.best_result_queues, self.evaluation_config['inference_worker_cores'][1], self.shared_input_buffer, self.shared_policy_buffer, self.shared_value_buffer),
             daemon=True
         )
         self.best_inference_process.start()
@@ -342,21 +371,25 @@ class EvaluationTask:
             p = mp.Process(
                 target=EvaluationTask._eval_worker_main,
                 args=(
-                    i, # worker_id
-                    worker_cores[i],
-                    self.output_dir, # output_dir
-                    self.evaluation_config, # evaluation_config
-                    self.current_iter, # current_iter
-                    self.best_iter, # best_iter
-                    self.game_job_queue, # game_job_queue
-                    self.game_result_queue, # game_result_queue
-                    self.test_inference_queue, # test_inference_queue
-                    self.test_result_queues[i], # test_result_queue_for_this_worker
-                    self.best_inference_queue, # best_inference_queue
-                    self.best_result_queues[i], # best_result_queue_for_this_worker
-                    self.test_model_wins, # test_model_wins_shared
-                    self.best_model_wins, # best_model_wins_shared
-                    self.draws # draws_shared
+                    i,
+                    self.evaluation_config['game_worker_cores'][i],
+                    self.output_dir,
+                    self.evaluation_config,
+                    self.current_iter,
+                    self.best_iter,
+                    self.game_job_queue,
+                    self.game_result_queue,
+                    self.test_inference_queue,
+                    self.test_result_queues[i],
+                    self.best_inference_queue,
+                    self.best_result_queues[i],
+                    self.shared_input_buffer, 
+                    self.shared_policy_buffer, 
+                    self.shared_value_buffer,
+                    self.buffer_free_slots,
+                    self.test_model_wins,
+                    self.best_model_wins, 
+                    self.draws
                 ),
                 daemon=True
             )

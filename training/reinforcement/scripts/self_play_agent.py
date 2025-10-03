@@ -16,7 +16,7 @@ class SelfPlayAgent:
     environment with a central batcher. This class manages the game state
     for a single game worker and communicates with the MCTS instance.
     """
-    def __init__(self, name, logger, self_play_config, worker_id, inference_queue, result_queue):
+    def __init__(self, name, logger, self_play_config, worker_id, inference_queue, result_queue, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
         self.name = name
         self.logger = logger
         self.self_play_config = self_play_config
@@ -26,6 +26,10 @@ class SelfPlayAgent:
         self.inference_queue = inference_queue
         self.result_queue = result_queue
         self.worker_batch_size = self.self_play_config['batch_size_per_worker']
+        self.shared_input_buffer = shared_input_buffer
+        self.shared_policy_buffer = shared_policy_buffer
+        self.shared_value_buffer = shared_value_buffer
+        self.buffer_free_slots = buffer_free_slots
 
         # These are reset each game
         self.mcts = None
@@ -51,7 +55,12 @@ class SelfPlayAgent:
                     virtual_loss=self.self_play_config['virtual_loss'],
                     dirichlet_alpha=self.self_play_config['dirichlet_alpha'],
                     dirichlet_epsilon=self.self_play_config['dirichlet_epsilon'],
-                    draw_cutoff=self.self_play_config['draw_cutoff']
+                    draw_cutoff=self.self_play_config['draw_cutoff'],
+                    shared_input_buffer=self.shared_input_buffer,
+                    shared_policy_buffer=self.shared_policy_buffer,
+                    shared_value_buffer=self.shared_value_buffer,
+                    buffer_free_slots=self.buffer_free_slots
+                    
                 )
                 self.mcts.set_new_root(board.copy(), None, None) 
             else:
@@ -200,6 +209,10 @@ class SelfPlayAgent:
             virtual_loss=self.self_play_config['virtual_loss'],
             dirichlet_alpha=self.self_play_config['dirichlet_alpha'],
             dirichlet_epsilon=self.self_play_config['dirichlet_epsilon'],
-            draw_cutoff=self.self_play_config['draw_cutoff']
+            draw_cutoff=self.self_play_config['draw_cutoff'],
+            shared_input_buffer=self.shared_input_buffer,
+            shared_policy_buffer=self.shared_policy_buffer,
+            shared_value_buffer=self.shared_value_buffer,
+            buffer_free_slots=self.buffer_free_slots
         )
         self.our_last_move = None
