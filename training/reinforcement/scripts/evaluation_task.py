@@ -18,17 +18,16 @@ import src_shared.utils
 
 
 class EvaluationTask:
-    def __init__(self, output_dir, test_model, model_config, evaluation_config, current_iter, best_iter):
+    def __init__(self, output_dir, best_model_path, test_model_path, model_config, evaluation_config, current_iter, best_iter):
         self.output_dir = output_dir
-        self.test_model_path = test_model
+        self.best_model_path = best_model_path
+        self.test_model_path = test_model_path
         self.model_config = model_config
         self.evaluation_config = evaluation_config
         self.current_iter = current_iter
         self.best_iter = best_iter
         
         # Extract best model path from model_config for clarity
-        self.best_model_path = model_config['best_model_path']
-
         self.num_evaluation_workers = self.evaluation_config['game_workers']
 
         self.max_batch_size = self.num_evaluation_workers * self.evaluation_config['batch_size_per_worker'] * self.evaluation_config['batch_size_factor']
@@ -320,7 +319,7 @@ class EvaluationTask:
         self.main_logger.info(f"Test Model: Iter {self.current_iter} (path: {self.test_model_path}) vs Best Model: Iter {self.best_iter} (path: {self.best_model_path})")
 
         fixed_evaluation_openings = self._generate_openings(
-            self.evaluation_config['opening_book_path'],
+            os.path.abspath(os.path.join(project_root, self.evaluation_config['opening_book_path'])),
             num_openings=n_games//2,
             logger=self.main_logger
         )

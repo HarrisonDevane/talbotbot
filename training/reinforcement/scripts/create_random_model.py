@@ -36,4 +36,4 @@ if __name__ == "__main__":
 
     print("Successfully created a new instance of the ChessAIModel class.")
     print("The model's initial state is reproducible due to fixed seed.")
-    torch.save(model.state_dict(), os.path.join(current_script_dir, 'initial_model.pth'))
+    torch.save(model.state_dict(), os.path.join(rl_root, 'rl_cycles', 'initial_model.pth'))

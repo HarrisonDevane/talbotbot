@@ -7,6 +7,7 @@ import psutil
 import torch
 
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
+rl_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 project_root = os.path.abspath(os.path.join(current_script_dir, "../../.."))
 sys.path.insert(0, project_root)
 
@@ -22,8 +23,9 @@ class DataGenerationTask:
     It manages the creation of inference and worker processes, and handles inter-process
     communication via queues.
     """
-    def __init__(self, output_dir, model_config, data_generation_config, best_iter):
+    def __init__(self, output_dir, best_model_path, model_config, data_generation_config, best_iter):
         self.output_dir = output_dir
+        self.best_model_path = best_model_path
         self.model_config = model_config
         self.data_generation_config = data_generation_config
         self.best_iter = best_iter
@@ -174,7 +176,7 @@ class DataGenerationTask:
         for i in range(self.num_inference_batchers):
             batcher = InferenceBatcher(
                 f'data_generation_{i}',
-                self.model_config['best_model_path'],
+                self.best_model_path,
                 self.model_config,
                 self.data_generation_config['batch_size_per_worker'] * self.num_workers,
                 self.data_generation_config['batch_timeout'],

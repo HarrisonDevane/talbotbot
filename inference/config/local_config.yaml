@@ -7,7 +7,7 @@ game:
   initial_fen: Null
 
 talbot:
-  model_path: "/Users/hpdev/Projects/talbot/training/reinforcement/rl_cycles/best_models/best_model.pth"
+  model_path: "training/reinforcement/rl_cycles/best_models/best_model.pth"
   input_planes: 68
   filters: 128
   resblocks: 20

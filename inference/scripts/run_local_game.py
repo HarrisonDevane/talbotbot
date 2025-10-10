@@ -58,7 +58,7 @@ def main():
             white_player=LeelaPlayer()
         case "talbotbot":
             white_player = TalbotbotPlayer(
-                model_path=talbot_config['model_path'],
+                model_path=os.path.abspath(os.path.join(project_root, "training/reinforcement/rl_cycles/best_models/best_model.pth")),
                 logger=logger,
                 num_input_planes=talbot_config['input_planes'],
                 num_residual_blocks=talbot_config['resblocks'],
@@ -79,7 +79,7 @@ def main():
             black_player = LeelaPlayer()
         case "talbotbot":
             black_player = TalbotbotPlayer(
-                model_path=talbot_config['model_path'],
+                model_path=os.path.abspath(os.path.join(project_root, "training/reinforcement/rl_cycles/best_models/best_model.pth")),
                 logger=logger,
                 num_input_planes=talbot_config['input_planes'],
                 num_residual_blocks=talbot_config['resblocks'],

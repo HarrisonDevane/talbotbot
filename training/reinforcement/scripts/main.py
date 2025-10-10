@@ -32,7 +32,7 @@ class RLOrchestrator:
         os.makedirs(RL_CYCLES_DIR, exist_ok=True)
 
         # Get buffer path from the global config file and make it absolute
-        buffer_file_name = self.params_config['global']['buffer_file_path']
+        buffer_file_name = os.path.abspath(os.path.join(RL_CYCLES_DIR, "circular_buffer.hdf5"))
         self.buffer_file_path = buffer_file_name
 
     def _setup_cycle_logger(self, cycle_dir):
@@ -168,7 +168,7 @@ class RLOrchestrator:
                 self.logger.info("Creating new HDF5 datasets for the buffer with explicit chunking.")
                 
                 # Get the batch size from your config
-                batch_size = self.params_config['training']['batch_size']
+                hdf5_chunk_size = self.params_config['training']['hdf5_chunk_size']
                 
                 # Use the shape of the first data chunk to define the rest of the dimensions
                 board_shape = boards.shape[1:]
@@ -180,7 +180,7 @@ class RLOrchestrator:
                                 maxshape=(None, *board_shape), 
                                 dtype=np.float16, 
                                 compression='gzip', 
-                                chunks=(batch_size, *board_shape))
+                                chunks=(hdf5_chunk_size, *board_shape))
                 
                 # Policies are a single dimension
                 hf.create_dataset('policies', 
@@ -188,7 +188,7 @@ class RLOrchestrator:
                                 maxshape=(None, *policy_shape), 
                                 dtype=np.float16, 
                                 compression='gzip', 
-                                chunks=(batch_size, *policy_shape))
+                                chunks=(hdf5_chunk_size, *policy_shape))
                 
                 # Values are a single dimension
                 hf.create_dataset('values', 
@@ -196,7 +196,7 @@ class RLOrchestrator:
                                 maxshape=(None,),
                                 dtype=np.float16, 
                                 compression='gzip', 
-                                chunks=(batch_size,))
+                                chunks=(hdf5_chunk_size,))
                 
                 # Update the new state variables
                 self.state_config['state']['buffer_positions_current'] = len(new_data)
@@ -234,7 +234,7 @@ class RLOrchestrator:
             
             total_positions_for_cycle = self.params_config['global']['data_generation_positions_per_cycle']
             save_interval = self.params_config['global']['data_generation_save_interval']
-            best_model_path = self.params_config['model']['best_model_path']
+            best_model_path = os.path.abspath(os.path.join(RL_CYCLES_DIR, "best_models", "best_model.pth"))
             
             # Get the starting point from the state config
             positions_generated_this_cycle = self.state_config['state']['data_generation_positions_current']
@@ -244,6 +244,7 @@ class RLOrchestrator:
             if remaining_positions_this_cycle > 0:
                 data_generation_task = DataGenerationTask(
                     output_dir=cycle_dir,
+                    best_model_path=best_model_path,
                     model_config=self.params_config['model'],
                     data_generation_config=self.params_config['data_generation'],
                     best_iter = self.state_config['state']['best_model_cycle']
@@ -282,12 +283,13 @@ class RLOrchestrator:
 
             train_task = TrainTask(
                 output_dir=cycle_dir,
+                best_model_path=best_model_path,
                 model_config=self.params_config['model'],
                 training_config=self.params_config['training'],
                 hdf5_path=self.buffer_file_path,
                 cycle_number=self.current_cycle
             )
-            model_path, steps = train_task.run_training_loop()
+            test_model_path, steps = train_task.run_training_loop()
             total_train_time = time.time() - start_train_time
             self.state_config['state']['total_hours_training'] += (total_train_time / 3600)
 
@@ -300,7 +302,8 @@ class RLOrchestrator:
 
             evaluation_task = EvaluationTask(
                 output_dir=cycle_dir,
-                test_model=model_path,
+                best_model_path=best_model_path,
+                test_model_path=test_model_path,
                 model_config=self.params_config['model'],
                 evaluation_config=self.params_config['evaluation'],
                 current_iter = self.current_cycle,
@@ -321,8 +324,8 @@ class RLOrchestrator:
                                 
                 
                 # Override the best model with the new, better model
-                self.logger.info(f"Saving new model from {model_path} to {best_model_path}...")
-                shutil.copy(model_path, best_model_path)
+                self.logger.info(f"Saving new model from {test_model_path} to {best_model_path}...")
+                shutil.copy(test_model_path, best_model_path)
 
                 self.state_config['state']['best_model_updates'] += 1
                 self.state_config['state']['total_training_steps'] += steps
@@ -351,7 +354,7 @@ class RLOrchestrator:
                 shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(rl_dir, f'rl_cycles/backup/state_cycle_{self.current_cycle}.yaml'))
 
             self.current_cycle += 1
-            os.remove(model_path)
+            os.remove(test_model_path)
 
             # Increment loop
             if self.current_cycle < self.total_cycles:
