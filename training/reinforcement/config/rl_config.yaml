@@ -2,7 +2,7 @@ global:
   total_steps: 50000
   stop_cycle: 5
   best_model_save_interval: 5
-  buffer_positions_total: 2048000
+  buffer_positions_total: 1024000
   data_generation_positions_per_cycle: 204800
   data_generation_save_interval: 10240
   eval_games: 400
