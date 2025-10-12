@@ -24,8 +24,8 @@ data_generation:
   batch_size_factor: 4
   batch_timeout: 0.001
   cpuct: 2.5
-  search_depth: [400, 800]
-  search_depth_weights: [0.2, 0.8]
+  search_depth: [400]
+  search_depth_weights: [1.0]
   virtual_loss: 0.3
   temperature_threshold_move: 12
   temperature_high: 1.0
@@ -65,7 +65,7 @@ evaluation:
   batch_size_factor: 4
   batch_timeout: 0.001
   cpuct: 2.0
-  search_depth: [800]
+  search_depth: [400]
   search_depth_weights: [1.0]
   virtual_loss: 0.3
   opening_book_path: "data/opening_books/gm2600.bin"
