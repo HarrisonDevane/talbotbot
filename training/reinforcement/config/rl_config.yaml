@@ -1,8 +1,8 @@
 global:
   total_cycles: 40
   best_model_save_interval: 5
-  buffer_positions_total: 4096000
-  data_generation_positions_per_cycle: 409600
+  buffer_positions_total: 2048000
+  data_generation_positions_per_cycle: 204800
   data_generation_save_interval: 10240
   eval_games: 400
   eval_cutoff: 0.55
@@ -10,7 +10,7 @@ global:
 model:
   input_planes: 68
   filters: 128
-  resblocks: 20
+  resblocks: 16
 
 data_generation:
   training: True
@@ -23,9 +23,9 @@ data_generation:
   batch_size_per_worker: 16
   batch_size_factor: 4
   batch_timeout: 0.001
-  cpuct: 2.0
+  cpuct: 2.5
   search_depth: [400, 800]
-  search_depth_weights: [0.1, 0.9]
+  search_depth_weights: [0.2, 0.8]
   virtual_loss: 0.3
   temperature_threshold_move: 12
   temperature_high: 1.0
@@ -38,16 +38,20 @@ data_generation:
   inference_logging_level: 20
 
 training:
-  batch_size: 4096
+  batch_size: 1024
   io_chunk_size: 1024000
   hdf5_chunk_size: 512
-  training_steps: 250
+  training_steps: 200
+  recency_ratio: 0.3
   policy_loss_weight: 1.0
   value_loss_weight: 1.0
-  log_interval: 10
-  weight_decay: 1e-3
-  cosine_eta_max: 2e-3
-  cosine_eta_min: 1e-4
+  log_interval: 1
+  weight_decay: 1e-4
+  cosine_eta_max: 1e-3
+  cosine_eta_min: 1e-5
+  dropout_rate_conv: 0.1
+  dropout_rate_fc: 0.25
+  dropout_conv_start_block: 8
   main_logging_level: 20
 
 evaluation:

@@ -12,7 +12,6 @@ import random
 import time
 import h5py
 import numpy as np
-import math
 
 # Ensure project root is in path for imports
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -32,10 +31,11 @@ def unwrap_single_batch(batch):
 
 
 class TrainTask:
-    def __init__(self, output_dir: str, best_model_path: str, model_config: dict, training_config: dict, hdf5_path: str, cycle_number: int):
+    def __init__(self, output_dir: str, best_model_path: str, model_config: dict, training_config: dict, state_config: dict, hdf5_path: str, cycle_number: int):
         self.training_config = training_config
         self.best_model_path = best_model_path
         self.model_config = model_config
+        self.state_config = state_config
         self.output_dir = output_dir
         self.hdf5_path = hdf5_path
         self.cycle_number = cycle_number
@@ -68,14 +68,19 @@ class TrainTask:
     def _duplicate_and_shuffle_hdf5(self):
         """
         Creates a globally and locally shuffled HDF5 file from the source.
-        The global shuffle logic processes ALL source batches to ensure maximum
-        randomization, but the destination file is created with a size
-        limited to self.training_config['training_steps'] positions.
-        
-        Corrected structure to prevent [WinError 32] file locking error.
+        The destination size is clamped to min(config_size, source_size).
+        Implements Recency-based PER by ensuring a fixed ratio 
+        of the final training file's batches are sampled from the newest cycle's data,
+        and the remainder are sampled strictly from the older data.
         """
         fixed_steps = self.training_config['training_steps']
+        
+        # Required state variables from the circular buffer
+        write_head_position = self.state_config['buffer_write_head']
+        cycle_positions = self.state_config['data_generation_positions_current'] 
+        
         self.logger.info("Starting HDF5 duplication and shuffle: processing ALL source batches, writing LIMITED steps.")
+        self.logger.info(f"Using Recency PER to ensure {self.training_config['recency_ratio']*100}% of the final file comes from the newest cycle's data.")
 
         base_name, ext = os.path.splitext(os.path.basename(self.hdf5_path))
 
@@ -91,38 +96,103 @@ class TrainTask:
                 
                 total_positions_source = hf_source['inputs'].shape[0]
                 batch_size = self.training_config['batch_size']
-                io_chunk_size = self.io_chunk_size
+                io_chunk_size = self.training_config['io_chunk_size']
+                
                 num_batches_total_source = total_positions_source // batch_size
                 batches_per_io_chunk = io_chunk_size // batch_size
 
-                # Determine the size of the destination file
-                total_positions_to_write = fixed_steps * batch_size
+                # Determine the size of the destination file (Clamped)
+                total_positions_to_write = min(fixed_steps * batch_size, total_positions_source)
+                num_batches_to_write = total_positions_to_write // batch_size
                 
-                self.logger.info(f"Target positions to write: {total_positions_to_write}")
+                self.logger.info(f"Target positions to write: {total_positions_to_write} ({num_batches_to_write} batches)")
 
-                # Step 2: Create destination HDF5 datasets and close immediately
+                 # A. Calculate required samples from Newest and Older data
+                num_new_batches_to_sample = int(num_batches_to_write * self.training_config['recency_ratio'])
+                num_older_batches_to_sample = num_batches_to_write - num_new_batches_to_sample
+                
+                # B. Identify the indices of the Newest Batches (the current cycle's data)
+                num_new_cycle_positions = min(cycle_positions, total_positions_source)
+                
+                # The newest data starts *before* the write head, counting backwards
+                new_data_start_position = (write_head_position - num_new_cycle_positions) % total_positions_source
+                
+                all_source_batch_indices = list(range(num_batches_total_source))
+                new_cycle_batch_indices = []
+                older_batch_indices = []
+                
+                # C. Separate the New Cycle Batches from the Older Batches (Handle wrap-around)
+                for batch_i in all_source_batch_indices:
+                    batch_pos = batch_i * batch_size
+                    is_new_cycle = False
+                    
+                    if write_head_position > new_data_start_position:
+                        # Scenario 1: No wrap-around. Newest data is contiguous.
+                        if new_data_start_position <= batch_pos < write_head_position:
+                            is_new_cycle = True
+                    else:
+                        # Scenario 2: Wrap-around occurred. Newest data is split.
+                        if batch_pos >= new_data_start_position or batch_pos < write_head_position:
+                            is_new_cycle = True
+                            
+                    if is_new_cycle:
+                        new_cycle_batch_indices.append(batch_i)
+                    else:
+                        older_batch_indices.append(batch_i)
+                
+                # D. Sample from the two pools with compensation for small buffer.
+                # 1. Sample what is available from the Older pool, capped by the 70% quota.
+                num_older_to_sample = min(num_older_batches_to_sample, len(older_batch_indices))
+                older_sample_indices = random.sample(older_batch_indices, num_older_to_sample)
+                
+                # 2. Determine the number of batches still needed to hit the target size.
+                batches_needed_after_older = num_batches_to_write - len(older_sample_indices)
+                
+                # The required sample size for the new data is the max of:
+                num_new_to_sample = max(num_new_batches_to_sample, batches_needed_after_older)
+                
+                # 3. Sample from the newest cycle's data (P_new)
+                #    Clamp the final sample size to the amount actually available in the new pool
+                if num_new_to_sample > len(new_cycle_batch_indices):
+                    self.logger.warning(f"Not enough total data available. New sample size reduced from {num_new_to_sample} to available {len(new_cycle_batch_indices)}.")
+
+                num_new_to_sample = min(num_new_to_sample, len(new_cycle_batch_indices))
+                recency_sample_indices = random.sample(new_cycle_batch_indices, num_new_to_sample)
+                
+                # 4. Combine and Global Shuffle
+                all_batch_indices = recency_sample_indices + older_sample_indices
+                random.shuffle(all_batch_indices)
+
+                # E. Logging (for verification)
+                self.logger.info(f"New batches ({self.training_config['recency_ratio']*100}% target): {len(recency_sample_indices)}")
+                self.logger.info(f"Older batches ({round((1 - self.training_config['recency_ratio'])*100)}% target): {len(older_sample_indices)}")
+                self.logger.info(f"Total batches for training file: {len(all_batch_indices)}")
+
+                # Step 2b: Create destination HDF5 datasets and close immediately
                 with h5py.File(temp_path_writing, 'w') as hf_dest:
                     board_shape = hf_source['inputs'].shape[1:]
                     policy_shape = hf_source['policies'].shape[1:]
                     
-                    # Datasets are sized to the limited total_positions_to_write
-                    hf_dest.create_dataset('inputs', shape=(total_positions_to_write, *board_shape), dtype=np.float16, chunks=(batch_size, *board_shape), compression='gzip')
-                    hf_dest.create_dataset('policies', shape=(total_positions_to_write, *policy_shape), dtype=np.float16, chunks=(batch_size, *policy_shape), compression='gzip')
-                    hf_dest.create_dataset('values', shape=(total_positions_to_write,), dtype=np.float16, chunks=(batch_size,), compression='gzip')
+                    # Datasets are sized to the clamped total_positions_to_write
+                    hdf5_chunk_size = self.training_config['hdf5_chunk_size']
+                    hf_dest.create_dataset('inputs', shape=(total_positions_to_write, *board_shape), dtype=np.float16, chunks=(hdf5_chunk_size, *board_shape), compression='gzip')
+                    hf_dest.create_dataset('policies', shape=(total_positions_to_write, *policy_shape), dtype=np.float16, chunks=(hdf5_chunk_size, *policy_shape), compression='gzip')
+                    hf_dest.create_dataset('values', shape=(total_positions_to_write,), dtype=np.float16, chunks=(hdf5_chunk_size,), compression='gzip')
 
-                # Step 3: Shuffle ALL source batch indices globally once
-                all_batch_indices = list(range(num_batches_total_source))
-                random.shuffle(all_batch_indices)
-
+                # Step 3: Global shuffle is complete (all_batch_indices is ready)
+                
                 # Step 4: Open destination file for R/W and process chunks
                 with h5py.File(temp_path_writing, 'r+') as hf_dest:
                     
-                    for io_chunk_idx, start_batch_idx in enumerate(range(0, num_batches_total_source, batches_per_io_chunk)):
+                    # The iteration uses the length of the selected batch list
+                    for io_chunk_idx, start_batch_idx in enumerate(range(0, len(all_batch_indices), batches_per_io_chunk)):
+
+                        self.logger.info(f"Processing IO chunk {io_chunk_idx + 1}")
                         
                         if current_write_position >= total_positions_to_write:
                             break
 
-                        end_batch_idx = min(start_batch_idx + batches_per_io_chunk, num_batches_total_source)
+                        end_batch_idx = min(start_batch_idx + batches_per_io_chunk, len(all_batch_indices))
                         current_batches_source_indices = all_batch_indices[start_batch_idx:end_batch_idx]
 
                         # Read from hf_source (still open)
@@ -164,8 +234,8 @@ class TrainTask:
                             self.logger.info(f"Write limit reached. Wrote final partial chunk of size {write_count}.")
                             break
 
-            os.rename(temp_path_writing, self.shuffled_hdf5_path)
-            self.logger.info(f"Successfully created shuffled HDF5 file with {current_write_position} entries at: {self.shuffled_hdf5_path}")
+                os.rename(temp_path_writing, self.shuffled_hdf5_path)
+                self.logger.info(f"Successfully created shuffled HDF5 file with {current_write_position} entries at: {self.shuffled_hdf5_path}")
 
         except Exception as e:
             self.logger.error(f"Failed to create shuffled HDF5 file: {e}")
@@ -221,7 +291,10 @@ class TrainTask:
             model = ChessAIModel(
                 num_input_planes=self.model_config['input_planes'],
                 num_residual_blocks=self.model_config['resblocks'],
-                num_filters=self.model_config['filters']
+                num_filters=self.model_config['filters'],
+                dropout_rate_conv=self.training_config['dropout_rate_conv'],
+                dropout_rate_fc=self.training_config['dropout_rate_fc'],
+                dropout_conv_start_block=self.training_config['dropout_conv_start_block']
             ).to(self.device)
 
             model.load_state_dict(torch.load(self.best_model_path, map_location=self.device, weights_only=True))      

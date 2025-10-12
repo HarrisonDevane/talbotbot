@@ -5,6 +5,8 @@ import logging
 import numpy as np
 import h5py
 import shutil
+import random
+import torch
 
 # Assuming this import is in your project structure
 from data_generation_task import DataGenerationTask
@@ -14,6 +16,8 @@ from evaluation_task import EvaluationTask
 # --- Configuration Paths ---
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 rl_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
+
+from src_shared.model import ChessAIModel
 
 RL_CYCLES_DIR = os.path.abspath(os.path.join(rl_dir, "rl_cycles"))
 CONFIG_RL_STATE_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_state.yaml"))
@@ -29,11 +33,33 @@ class RLOrchestrator:
         self.current_cycle = self.state_config['state']['current_cycle']
         self.total_cycles = self.params_config['global']['total_cycles']
 
+
+        self.best_model_path = os.path.abspath(os.path.join(RL_CYCLES_DIR, "best_models", "best_model.pth"))
+
+        if not os.path.exists(self.best_model_path):
+            random.seed(42)
+            np.random.seed(42)
+            torch.manual_seed(42)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(42)
+
+            # Create a new, seeded instance of the model
+            model = ChessAIModel(
+                num_input_planes=68,
+                num_residual_blocks=16,
+                num_filters=128
+            )
+
+            torch.save(model.state_dict(), os.path.join(rl_dir, 'rl_cycles', 'best_models', 'initial_model.pth'))
+            torch.save(model.state_dict(), os.path.join(rl_dir, 'rl_cycles', 'best_models', 'best_model.pth'))
+
+
         os.makedirs(RL_CYCLES_DIR, exist_ok=True)
 
         # Get buffer path from the global config file and make it absolute
         buffer_file_name = os.path.abspath(os.path.join(RL_CYCLES_DIR, "circular_buffer.hdf5"))
         self.buffer_file_path = buffer_file_name
+
 
     def _setup_cycle_logger(self, cycle_dir):
         # Create a 'logs' subdirectory within the cycle directory
@@ -124,6 +150,7 @@ class RLOrchestrator:
                     values_dset[current_size : current_size + append_count] = values_to_append
 
                     self.state_config['state']['buffer_positions_current'] = new_size
+                    self.state_config['state']['buffer_write_head'] = new_size
 
                     # Remove appended data from the remaining pool
                     boards_remaining = boards_remaining[append_count:]
@@ -175,31 +202,13 @@ class RLOrchestrator:
                 policy_shape = policies.shape[1:]
                 
                 # Create datasets with an explicit chunk shape
-                hf.create_dataset('inputs', 
-                                data=boards, 
-                                maxshape=(None, *board_shape), 
-                                dtype=np.float16, 
-                                compression='gzip', 
-                                chunks=(hdf5_chunk_size, *board_shape))
-                
-                # Policies are a single dimension
-                hf.create_dataset('policies', 
-                                data=policies, 
-                                maxshape=(None, *policy_shape), 
-                                dtype=np.float16, 
-                                compression='gzip', 
-                                chunks=(hdf5_chunk_size, *policy_shape))
-                
-                # Values are a single dimension
-                hf.create_dataset('values', 
-                                data=values, 
-                                maxshape=(None,),
-                                dtype=np.float16, 
-                                compression='gzip', 
-                                chunks=(hdf5_chunk_size,))
+                hf.create_dataset('inputs', data=boards, maxshape=(None, *board_shape), dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size, *board_shape))
+                hf.create_dataset('policies', data=policies, maxshape=(None, *policy_shape), dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size, *policy_shape))
+                hf.create_dataset('values', data=values, maxshape=(None,),dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size,))
                 
                 # Update the new state variables
                 self.state_config['state']['buffer_positions_current'] = len(new_data)
+                self.state_config['state']['buffer_write_head'] = len(new_data)
                 final_size = len(new_data)
 
         self.logger.info(
@@ -234,7 +243,6 @@ class RLOrchestrator:
             
             total_positions_for_cycle = self.params_config['global']['data_generation_positions_per_cycle']
             save_interval = self.params_config['global']['data_generation_save_interval']
-            best_model_path = os.path.abspath(os.path.join(RL_CYCLES_DIR, "best_models", "best_model.pth"))
             
             # Get the starting point from the state config
             positions_generated_this_cycle = self.state_config['state']['data_generation_positions_current']
@@ -244,7 +252,7 @@ class RLOrchestrator:
             if remaining_positions_this_cycle > 0:
                 data_generation_task = DataGenerationTask(
                     output_dir=cycle_dir,
-                    best_model_path=best_model_path,
+                    best_model_path=self.best_model_path,
                     model_config=self.params_config['model'],
                     data_generation_config=self.params_config['data_generation'],
                     best_iter = self.state_config['state']['best_model_cycle']
@@ -283,9 +291,10 @@ class RLOrchestrator:
 
             train_task = TrainTask(
                 output_dir=cycle_dir,
-                best_model_path=best_model_path,
+                best_model_path=self.best_model_path,
                 model_config=self.params_config['model'],
                 training_config=self.params_config['training'],
+                state_config=self.state_config['state'],
                 hdf5_path=self.buffer_file_path,
                 cycle_number=self.current_cycle
             )
@@ -302,7 +311,7 @@ class RLOrchestrator:
 
             evaluation_task = EvaluationTask(
                 output_dir=cycle_dir,
-                best_model_path=best_model_path,
+                best_model_path=self.best_model_path,
                 test_model_path=test_model_path,
                 model_config=self.params_config['model'],
                 evaluation_config=self.params_config['evaluation'],
@@ -324,8 +333,8 @@ class RLOrchestrator:
                                 
                 
                 # Override the best model with the new, better model
-                self.logger.info(f"Saving new model from {test_model_path} to {best_model_path}...")
-                shutil.copy(test_model_path, best_model_path)
+                self.logger.info(f"Saving new model from {test_model_path} to {self.best_model_path}...")
+                shutil.copy(test_model_path, self.best_model_path)
 
                 self.state_config['state']['best_model_updates'] += 1
                 self.state_config['state']['total_training_steps'] += steps
@@ -345,13 +354,16 @@ class RLOrchestrator:
                 current_best_model = os.path.join(rl_dir, f'rl_cycles/best_models/best_model_iter_{self.current_cycle}.pth')
 
                 self.logger.info(f"Saving current best model to after {self.params_config['global']['best_model_save_interval']} to {current_best_model}")
-                shutil.copy(best_model_path, current_best_model)
+                shutil.copy(self.best_model_path, current_best_model)
 
                 self.logger.info(f"Saving current circular buffer as backup")
                 shutil.copy(self.buffer_file_path, os.path.join(rl_dir, f'rl_cycles/backup/circular_buffer_cycle_{self.current_cycle}.hdf5'))
 
                 self.logger.info(f"Saving current state as backup")
                 shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(rl_dir, f'rl_cycles/backup/state_cycle_{self.current_cycle}.yaml'))
+
+                self.logger.info(f"Saving current config as backup")
+                shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(rl_dir, f'rl_cycles/backup/config_cycle_{self.current_cycle}.yaml'))
 
             self.current_cycle += 1
             os.remove(test_model_path)
