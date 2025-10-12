@@ -31,7 +31,7 @@ class RLOrchestrator:
 
         self.params_config, self.state_config = self._load_configs()
         self.current_cycle = self.state_config['state']['current_cycle']
-        self.total_cycles = self.params_config['global']['total_cycles']
+        self.stop_cycle = self.params_config['global']['stop_cycle']
 
 
         self.best_model_path = os.path.abspath(os.path.join(RL_CYCLES_DIR, "best_models", "best_model.pth"))
@@ -220,7 +220,7 @@ class RLOrchestrator:
         """
         The main orchestration loop.
         """
-        while self.current_cycle <= self.total_cycles:
+        while self.current_cycle <= self.stop_cycle:
             # --- Setup cycle-specific directories and logger ---
             cycle_dir = os.path.join(RL_CYCLES_DIR, f"iteration_{self.current_cycle}")
             os.makedirs(cycle_dir, exist_ok=True)
@@ -231,11 +231,11 @@ class RLOrchestrator:
             # Initial messages are now logged here, inside the first cycle's log
             if self.current_cycle == self.state_config['state']['current_cycle']:
                 self.logger.info(f"Orchestrator initialized. Reading state from: {CONFIG_RL_STATE_FILE}")
-                self.logger.info(f"Last completed cycle: {self.current_cycle}. Total cycles to run: {self.total_cycles - self.current_cycle}.")
+                self.logger.info(f"Last completed cycle: {self.current_cycle}. Total cycles to run: {self.stop_cycle - self.current_cycle}.")
                 self.logger.info(f"Last saved self-play positions: {self.state_config['state']['data_generation_positions_current']}")
                 self.logger.info(f"Current buffer size: {self.state_config['state']['buffer_positions_current']}")
             
-            self.logger.info(f"\n--- Starting RL Cycle {self.current_cycle} (run {self.current_cycle} of {self.total_cycles}) ---")
+            self.logger.info(f"\n--- Starting RL Cycle {self.current_cycle} (run {self.current_cycle} of {self.stop_cycle}) ---")
             self.logger.info(f"Cycle-specific logs will be stored in: {cycle_dir}")
 
             # Step 1: Run self-play data generation in chunks
@@ -295,8 +295,9 @@ class RLOrchestrator:
                 model_config=self.params_config['model'],
                 training_config=self.params_config['training'],
                 state_config=self.state_config['state'],
+                global_config=self.params_config['global'],
                 hdf5_path=self.buffer_file_path,
-                cycle_number=self.current_cycle
+                cycle_number=self.current_cycle,
             )
             test_model_path, steps = train_task.run_training_loop()
             total_train_time = time.time() - start_train_time
@@ -369,7 +370,7 @@ class RLOrchestrator:
             os.remove(test_model_path)
 
             # Increment loop
-            if self.current_cycle < self.total_cycles:
+            if self.current_cycle < self.stop_cycle:
                 self.logger.info(f"Sleeping for 10 seconds before starting cycle {self.current_cycle}...")
                 time.sleep(10)
         

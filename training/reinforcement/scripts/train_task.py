@@ -12,6 +12,7 @@ import random
 import time
 import h5py
 import numpy as np
+import warnings
 
 # Ensure project root is in path for imports
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -31,11 +32,12 @@ def unwrap_single_batch(batch):
 
 
 class TrainTask:
-    def __init__(self, output_dir: str, best_model_path: str, model_config: dict, training_config: dict, state_config: dict, hdf5_path: str, cycle_number: int):
+    def __init__(self, output_dir: str, best_model_path: str, model_config: dict, training_config: dict, state_config: dict, global_config: dict, hdf5_path: str, cycle_number: int):
         self.training_config = training_config
         self.best_model_path = best_model_path
         self.model_config = model_config
         self.state_config = state_config
+        self.global_config = global_config
         self.output_dir = output_dir
         self.hdf5_path = hdf5_path
         self.cycle_number = cycle_number
@@ -277,6 +279,8 @@ class TrainTask:
 
         return train_loader
 
+
+
     def run_training_loop(self):
         best_model_path = None
         
@@ -284,9 +288,9 @@ class TrainTask:
             self._duplicate_and_shuffle_hdf5()
             train_loader = self._get_dataloaders()
             
-            # The total steps are now determined by the size of the DataLoader
-            total_training_steps = len(train_loader) 
-            self.logger.info(f"Total training steps for this run: {total_training_steps}")
+            # The number of steps in the current training file/dataloader
+            total_training_steps_this_cycle = len(train_loader) 
+            self.logger.info(f"Total training steps for this run: {total_training_steps_this_cycle}")
             
             model = ChessAIModel(
                 num_input_planes=self.model_config['input_planes'],
@@ -303,11 +307,48 @@ class TrainTask:
             policy_criterion = nn.KLDivLoss(reduction='batchmean')
             value_criterion = nn.MSELoss()
             
-            optimizer = optim.AdamW(model.parameters(), lr=float(self.training_config['cosine_eta_max']), weight_decay=float(self.training_config['weight_decay']))
+            # Use self.training_config directly for optimizer LR
+            optimizer = optim.AdamW(
+                model.parameters(), 
+                lr=float(self.training_config['cosine_eta_max']), 
+                weight_decay=float(self.training_config['weight_decay'])
+            )
             
-            # T_max is set to the total number of steps/batches
-            scheduler = CosineAnnealingLR(optimizer, T_max=total_training_steps, 
-                                             eta_min=float(self.training_config['cosine_eta_min']))
+            # 1. Warmup Scheduler: Linear increase 
+            warmup_scheduler = optim.lr_scheduler.LinearLR(
+                optimizer, 
+                start_factor=1e-6, 
+                end_factor=1.0,
+                total_iters=self.training_config['warmup_steps']
+            )
+            
+            # 2. Cosine Annealing Scheduler: Decay from LR_MAX down to LR_MIN
+            # T_max is (Total Global Steps) - (Warmup Steps)
+            T_max_cosine = max(1, self.global_config['total_steps'] - self.training_config['warmup_steps'])
+            
+            cosine_scheduler = CosineAnnealingLR(
+                optimizer, 
+                T_max=T_max_cosine, 
+                eta_min=float(self.training_config['cosine_eta_min'])
+            )
+            
+            # 3. Combine schedulers
+            scheduler = optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[self.training_config['warmup_steps']]
+            )
+            
+            # Set the scheduler's initial state for resume training
+            steps_completed = self.state_config['total_training_steps']
+            if steps_completed > 0:
+                self.logger.info(f"Advancing scheduler by {steps_completed} steps.")
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=UserWarning)
+                    for _ in range(steps_completed):
+                        scheduler.step()
+            
+            self.logger.info(f"Initial LR after state restoration: {optimizer.param_groups[0]['lr']:.6f}")
             
             scaler = GradScaler('cuda')
 
@@ -317,6 +358,9 @@ class TrainTask:
             
             # The loop runs for the exact number of batches defined by the temporary HDF5 file
             for batch_idx, (board_tensors, policy_target, value_targets) in enumerate(train_loader):
+                # Calculate the global step count for logging
+                global_step = steps_completed + batch_idx + 1
+                
                 batch_start_time = time.perf_counter()
                 
                 transfer_to_gpu_start = time.perf_counter()
@@ -349,16 +393,16 @@ class TrainTask:
                 backward_pass_end = time.perf_counter()
 
                 scaler.step(optimizer)
+                scheduler.step() 
                 scaler.update()
-                scheduler.step() # Apply LR change for this step
-                
+                            
                 running_total_loss += total_loss.item()
                 
                 batch_end_time = time.perf_counter()
                 
                 # Log detailed info to file at intervals
                 if (batch_idx + 1) % self.training_config['log_interval'] == 0:
-                    self.logger.info(f"Training Step {batch_idx+1}/{total_training_steps}: "
+                    self.logger.info(f"Training Step {batch_idx+1}/{total_training_steps_this_cycle} (Global Step {global_step}/{self.global_config['total_steps']}): "
                                      f"P_Loss={policy_loss.item():.4f}, "
                                      f"V_Loss={value_loss.item():.4f}, "
                                      f"T_Loss={total_loss.item():.4f}, "
@@ -369,20 +413,21 @@ class TrainTask:
                                      f"Batch Total: {(batch_end_time - batch_start_time)*1000:.2f}ms")
 
             avg_total_loss_train = running_total_loss / len(train_loader)
+            training_steps_completed = len(train_loader)
+            
             self.logger.info(f"--- Training Run Summary ---")
-            self.logger.info(f"Total Steps Completed: {total_training_steps}, Average Total Loss: {avg_total_loss_train:.4f}")
+            self.logger.info(f"Total Steps Completed This Cycle: {training_steps_completed}, Average Total Loss: {avg_total_loss_train:.4f}")
             
             # Save the final model after all steps are complete
             final_model_path = os.path.join(self.output_dir, f"model_iter_{self.cycle_number}.pth")
             torch.save(model.state_dict(), final_model_path)
-            self.logger.info(f"Final model after {total_training_steps} steps saved to {final_model_path}")
+            self.logger.info(f"Final model after {training_steps_completed} steps saved to {final_model_path}")
             
             best_model_path = final_model_path
-            training_steps = total_training_steps
             
             self.logger.info("Training complete for this task!")
             
         finally:
             self._clean_up_shuffled_file()
             
-        return best_model_path, training_steps
+        return best_model_path, training_steps_completed
