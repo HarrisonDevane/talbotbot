@@ -266,7 +266,6 @@ class TrainTask:
         train_loader = DataLoader(
             full_dataset,
             batch_size=1,
-            # Shuffle is now handled by the file creation; keep it False for sequential read
             shuffle=False, 
             num_workers=num_workers,
             pin_memory=True,
@@ -313,30 +312,11 @@ class TrainTask:
                 lr=float(self.training_config['cosine_eta_max']), 
                 weight_decay=float(self.training_config['weight_decay'])
             )
-            
-            # 1. Warmup Scheduler: Linear increase 
-            warmup_scheduler = optim.lr_scheduler.LinearLR(
+                    
+            scheduler = CosineAnnealingLR(
                 optimizer, 
-                start_factor=1e-6, 
-                end_factor=1.0,
-                total_iters=self.training_config['warmup_steps']
-            )
-            
-            # 2. Cosine Annealing Scheduler: Decay from LR_MAX down to LR_MIN
-            # T_max is (Total Global Steps) - (Warmup Steps)
-            T_max_cosine = max(1, self.global_config['total_steps'] - self.training_config['warmup_steps'])
-            
-            cosine_scheduler = CosineAnnealingLR(
-                optimizer, 
-                T_max=T_max_cosine, 
+                T_max=self.global_config['total_steps'], 
                 eta_min=float(self.training_config['cosine_eta_min'])
-            )
-            
-            # 3. Combine schedulers
-            scheduler = optim.lr_scheduler.SequentialLR(
-                optimizer,
-                schedulers=[warmup_scheduler, cosine_scheduler],
-                milestones=[self.training_config['warmup_steps']]
             )
             
             # Set the scheduler's initial state for resume training

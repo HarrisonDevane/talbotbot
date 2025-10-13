@@ -2,8 +2,8 @@ global:
   total_steps: 50000
   stop_cycle: 5
   best_model_save_interval: 5
-  buffer_positions_total: 2048000
-  data_generation_positions_per_cycle: 409600
+  buffer_positions_total: 1024000
+  data_generation_positions_per_cycle: 204800
   data_generation_save_interval: 10240
   eval_games: 400
   eval_cutoff: 0.55
@@ -25,8 +25,8 @@ data_generation:
   batch_size_factor: 4
   batch_timeout: 0.001
   cpuct: 2.5
-  search_depth: [400, 800]
-  search_depth_weights: [0.5, 0.5]
+  search_depth: [400]
+  search_depth_weights: [1.0]
   virtual_loss: 0.3
   temperature_threshold_move: 12
   temperature_high: 1.0
@@ -42,7 +42,7 @@ training:
   batch_size: 1024
   io_chunk_size: 1024000
   hdf5_chunk_size: 512
-  training_steps: 400
+  training_steps: 200
   recency_ratio: 0.3
   policy_loss_weight: 1.0
   value_loss_weight: 1.0
@@ -66,7 +66,7 @@ evaluation:
   batch_size_factor: 4
   batch_timeout: 0.001
   cpuct: 2.0
-  search_depth: [800]
+  search_depth: [400]
   search_depth_weights: [1.0]
   virtual_loss: 0.3
   opening_book_path: "data/opening_books/gm2600.bin"
