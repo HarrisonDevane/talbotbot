@@ -10,4 +10,4 @@ state:
   total_hours_evaluation: 0.0
   total_hours_training: 0.0
   total_positions: 0
-  total_training_steps: 0
+  total_training_steps: 8000

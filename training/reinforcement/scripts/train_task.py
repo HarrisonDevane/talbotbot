@@ -68,183 +68,198 @@ class TrainTask:
 
 
     def _duplicate_and_shuffle_hdf5(self):
-        """
-        Creates a globally and locally shuffled HDF5 file from the source.
-        The destination size is clamped to min(config_size, source_size).
-        Implements Recency-based PER by ensuring a fixed ratio 
-        of the final training file's batches are sampled from the newest cycle's data,
-        and the remainder are sampled strictly from the older data.
-        """
-        fixed_steps = self.training_config['training_steps']
-        
-        # Required state variables from the circular buffer
-        write_head_position = self.state_config['buffer_write_head']
-        cycle_positions = self.state_config['data_generation_positions_current'] 
-        
-        self.logger.info("Starting HDF5 duplication and shuffle: processing ALL source batches, writing LIMITED steps.")
-        self.logger.info(f"Using Recency PER to ensure {self.training_config['recency_ratio']*100}% of the final file comes from the newest cycle's data.")
+            """
+            Creates a globally and locally shuffled HDF5 file from the source.
+            The destination size is clamped to min(config_size, source_size).
+            Implements Recency-based PER (if enabled) or uniform sampling (if disabled).
+            
+            The method samples indices in units of hdf5_chunk_size, groups them into 
+            large I/O blocks (io_chunk_size) for local shuffling, and writes them
+            using batch_size for destination file chunking.
+            """
+            fixed_steps = self.training_config['training_steps']
+            recency_enabled = self.training_config['recency_priority']
+            
+            # Required state variables from the circular buffer
+            write_head_position = self.state_config['buffer_write_head']
+            cycle_positions = self.state_config['data_generation_positions_current'] 
+            
+            sampling_mode = "Recency-based PER" if recency_enabled else "Uniform Sampling"
+            self.logger.info(f"Starting HDF5 duplication and shuffle using: {sampling_mode}.")
 
-        base_name, ext = os.path.splitext(os.path.basename(self.hdf5_path))
+            base_name, ext = os.path.splitext(os.path.basename(self.hdf5_path))
+            temp_file_name = f"{base_name}_shuffled_temp_{os.getpid()}{ext}"
+            self.shuffled_hdf5_path = os.path.join(os.path.dirname(self.hdf5_path), temp_file_name)
+            temp_path_writing = f"{self.shuffled_hdf5_path}.tmp"
+            
+            current_write_position = 0 
+            all_chunk_indices = [] # Renamed to reflect the HDF5 chunk as the unit
 
-        temp_file_name = f"{base_name}_shuffled_temp_{os.getpid()}{ext}"
-        self.shuffled_hdf5_path = os.path.join(os.path.dirname(self.hdf5_path), temp_file_name)
-        temp_path_writing = f"{self.shuffled_hdf5_path}.tmp"
-        
-        current_write_position = 0 
-        
-        try:
-            # Step 1: Keep the source file open for the duration of reading
-            with h5py.File(self.hdf5_path, 'r') as hf_source:
-                
-                total_positions_source = hf_source['inputs'].shape[0]
-                batch_size = self.training_config['batch_size']
-                io_chunk_size = self.training_config['io_chunk_size']
-                
-                num_batches_total_source = total_positions_source // batch_size
-                batches_per_io_chunk = io_chunk_size // batch_size
-
-                # Determine the size of the destination file (Clamped)
-                total_positions_to_write = min(fixed_steps * batch_size, total_positions_source)
-                num_batches_to_write = total_positions_to_write // batch_size
-                
-                self.logger.info(f"Target positions to write: {total_positions_to_write} ({num_batches_to_write} batches)")
-
-                 # A. Calculate required samples from Newest and Older data
-                num_new_batches_to_sample = int(num_batches_to_write * self.training_config['recency_ratio'])
-                num_older_batches_to_sample = num_batches_to_write - num_new_batches_to_sample
-                
-                # B. Identify the indices of the Newest Batches (the current cycle's data)
-                num_new_cycle_positions = min(cycle_positions, total_positions_source)
-                
-                # The newest data starts *before* the write head, counting backwards
-                new_data_start_position = (write_head_position - num_new_cycle_positions) % total_positions_source
-                
-                all_source_batch_indices = list(range(num_batches_total_source))
-                new_cycle_batch_indices = []
-                older_batch_indices = []
-                
-                # C. Separate the New Cycle Batches from the Older Batches (Handle wrap-around)
-                for batch_i in all_source_batch_indices:
-                    batch_pos = batch_i * batch_size
-                    is_new_cycle = False
+            try:
+                # Step 1: Keep the source file open for the duration of reading
+                with h5py.File(self.hdf5_path, 'r') as hf_source:
                     
-                    if write_head_position > new_data_start_position:
-                        # Scenario 1: No wrap-around. Newest data is contiguous.
-                        if new_data_start_position <= batch_pos < write_head_position:
-                            is_new_cycle = True
-                    else:
-                        # Scenario 2: Wrap-around occurred. Newest data is split.
-                        if batch_pos >= new_data_start_position or batch_pos < write_head_position:
-                            is_new_cycle = True
+                    total_positions_source = hf_source['inputs'].shape[0]
+                    batch_size = self.training_config['batch_size']          # E.g., 1024 (Output Chunking)
+                    hdf5_chunk_size = self.training_config['hdf5_chunk_size'] # E.g., 16 (Sampling Unit)
+                    io_chunk_size = self.training_config['io_chunk_size']    # E.g., 1024000 (I/O Unit)
+
+                    num_sampling_chunks_total_source = total_positions_source // hdf5_chunk_size
+                    chunks_per_io_chunk = io_chunk_size // hdf5_chunk_size 
+                    
+                    total_positions_to_write = min(fixed_steps * batch_size, total_positions_source)
+                    num_sampling_chunks_to_write = total_positions_to_write // hdf5_chunk_size
+                    
+                    self.logger.info(f"Target positions to write: {total_positions_to_write} ({num_sampling_chunks_to_write} HDF5 chunks)")
+                    
+                    if recency_enabled:
+                        # A. Calculate required samples from Newest and Older data (in units of HDF5 chunks)
+                        num_new_chunks_to_sample = int(num_sampling_chunks_to_write * self.training_config['recency_ratio'])
+                        num_older_chunks_to_sample = num_sampling_chunks_to_write - num_new_chunks_to_sample
+                        
+                        # B. Identify the indices of the Newest Chunks (the current cycle's data)
+                        num_new_cycle_positions = min(cycle_positions, total_positions_source)
+                        
+                        # Ensure position is aligned with chunk size before calculating start index
+                        if num_new_cycle_positions % hdf5_chunk_size != 0:
+                            num_new_cycle_positions -= num_new_cycle_positions % hdf5_chunk_size
+
+                        # The newest data starts *before* the write head, counting backwards
+                        new_data_start_position = (write_head_position - num_new_cycle_positions) % total_positions_source
+                        
+                        all_source_chunk_indices = list(range(num_sampling_chunks_total_source)) # HDF5 chunk indices
+                        new_cycle_chunk_indices = []
+                        older_chunk_indices = []
+                        
+                        # C. Separate the New Cycle Chunks from the Older Chunks (Handle wrap-around)
+                        for chunk_i in all_source_chunk_indices:
+                            chunk_pos = chunk_i * hdf5_chunk_size # Use hdf5_chunk_size for position check
+                            is_new_cycle = False
                             
-                    if is_new_cycle:
-                        new_cycle_batch_indices.append(batch_i)
+                            if write_head_position > new_data_start_position:
+                                # Scenario 1: No wrap-around. Newest data is contiguous.
+                                if new_data_start_position <= chunk_pos < write_head_position:
+                                    is_new_cycle = True
+                            else:
+                                # Scenario 2: Wrap-around occurred. Newest data is split.
+                                if chunk_pos >= new_data_start_position or chunk_pos < write_head_position:
+                                    is_new_cycle = True
+                                    
+                            if is_new_cycle:
+                                new_cycle_chunk_indices.append(chunk_i)
+                            else:
+                                older_chunk_indices.append(chunk_i)
+                        
+                        # D. Sample from the two pools with compensation for small buffer.
+                        num_older_to_sample = min(num_older_chunks_to_sample, len(older_chunk_indices))
+                        older_sample_indices = random.sample(older_chunk_indices, num_older_to_sample)
+                        
+                        chunks_needed_after_older = num_sampling_chunks_to_write - len(older_sample_indices)
+                        num_new_to_sample = max(num_new_chunks_to_sample, chunks_needed_after_older)
+                        
+                        if num_new_to_sample > len(new_cycle_chunk_indices):
+                            self.logger.warning(f"Not enough total data available. New sample size reduced from {num_new_to_sample} to available {len(new_cycle_chunk_indices)}.")
+
+                        num_new_to_sample = min(num_new_to_sample, len(new_cycle_chunk_indices))
+                        recency_sample_indices = random.sample(new_cycle_chunk_indices, num_new_to_sample)
+                        
+                        # 4. Combine and Global Shuffle
+                        all_chunk_indices = recency_sample_indices + older_sample_indices
+                        random.shuffle(all_chunk_indices)
+                        
+                        # E. Logging (for verification)
+                        self.logger.info(f"New chunks ({self.training_config['recency_ratio']*100}% target): {len(recency_sample_indices)}")
+                        self.logger.info(f"Older chunks ({round((1 - self.training_config['recency_ratio'])*100)}% target): {len(older_sample_indices)}")
+
+
                     else:
-                        older_batch_indices.append(batch_i)
-                
-                # D. Sample from the two pools with compensation for small buffer.
-                # 1. Sample what is available from the Older pool, capped by the 70% quota.
-                num_older_to_sample = min(num_older_batches_to_sample, len(older_batch_indices))
-                older_sample_indices = random.sample(older_batch_indices, num_older_to_sample)
-                
-                # 2. Determine the number of batches still needed to hit the target size.
-                batches_needed_after_older = num_batches_to_write - len(older_sample_indices)
-                
-                # The required sample size for the new data is the max of:
-                num_new_to_sample = max(num_new_batches_to_sample, batches_needed_after_older)
-                
-                # 3. Sample from the newest cycle's data (P_new)
-                #    Clamp the final sample size to the amount actually available in the new pool
-                if num_new_to_sample > len(new_cycle_batch_indices):
-                    self.logger.warning(f"Not enough total data available. New sample size reduced from {num_new_to_sample} to available {len(new_cycle_batch_indices)}.")
-
-                num_new_to_sample = min(num_new_to_sample, len(new_cycle_batch_indices))
-                recency_sample_indices = random.sample(new_cycle_batch_indices, num_new_to_sample)
-                
-                # 4. Combine and Global Shuffle
-                all_batch_indices = recency_sample_indices + older_sample_indices
-                random.shuffle(all_batch_indices)
-
-                # E. Logging (for verification)
-                self.logger.info(f"New batches ({self.training_config['recency_ratio']*100}% target): {len(recency_sample_indices)}")
-                self.logger.info(f"Older batches ({round((1 - self.training_config['recency_ratio'])*100)}% target): {len(older_sample_indices)}")
-                self.logger.info(f"Total batches for training file: {len(all_batch_indices)}")
-
-                # Step 2b: Create destination HDF5 datasets and close immediately
-                with h5py.File(temp_path_writing, 'w') as hf_dest:
-                    board_shape = hf_source['inputs'].shape[1:]
-                    policy_shape = hf_source['policies'].shape[1:]
-                    
-                    # Datasets are sized to the clamped total_positions_to_write
-                    hdf5_chunk_size = self.training_config['hdf5_chunk_size']
-                    hf_dest.create_dataset('inputs', shape=(total_positions_to_write, *board_shape), dtype=np.float16, chunks=(hdf5_chunk_size, *board_shape), compression='gzip')
-                    hf_dest.create_dataset('policies', shape=(total_positions_to_write, *policy_shape), dtype=np.float16, chunks=(hdf5_chunk_size, *policy_shape), compression='gzip')
-                    hf_dest.create_dataset('values', shape=(total_positions_to_write,), dtype=np.float16, chunks=(hdf5_chunk_size,), compression='gzip')
-
-                # Step 3: Global shuffle is complete (all_batch_indices is ready)
-                
-                # Step 4: Open destination file for R/W and process chunks
-                with h5py.File(temp_path_writing, 'r+') as hf_dest:
-                    
-                    # The iteration uses the length of the selected batch list
-                    for io_chunk_idx, start_batch_idx in enumerate(range(0, len(all_batch_indices), batches_per_io_chunk)):
-
-                        self.logger.info(f"Processing IO chunk {io_chunk_idx + 1}")
+                        self.logger.info("Using uniform sampling from all available HDF5 chunks.")
                         
-                        if current_write_position >= total_positions_to_write:
-                            break
-
-                        end_batch_idx = min(start_batch_idx + batches_per_io_chunk, len(all_batch_indices))
-                        current_batches_source_indices = all_batch_indices[start_batch_idx:end_batch_idx]
-
-                        # Read from hf_source (still open)
-                        inputs_chunks, policies_chunks, values_chunks = [], [], []
-                        for batch_i in current_batches_source_indices:
-                            batch_start = batch_i * batch_size
-                            batch_end = batch_start + batch_size
-                            inputs_chunks.append(hf_source['inputs'][batch_start:batch_end])
-                            policies_chunks.append(hf_source['policies'][batch_start:batch_end])
-                            values_chunks.append(hf_source['values'][batch_start:batch_end])
-
-                        # Concatenate and local shuffle
-                        chunk_inputs = np.concatenate(inputs_chunks, axis=0)
-                        chunk_policies = np.concatenate(policies_chunks, axis=0)
-                        chunk_values = np.concatenate(values_chunks, axis=0)
+                        # Create a list of all available chunk indices
+                        all_source_chunk_indices = list(range(num_sampling_chunks_total_source))
                         
-                        chunk_size = chunk_inputs.shape[0]
-                        local_indices = np.arange(chunk_size)
-                        np.random.shuffle(local_indices)
-                        chunk_inputs = chunk_inputs[local_indices]
-                        chunk_policies = chunk_policies[local_indices]
-                        chunk_values = chunk_values[local_indices]
+                        # Sample the required number of chunks uniformly from all available
+                        num_chunks_to_sample = min(num_sampling_chunks_to_write, len(all_source_chunk_indices))
+                        all_chunk_indices = random.sample(all_source_chunk_indices, num_chunks_to_sample)
 
-                        # Write Limit Logic
-                        remaining_to_write = total_positions_to_write - current_write_position
-                        write_count = min(chunk_size, remaining_to_write) 
+
+                    self.logger.info(f"Total HDF5 chunks for training file: {len(all_chunk_indices)}")
+
+                    # Step 2b: Create destination HDF5 datasets and close immediately
+                    with h5py.File(temp_path_writing, 'w') as hf_dest:
+                        board_shape = hf_source['inputs'].shape[1:]
+                        policy_shape = hf_source['policies'].shape[1:]
                         
-                        # Write the limited portion of the shuffled chunk back to destination
-                        write_start = current_write_position
-                        write_end = current_write_position + write_count
+                        # Datasets are sized to the clamped total_positions_to_write
+                        hf_dest.create_dataset('inputs', shape=(total_positions_to_write, *board_shape), dtype=np.float16, chunks=(batch_size, *board_shape), compression='gzip')
+                        hf_dest.create_dataset('policies', shape=(total_positions_to_write, *policy_shape), dtype=np.float16, chunks=(batch_size, *policy_shape), compression='gzip')
+                        hf_dest.create_dataset('values', shape=(total_positions_to_write,), dtype=np.float16, chunks=(batch_size,), compression='gzip')
 
-                        hf_dest['inputs'][write_start:write_end] = chunk_inputs[:write_count]
-                        hf_dest['policies'][write_start:write_end] = chunk_policies[:write_count]
-                        hf_dest['values'][write_start:write_end] = chunk_values[:write_count]
-
-                        current_write_position += write_count
+                    # Step 4: Open destination file for R/W and process chunks
+                    with h5py.File(temp_path_writing, 'r+') as hf_dest:
                         
-                        if write_count < chunk_size:
-                            self.logger.info(f"Write limit reached. Wrote final partial chunk of size {write_count}.")
-                            break
+                        # The iteration reads from the sampled list in blocks of chunks_per_io_chunk
+                        for io_chunk_idx, start_chunk_idx in enumerate(range(0, len(all_chunk_indices), chunks_per_io_chunk)):
+                            
+                            self.logger.info(f"Processing IO chunk {io_chunk_idx + 1}")
+                            
+                            if current_write_position >= total_positions_to_write:
+                                break
 
-                os.rename(temp_path_writing, self.shuffled_hdf5_path)
-                self.logger.info(f"Successfully created shuffled HDF5 file with {current_write_position} entries at: {self.shuffled_hdf5_path}")
+                            end_chunk_idx = min(start_chunk_idx + chunks_per_io_chunk, len(all_chunk_indices))
+                            # This list holds the indices for all small chunks in this large I/O operation
+                            current_chunks_source_indices = all_chunk_indices[start_chunk_idx:end_chunk_idx]
+                            
+                            # Read ALL small chunks that form the current I/O block
+                            inputs_chunks, policies_chunks, values_chunks = [], [], []
+                            for chunk_i in current_chunks_source_indices:
+                                chunk_start = chunk_i * hdf5_chunk_size
+                                chunk_end = chunk_start + hdf5_chunk_size
+                                inputs_chunks.append(hf_source['inputs'][chunk_start:chunk_end])
+                                policies_chunks.append(hf_source['policies'][chunk_start:chunk_end])
+                                values_chunks.append(hf_source['values'][chunk_start:chunk_end])
 
-        except Exception as e:
-            self.logger.error(f"Failed to create shuffled HDF5 file: {e}")
-            if os.path.exists(temp_path_writing):
-                os.remove(temp_path_writing)
-            self.shuffled_hdf5_path = None
-            raise
+                            # Concatenate (forms the large I/O block) and local shuffle
+                            chunk_inputs = np.concatenate(inputs_chunks, axis=0)
+                            chunk_policies = np.concatenate(policies_chunks, axis=0)
+                            chunk_values = np.concatenate(values_chunks, axis=0)
+                            
+                            # --- Local Shuffle (Single Shuffle for the entire IO block) ---
+                            chunk_size = chunk_inputs.shape[0]
+                            local_indices = np.arange(chunk_size)
+                            np.random.shuffle(local_indices)
+                            chunk_inputs = chunk_inputs[local_indices]
+                            chunk_policies = chunk_policies[local_indices]
+                            chunk_values = chunk_values[local_indices]
+
+                            # Write Limit Logic
+                            remaining_to_write = total_positions_to_write - current_write_position
+                            write_count = min(chunk_size, remaining_to_write) 
+                            
+                            # Write the limited portion of the shuffled I/O block back to destination
+                            write_start = current_write_position
+                            write_end = current_write_position + write_count
+
+                            # This single write operation is a large block defined by the IO chunk size
+                            hf_dest['inputs'][write_start:write_end] = chunk_inputs[:write_count]
+                            hf_dest['policies'][write_start:write_end] = chunk_policies[:write_count]
+                            hf_dest['values'][write_start:write_end] = chunk_values[:write_count]
+
+                            current_write_position += write_count
+                            
+                            if write_count < chunk_size:
+                                self.logger.info(f"Write limit reached. Wrote final partial chunk of size {write_count}.")
+                                break
+
+                    os.rename(temp_path_writing, self.shuffled_hdf5_path)
+                    self.logger.info(f"Successfully created shuffled HDF5 file with {current_write_position} entries at: {self.shuffled_hdf5_path}")
+
+            except Exception as e:
+                self.logger.error(f"Failed to create shuffled HDF5 file: {e}")
+                if os.path.exists(temp_path_writing):
+                    os.remove(temp_path_writing)
+                self.shuffled_hdf5_path = None
+                raise
 
 
     def _clean_up_shuffled_file(self):

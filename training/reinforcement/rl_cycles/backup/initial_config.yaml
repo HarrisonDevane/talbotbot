@@ -41,15 +41,16 @@ data_generation:
 training:
   batch_size: 1024
   io_chunk_size: 1024000
-  hdf5_chunk_size: 512
+  hdf5_chunk_size: 64
   training_steps: 400
+  recency_priority: False
   recency_ratio: 0.3
   policy_loss_weight: 1.0
   value_loss_weight: 1.0
-  log_interval: 1
+  log_interval: 10
   weight_decay: 1e-4
-  cosine_eta_max: 1e-3
-  cosine_eta_min: 1e-5
+  cosine_eta_max: 5e-4
+  cosine_eta_min: 5e-6
   dropout_rate_conv: 0.1
   dropout_rate_fc: 0.25
   dropout_conv_start_block: 8
