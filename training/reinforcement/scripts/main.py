@@ -7,6 +7,7 @@ import h5py
 import shutil
 import random
 import torch
+import torch.optim as optim
 
 # Assuming this import is in your project structure
 from data_generation_task import DataGenerationTask
@@ -29,7 +30,12 @@ class RLOrchestrator:
         # Initialize logger as None. It will be set for the first time inside the run() method.
         self.logger = None
 
-        self.params_config, self.state_config = self._load_configs()
+        with open(CONFIG_RL_PARAMS_FILE, 'r') as f:
+            self.params_config = yaml.safe_load(f)
+
+        with open(CONFIG_RL_STATE_FILE, 'r') as f:
+            self.state_config = yaml.safe_load(f)
+
         self.current_cycle = self.state_config['state']['current_cycle']
         self.stop_cycle = self.params_config['global']['stop_cycle']
 
@@ -37,21 +43,7 @@ class RLOrchestrator:
         self.best_model_path = os.path.abspath(os.path.join(RL_CYCLES_DIR, "best_models", "best_model.pth"))
 
         if not os.path.exists(self.best_model_path):
-            random.seed(42)
-            np.random.seed(42)
-            torch.manual_seed(42)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(42)
-
-            # Create a new, seeded instance of the model
-            model = ChessAIModel(
-                num_input_planes=68,
-                num_residual_blocks=16,
-                num_filters=128
-            )
-
-            torch.save(model.state_dict(), os.path.join(rl_dir, 'rl_cycles', 'best_models', 'initial_model.pth'))
-            torch.save(model.state_dict(), os.path.join(rl_dir, 'rl_cycles', 'best_models', 'best_model.pth'))
+            self._create_new_model()
 
 
         os.makedirs(RL_CYCLES_DIR, exist_ok=True)
@@ -60,9 +52,36 @@ class RLOrchestrator:
         buffer_file_name = os.path.abspath(os.path.join(RL_CYCLES_DIR, "circular_buffer.hdf5"))
         self.buffer_file_path = buffer_file_name
 
+    def _create_new_model(self):
+        random.seed(42)
+        np.random.seed(42)
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
+
+        # Create a new, seeded instance of the model
+        model = ChessAIModel(
+            num_input_planes=self.params_config['model']['input_planes'],
+            num_residual_blocks=self.params_config['model']['resblocks'],
+            num_filters=self.params_config['model']['filters']
+        )
+
+        optimizer = optim.AdamW(
+            model.parameters(), 
+            lr=float(self.params_config['training']['learning_rate']), 
+            weight_decay=float(self.params_config['training']['weight_decay'])
+        )
+
+        model_dict = {
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+        }
+
+        torch.save(model_dict, os.path.join(rl_dir, 'rl_cycles', 'best_models', 'initial_model.pth'))
+        torch.save(model_dict, os.path.join(rl_dir, 'rl_cycles', 'best_models', 'best_model.pth'))
+
 
     def _setup_cycle_logger(self, cycle_dir):
-        # Create a 'logs' subdirectory within the cycle directory
         logger = logging.getLogger(f"RLOrchestrator_Cycle_{self.current_cycle}")
         logger.setLevel(logging.INFO)
         
@@ -76,16 +95,6 @@ class RLOrchestrator:
         logger.addHandler(file_handler)
         
         return logger
-
-
-    def _load_configs(self):
-        with open(CONFIG_RL_PARAMS_FILE, 'r') as f:
-            params_config = yaml.safe_load(f)
-
-        with open(CONFIG_RL_STATE_FILE, 'r') as f:
-            state_config = yaml.safe_load(f)
-        
-        return params_config, state_config
     
 
     def _save_state(self):

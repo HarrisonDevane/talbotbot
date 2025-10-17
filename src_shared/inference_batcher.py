@@ -57,8 +57,13 @@ class InferenceBatcher:
         self.model = ChessAIModel(num_input_planes=self.model_config['input_planes'], 
                                   num_residual_blocks=self.model_config['resblocks'], 
                                   num_filters=self.model_config['filters'])
+        
+        checkpoint = torch.load(
+            self.model_path, 
+            map_location=self.device,
+        )
 
-        self.model.load_state_dict(torch.load(self.model_path, map_location=self.device, weights_only=True))
+        self.model.load_state_dict(checkpoint['model_state_dict'])
         self.logger.info(f"Model loaded successfully from {self.model_path}")
 
         self.model.to(self.device)

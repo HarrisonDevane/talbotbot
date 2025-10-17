@@ -296,7 +296,8 @@ class TrainTask:
 
 
     def run_training_loop(self):
-        best_model_path = None
+        final_model_path = None
+        training_steps_completed = 0
         
         try:
             self._duplicate_and_shuffle_hdf5()
@@ -315,36 +316,27 @@ class TrainTask:
                 dropout_conv_start_block=self.training_config['dropout_conv_start_block']
             ).to(self.device)
 
-            model.load_state_dict(torch.load(self.best_model_path, map_location=self.device, weights_only=True))      
+            # --- Loading model state and potentially optimizer state ---
+            checkpoint = torch.load(self.best_model_path, map_location=self.device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            self.logger.info("Model weights loaded from checkpoint dictionary.")
+            
             self.logger.info("Model initialized and weights loaded.")
 
             policy_criterion = nn.KLDivLoss(reduction='batchmean')
             value_criterion = nn.MSELoss()
             
-            # Use self.training_config directly for optimizer LR
+            # --- Optimizer Setup with Manual LR ---
             optimizer = optim.AdamW(
                 model.parameters(), 
-                lr=float(self.training_config['cosine_eta_max']), 
+                lr=float(self.training_config['learning_rate']), 
                 weight_decay=float(self.training_config['weight_decay'])
             )
-                    
-            scheduler = CosineAnnealingLR(
-                optimizer, 
-                T_max=self.global_config['total_steps'], 
-                eta_min=float(self.training_config['cosine_eta_min'])
-            )
-            
-            # Set the scheduler's initial state for resume training
-            steps_completed = self.state_config['total_training_steps']
-            if steps_completed > 0:
-                self.logger.info(f"Advancing scheduler by {steps_completed} steps.")
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", category=UserWarning)
-                    for _ in range(steps_completed):
-                        scheduler.step()
-            
-            self.logger.info(f"Initial LR after state restoration: {optimizer.param_groups[0]['lr']:.6f}")
-            
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            optimizer.param_groups[0]['lr'] = float(self.training_config['learning_rate'])
+            self.logger.info(f"Optimizer (AdamW) initialized with fixed Learning Rate: {optimizer.param_groups[0]['lr']:.4f}")
+
+
             scaler = GradScaler('cuda')
 
             # --- Training Phase: Single Pass ---
@@ -353,8 +345,8 @@ class TrainTask:
             
             # The loop runs for the exact number of batches defined by the temporary HDF5 file
             for batch_idx, (board_tensors, policy_target, value_targets) in enumerate(train_loader):
-                # Calculate the global step count for logging
-                global_step = steps_completed + batch_idx + 1
+                # Calculate the global step count for logging (only meaningful relative to this task)
+                current_step = batch_idx + 1
                 
                 batch_start_time = time.perf_counter()
                 
@@ -388,7 +380,6 @@ class TrainTask:
                 backward_pass_end = time.perf_counter()
 
                 scaler.step(optimizer)
-                scheduler.step() 
                 scaler.update()
                             
                 running_total_loss += total_loss.item()
@@ -396,8 +387,8 @@ class TrainTask:
                 batch_end_time = time.perf_counter()
                 
                 # Log detailed info to file at intervals
-                if (batch_idx + 1) % self.training_config['log_interval'] == 0:
-                    self.logger.info(f"Training Step {batch_idx+1}/{total_training_steps_this_cycle} (Global Step {global_step}/{self.global_config['total_steps']}): "
+                if current_step % self.training_config['log_interval'] == 0:
+                    self.logger.info(f"Training Step {current_step}/{total_training_steps_this_cycle}: "
                                      f"P_Loss={policy_loss.item():.4f}, "
                                      f"V_Loss={value_loss.item():.4f}, "
                                      f"T_Loss={total_loss.item():.4f}, "
@@ -413,16 +404,21 @@ class TrainTask:
             self.logger.info(f"--- Training Run Summary ---")
             self.logger.info(f"Total Steps Completed This Cycle: {training_steps_completed}, Average Total Loss: {avg_total_loss_train:.4f}")
             
-            # Save the final model after all steps are complete
+            # --- Save the final model (weights AND optimizer state) ---
             final_model_path = os.path.join(self.output_dir, f"model_iter_{self.cycle_number}.pth")
-            torch.save(model.state_dict(), final_model_path)
-            self.logger.info(f"Final model after {training_steps_completed} steps saved to {final_model_path}")
             
-            best_model_path = final_model_path
+            # Create the checkpoint dictionary
+            model_dict = {
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }
+            
+            torch.save(model_dict, final_model_path)
+            self.logger.info(f"Final model (with optimizer state) saved to {final_model_path}")
             
             self.logger.info("Training complete for this task!")
             
         finally:
             self._clean_up_shuffled_file()
             
-        return best_model_path, training_steps_completed
+        return final_model_path, training_steps_completed
