@@ -43,8 +43,6 @@ class TrainTask:
         self.cycle_number = cycle_number
         self.shuffled_hdf5_path = None
         self.io_chunk_size = self.training_config['io_chunk_size']
-        # New attribute to store the actual number of batches (steps) processed
-        self.num_batches_processed = 0 
 
         self.logger = self._setup_logger()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -93,7 +91,7 @@ class TrainTask:
             temp_path_writing = f"{self.shuffled_hdf5_path}.tmp"
             
             current_write_position = 0 
-            all_chunk_indices = [] # Renamed to reflect the HDF5 chunk as the unit
+            all_chunk_indices = [] # Remed to reflect the HDF5 chunk as the unitna
 
             try:
                 # Step 1: Keep the source file open for the duration of reading
@@ -281,7 +279,7 @@ class TrainTask:
         train_loader = DataLoader(
             full_dataset,
             batch_size=1,
-            shuffle=False, 
+            shuffle=True, 
             num_workers=num_workers,
             pin_memory=True,
             prefetch_factor=4 if num_workers > 0 else None,
