@@ -166,8 +166,6 @@ class RLOrchestrator:
                     policies_remaining = policies_remaining[append_count:]
                     values_remaining = values_remaining[append_count:]
 
-                    current_write_head = new_size % max_positions  # Important: update write head if it wrapped to max
-
                 ### STEP 2: CIRCULAR OVERWRITE for remaining data ###
                 num_remaining = len(boards_remaining)
                 if num_remaining > 0:

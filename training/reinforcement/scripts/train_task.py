@@ -91,13 +91,19 @@ class TrainTask:
             temp_path_writing = f"{self.shuffled_hdf5_path}.tmp"
             
             current_write_position = 0 
-            all_chunk_indices = [] # Remed to reflect the HDF5 chunk as the unitna
+            all_chunk_indices = []
+
+            # Determine effective write head based on whether the buffer is full or not
+            if self.state_config['buffer_positions_current'] == self.global_config['buffer_positions_total']:   
+                effective_write_head = write_head_position
+            else:
+                effective_write_head = self.state_config['buffer_positions_current']
 
             try:
                 # Step 1: Keep the source file open for the duration of reading
                 with h5py.File(self.hdf5_path, 'r') as hf_source:
                     
-                    total_positions_source = hf_source['inputs'].shape[0]
+                    total_positions_source = self.state_config['buffer_positions_current']
                     batch_size = self.training_config['batch_size']          # E.g., 1024 (Output Chunking)
                     hdf5_chunk_size = self.training_config['hdf5_chunk_size'] # E.g., 16 (Sampling Unit)
                     io_chunk_size = self.training_config['io_chunk_size']    # E.g., 1024000 (I/O Unit)
@@ -123,7 +129,7 @@ class TrainTask:
                             num_new_cycle_positions -= num_new_cycle_positions % hdf5_chunk_size
 
                         # The newest data starts *before* the write head, counting backwards
-                        new_data_start_position = (write_head_position - num_new_cycle_positions) % total_positions_source
+                        new_data_start_position = (effective_write_head - num_new_cycle_positions) % total_positions_source
                         
                         all_source_chunk_indices = list(range(num_sampling_chunks_total_source)) # HDF5 chunk indices
                         new_cycle_chunk_indices = []
@@ -134,13 +140,13 @@ class TrainTask:
                             chunk_pos = chunk_i * hdf5_chunk_size # Use hdf5_chunk_size for position check
                             is_new_cycle = False
                             
-                            if write_head_position > new_data_start_position:
+                            if effective_write_head > new_data_start_position:
                                 # Scenario 1: No wrap-around. Newest data is contiguous.
-                                if new_data_start_position <= chunk_pos < write_head_position:
+                                if new_data_start_position <= chunk_pos < effective_write_head:
                                     is_new_cycle = True
                             else:
                                 # Scenario 2: Wrap-around occurred. Newest data is split.
-                                if chunk_pos >= new_data_start_position or chunk_pos < write_head_position:
+                                if chunk_pos >= new_data_start_position or chunk_pos < effective_write_head:
                                     is_new_cycle = True
                                     
                             if is_new_cycle:
