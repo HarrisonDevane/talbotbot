@@ -159,12 +159,13 @@ class RLOrchestrator:
                     values_dset[current_size : current_size + append_count] = values_to_append
 
                     self.state_config['state']['buffer_positions_current'] = new_size
-                    self.state_config['state']['buffer_write_head'] = new_size
 
                     # Remove appended data from the remaining pool
                     boards_remaining = boards_remaining[append_count:]
                     policies_remaining = policies_remaining[append_count:]
                     values_remaining = values_remaining[append_count:]
+
+                    current_write_head = new_size % max_positions
 
                 ### STEP 2: CIRCULAR OVERWRITE for remaining data ###
                 num_remaining = len(boards_remaining)
@@ -291,7 +292,8 @@ class RLOrchestrator:
                 self.logger.info(f"--- Cycle {self.current_cycle} self-play completed successfully! ---")
                 self._save_state()
                 data_generation_task = None
-                
+                            
+                            
             # Step 2. Training
             self.logger.info("2. Training a new model on the updated data buffer...")
             start_train_time = time.time()

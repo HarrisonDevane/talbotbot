@@ -1,8 +1,8 @@
 global:
-  stop_cycle: 20
+  stop_cycle: 15
   best_model_save_interval: 5
-  buffer_positions_total: 8192000
-  data_generation_positions_per_cycle: 819200
+  buffer_positions_total: 4096000
+  data_generation_positions_per_cycle: 409600
   data_generation_save_interval: 10240
   eval_games: 400
   eval_cutoff: 0.55
@@ -30,7 +30,7 @@ data_generation:
   temperature_threshold_move: 12
   temperature_high: 1.0
   temperature_low: 0.0
-  dirichlet_alpha: 0.1
+  dirichlet_alpha: 0.3
   dirichlet_epsilon: 0.3
   draw_cutoff: 0.0
   main_logging_level: 20
@@ -41,14 +41,15 @@ training:
   batch_size: 4096
   io_chunk_size: 1024000
   hdf5_chunk_size: 8
-  training_steps: 400
+  training_steps: 200
   recency_priority: True
-  recency_ratio: 0.20
+  recency_decay_lambda: 0.30
   policy_loss_weight: 1.0
   value_loss_weight: 1.0
   log_interval: 10
   weight_decay: 1e-4
-  learning_rate: 5e-4
+  learning_rate: 1e-2
+  momentum_rate: 0.9
   dropout_rate_conv: 0.1
   dropout_rate_fc: 0.25
   dropout_conv_start_block: 10

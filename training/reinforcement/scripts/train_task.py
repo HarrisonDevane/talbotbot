@@ -4,7 +4,6 @@ import torch.optim as optim
 import logging
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.amp import autocast, GradScaler
 import os
 import sys
@@ -12,7 +11,6 @@ import random
 import time
 import h5py
 import numpy as np
-import warnings
 
 # Ensure project root is in path for imports
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -80,7 +78,6 @@ class TrainTask:
             
             # Required state variables from the circular buffer
             write_head_position = self.state_config['buffer_write_head']
-            cycle_positions = self.state_config['data_generation_positions_current'] 
             
             sampling_mode = "Recency-based PER" if recency_enabled else "Uniform Sampling"
             self.logger.info(f"Starting HDF5 duplication and shuffle using: {sampling_mode}.")
@@ -92,12 +89,6 @@ class TrainTask:
             
             current_write_position = 0 
             all_chunk_indices = []
-
-            # Determine effective write head based on whether the buffer is full or not
-            if self.state_config['buffer_positions_current'] == self.global_config['buffer_positions_total']:   
-                effective_write_head = write_head_position
-            else:
-                effective_write_head = self.state_config['buffer_positions_current']
 
             try:
                 # Step 1: Keep the source file open for the duration of reading
@@ -115,76 +106,103 @@ class TrainTask:
                     num_sampling_chunks_to_write = total_positions_to_write // hdf5_chunk_size
                     
                     self.logger.info(f"Target positions to write: {total_positions_to_write} ({num_sampling_chunks_to_write} HDF5 chunks)")
+
+                    aligned_write_head = (write_head_position // hdf5_chunk_size) * hdf5_chunk_size
+                
+                    if aligned_write_head != write_head_position:
+                        misalignment = write_head_position - aligned_write_head
+                        self.logger.info(
+                            f"Buffer write head {write_head_position} is not HDF5 chunk aligned (size {hdf5_chunk_size}). "
+                            f"Using effective read start back by {misalignment} positions: {aligned_write_head}"
+                        )
+
                     
                     if recency_enabled:
-                        # A. Calculate required samples from Newest and Older data (in units of HDF5 chunks)
-                        num_new_chunks_to_sample = int(num_sampling_chunks_to_write * self.training_config['recency_ratio'])
-                        num_older_chunks_to_sample = num_sampling_chunks_to_write - num_new_chunks_to_sample
+                        self.logger.info("Using exponential decay-based sampling prioritized by discrete data generation cycle.")
                         
-                        # B. Identify the indices of the Newest Chunks (the current cycle's data)
-                        num_new_cycle_positions = min(cycle_positions, total_positions_source)
+                        decay_lambda = self.training_config['recency_decay_lambda']
+                        data_positions_per_cycle = self.global_config['data_generation_positions_per_cycle']
                         
-                        # Ensure position is aligned with chunk size before calculating start index
-                        if num_new_cycle_positions % hdf5_chunk_size != 0:
-                            num_new_cycle_positions -= num_new_cycle_positions % hdf5_chunk_size
+                        # 1. Calculate the total number of cycles (including a partial cycle, if present)
+                        # This defines the "newest cycle index" for the decay calculation.
+                        num_total_cycles = (total_positions_source + data_positions_per_cycle - 1) // data_positions_per_cycle
+                        
+                        self.logger.info(f"Calculated {num_total_cycles} cycles in the buffer (Cycle size: {data_positions_per_cycle}).")
 
-                        # The newest data starts *before* the write head, counting backwards
-                        new_data_start_position = (effective_write_head - num_new_cycle_positions) % total_positions_source
-                        
-                        all_source_chunk_indices = list(range(num_sampling_chunks_total_source)) # HDF5 chunk indices
-                        new_cycle_chunk_indices = []
-                        older_chunk_indices = []
-                        
-                        # C. Separate the New Cycle Chunks from the Older Chunks (Handle wrap-around)
-                        for chunk_i in all_source_chunk_indices:
-                            chunk_pos = chunk_i * hdf5_chunk_size # Use hdf5_chunk_size for position check
-                            is_new_cycle = False
+                        if total_positions_source == self.global_config['buffer_positions_total']:
+                            oldest_data_start_position = aligned_write_head
+                        else:
+                            oldest_data_start_position = 0
                             
-                            if effective_write_head > new_data_start_position:
-                                # Scenario 1: No wrap-around. Newest data is contiguous.
-                                if new_data_start_position <= chunk_pos < effective_write_head:
-                                    is_new_cycle = True
-                            else:
-                                # Scenario 2: Wrap-around occurred. Newest data is split.
-                                if chunk_pos >= new_data_start_position or chunk_pos < effective_write_head:
-                                    is_new_cycle = True
-                                    
-                            if is_new_cycle:
-                                new_cycle_chunk_indices.append(chunk_i)
-                            else:
-                                older_chunk_indices.append(chunk_i)
-                        
-                        # D. Sample from the two pools with compensation for small buffer.
-                        num_older_to_sample = min(num_older_chunks_to_sample, len(older_chunk_indices))
-                        older_sample_indices = random.sample(older_chunk_indices, num_older_to_sample)
-                        
-                        chunks_needed_after_older = num_sampling_chunks_to_write - len(older_sample_indices)
-                        num_new_to_sample = max(num_new_chunks_to_sample, chunks_needed_after_older)
-                        
-                        if num_new_to_sample > len(new_cycle_chunk_indices):
-                            self.logger.warning(f"Not enough total data available. New sample size reduced from {num_new_to_sample} to available {len(new_cycle_chunk_indices)}.")
+                        self.logger.info(f"Oldest data starts at physical buffer position: {oldest_data_start_position}")
+                        self.logger.info("--- Recency Cycle Weight Summary (Relative to Oldest Data) ---")
+                        for cycle_i in range(num_total_cycles):
+                            relative_start = cycle_i * data_positions_per_cycle
+                            relative_end = min((cycle_i + 1) * data_positions_per_cycle, total_positions_source)
+                            absolute_start = (relative_start + aligned_write_head) % total_positions_source
+                            
+                            cycle_length = relative_end - relative_start
+                            absolute_end = (absolute_start + cycle_length) % total_positions_source
+                            absolute_end = (absolute_end - 1 + total_positions_source) % total_positions_source
+                            
+                            # 3. Calculate Weight
+                            cycle_age = (num_total_cycles - 1) - cycle_i
+                            base_weight = np.exp(-decay_lambda * cycle_age)
+                            
+                            self.logger.info(
+                                f"Cycle {cycle_i} (Age {cycle_age}): Base Weight {base_weight:.4f} | ABSOLUTE Positions: {absolute_start} to {absolute_end}"
+                            )
+                        self.logger.info("-------------------------------------------------------------------")
 
-                        num_new_to_sample = min(num_new_to_sample, len(new_cycle_chunk_indices))
-                        recency_sample_indices = random.sample(new_cycle_chunk_indices, num_new_to_sample)
+                        all_chunk_indices = list(range(num_sampling_chunks_total_source))
+                        chunk_weights = []
                         
-                        # 4. Combine and Global Shuffle
-                        all_chunk_indices = recency_sample_indices + older_sample_indices
-                        random.shuffle(all_chunk_indices)
-                        
-                        # E. Logging (for verification)
-                        self.logger.info(f"New chunks ({self.training_config['recency_ratio']*100}% target): {len(recency_sample_indices)}")
-                        self.logger.info(f"Older chunks ({round((1 - self.training_config['recency_ratio'])*100)}% target): {len(older_sample_indices)}")
+                        # 2. Calculate distance and weight for every chunk
+                        for chunk_i in all_chunk_indices:
+                            chunk_pos = chunk_i * hdf5_chunk_size
+                            
+                            # Determine the chunk's position relative to the start of the OLDEST data.
+                            if total_positions_source == self.global_config['buffer_positions_total']:
+                                # Buffer is full (wrapped). Oldest data starts at 'effective_write_head'.
+                                pos_relative_to_start = (chunk_pos - aligned_write_head) % total_positions_source
+                            else:
+                                # Buffer is NOT full. Oldest data starts at position 0.
+                                pos_relative_to_start = chunk_pos
+                                
+                            # The cycle index (0-indexed) this position belongs to. 
+                            cycle_index = pos_relative_to_start // data_positions_per_cycle
+                            
+                            # C. Calculate the cycle age (distance from the newest cycle)
+                            cycle_age = (num_total_cycles - 1) - cycle_index
+                            
+                            # Exponential decay: Newer data (smaller age) gets higher weight.
+                            weight = np.exp(-decay_lambda * cycle_age)
+                            chunk_weights.append(weight)
 
+
+                        # 3. Normalize and Sample
+                        chunk_probabilities = np.array(chunk_weights) / np.sum(chunk_weights)
+                        num_chunks_to_sample = min(num_sampling_chunks_to_write, len(all_chunk_indices))
+                        
+                        all_chunk_indices = np.random.choice(
+                            all_chunk_indices, 
+                            size=num_chunks_to_sample, 
+                            p=chunk_probabilities, 
+                            replace=True
+                        ).tolist()
 
                     else:
                         self.logger.info("Using uniform sampling from all available HDF5 chunks.")
                         
-                        # Create a list of all available chunk indices
-                        all_source_chunk_indices = list(range(num_sampling_chunks_total_source))
+                        all_chunk_indices = list(range(num_sampling_chunks_total_source))
+                        num_chunks_to_sample = min(num_sampling_chunks_to_write, len(all_chunk_indices))
                         
-                        # Sample the required number of chunks uniformly from all available
-                        num_chunks_to_sample = min(num_sampling_chunks_to_write, len(all_source_chunk_indices))
-                        all_chunk_indices = random.sample(all_source_chunk_indices, num_chunks_to_sample)
+                        # Use np.random.choice without the 'p' argument for uniform sampling
+                        all_chunk_indices = np.random.choice(
+                            all_chunk_indices, 
+                            size=num_chunks_to_sample, 
+                            replace=True
+                        ).tolist()
 
 
                     self.logger.info(f"Total HDF5 chunks for training file: {len(all_chunk_indices)}")
@@ -329,17 +347,19 @@ class TrainTask:
 
             policy_criterion = nn.KLDivLoss(reduction='batchmean')
             value_criterion = nn.MSELoss()
+
+            momentum_rate = self.training_config['momentum_rate']
             
             # --- Optimizer Setup with Manual LR ---
-            optimizer = optim.AdamW(
+            optimizer = optim.SGD(
                 model.parameters(), 
-                lr=float(self.training_config['learning_rate']), 
+                lr=float(self.training_config['learning_rate']),
+                momentum=momentum_rate,
                 weight_decay=float(self.training_config['weight_decay'])
             )
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             optimizer.param_groups[0]['lr'] = float(self.training_config['learning_rate'])
-            self.logger.info(f"Optimizer (AdamW) initialized with fixed Learning Rate: {optimizer.param_groups[0]['lr']:.4f}")
-
+            self.logger.info(f"Optimizer (SGD with Momentum={momentum_rate}) initialized with fixed Learning Rate: {optimizer.param_groups[0]['lr']:.4f}")
 
             scaler = GradScaler('cuda')
 

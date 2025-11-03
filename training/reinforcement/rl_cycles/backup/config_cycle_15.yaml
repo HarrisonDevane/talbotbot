@@ -24,13 +24,13 @@ data_generation:
   batch_size_factor: 6
   batch_timeout: 0.001
   cpuct: 2.0
-  search_depth: [400, 800]
-  search_depth_weights: [0.1, 0.9]
+  search_depth: [800]
+  search_depth_weights: [1.0]
   virtual_loss: 0.3
   temperature_threshold_move: 12
   temperature_high: 1.0
   temperature_low: 0.0
-  dirichlet_alpha: 0.1
+  dirichlet_alpha: 0.3
   dirichlet_epsilon: 0.3
   draw_cutoff: 0.0
   main_logging_level: 20
@@ -43,12 +43,13 @@ training:
   hdf5_chunk_size: 8
   training_steps: 200
   recency_priority: True
-  recency_ratio: 0.25
+  recency_ratio: 0.30
   policy_loss_weight: 1.0
   value_loss_weight: 1.0
   log_interval: 10
   weight_decay: 1e-4
-  learning_rate: 1e-3
+  learning_rate: 1e-2
+  momentum_rate: 0.9
   dropout_rate_conv: 0.1
   dropout_rate_fc: 0.25
   dropout_conv_start_block: 10
