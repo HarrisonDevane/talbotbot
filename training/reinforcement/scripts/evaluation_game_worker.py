@@ -60,6 +60,7 @@ class EvaluationGameWorker:
 
             self._check_game_over(game_number)
 
+        self._generate_pgn(game_number)
         return self.result, (ply_count-1)
 
 
@@ -88,14 +89,15 @@ class EvaluationGameWorker:
             else:
                 self.logger.info(f"Game {game_number} over. Result: {self.result}")
 
-            # Generate PGN
-            game = chess.pgn.Game.from_board(self.board)
-            game.headers["Result"] = self.result
-            game.headers["White"] = self.players[chess.WHITE].name
-            game.headers["Black"] = self.players[chess.BLACK].name
 
-            exporter = chess.pgn.StringExporter(headers=True)
-            pgn_string = game.accept(exporter).strip()
+    def _generate_pgn(self, game_number):
+        game = chess.pgn.Game.from_board(self.board)
+        game.headers["Event"] = f"Self-Play Game {game_number}"
+        game.headers["Result"] = self.result
+        game.headers["White"] = self.players[chess.WHITE].name
+        game.headers["Black"] = self.players[chess.BLACK].name
 
+        exporter = chess.pgn.StringExporter(headers=True)
+        pgn_string = game.accept(exporter).strip()
 
-            self.logger.critical(f"Game PGN:\n{pgn_string}")
+        self.logger.critical(f"Game PGN:\n{pgn_string}")

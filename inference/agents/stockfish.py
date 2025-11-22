@@ -7,8 +7,16 @@ class StockfishPlayer:
         self.engine = chess.engine.SimpleEngine.popen_uci(
             os.path.join(os.path.dirname(__file__), '../..', 'data/engine', 'stockfish', 'stockfish-windows-x86-64-avx2.exe'))
 
-    def get_move(self, board: chess.Board, time_per_move: int = None, depth_limit: int = None) -> chess.Move:
-        result = self.engine.play(board, chess.engine.Limit(time=time_per_move))
+    def get_move(self, board: chess.Board, time_per_move: int = None, depth_limit: int = 1) -> chess.Move:
+        if depth_limit is not None:
+            limit = chess.engine.Limit(depth=depth_limit)
+        elif time_per_move is not None:
+            limit = chess.engine.Limit(time=time_per_move)
+        else:
+
+            limit = chess.engine.Limit(time=1.0)
+
+        result = self.engine.play(board, limit)
         return result.move
 
     def is_human(self):

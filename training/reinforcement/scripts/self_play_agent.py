@@ -150,6 +150,10 @@ class SelfPlayAgent:
 
                 self.logger.info(f"Forced loss detected at the root. Selecting move that delays the loss the longest ({losing_child_for_parent.distance_to_mate} moves).")
             
+            # Resign if below threshold
+            elif (self.self_play_config['training']) and (self.mcts.root.value_sum / self.mcts.root.visits < self.self_play_config['resignation_cutoff']):
+                return None, policy_vector, simulation_count
+
             # Final Fallback: Default to normalized visit counts.
             else:
                 # Ignore moves that lead to forced losses or chosen draws

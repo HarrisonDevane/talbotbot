@@ -336,6 +336,8 @@ class RLOrchestrator:
             evaluation_task = None
             self.logger.info(f"3. Evaluation finished with result: {test_score}-{best_score}")
 
+            raise RuntimeError
+
             # Step 4. Save best model
             win_rate = test_score / self.params_config['global']['eval_games']
             if win_rate > self.params_config['global']['eval_cutoff']:

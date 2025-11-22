@@ -29,9 +29,8 @@ class DataGenerationTask:
         self.model_config = model_config
         self.data_generation_config = data_generation_config
         self.best_iter = best_iter
-        self.num_workers = data_generation_config['game_workers']
-        # Number of inference batchers to create
-        self.num_inference_batchers = data_generation_config['inference_workers']
+        self.num_workers = len(data_generation_config['game_worker_cores'])
+        self.num_inference_batchers = len(data_generation_config['inference_worker_cores'])
 
         self.max_batch_size = self.num_workers * self.data_generation_config['batch_size_per_worker'] * self.data_generation_config['batch_size_factor']
 

@@ -57,23 +57,31 @@ class DataGenerationGameWorker:
             current_board = self.board.copy()
 
             move, policy_vector, simulation_count = player.get_move(current_board, ply_count, search_depth, None)
-            board_state_tensor = utils.board_to_tensor_68(current_board)                
-
-            raw_training_data.append({
-                "board_state": board_state_tensor,
-                "policy": policy_vector,
-                "turn": current_board.turn,
-                "simulation_count": simulation_count
-            })
-            
-            self.board.push(move)
-            self.current_turn = not self.current_turn
-            self.logger.info(f"Game {game_number} - Move made: {move.uci()}")
             total_simulations += simulation_count
-            ply_count += 1
-                    
-            self._check_game_over(game_number)
 
+            if move is None:
+                self.result = "1-0" if self.current_turn == chess.BLACK else "0-1"
+                self.game_over = True
+                self.logger.info(f"Game {game_number} ended by resignation.")
+
+            else:
+                board_state_tensor = utils.board_to_tensor_68(current_board)                
+                raw_training_data.append({
+                    "board_state": board_state_tensor,
+                    "policy": policy_vector,
+                    "turn": current_board.turn,
+                    "simulation_count": simulation_count
+                })
+                
+                self.board.push(move)
+                self.current_turn = not self.current_turn
+                self.logger.info(f"Game {game_number} - Move made: {move.uci()}")
+                ply_count += 1
+                        
+                self._check_game_over(game_number)
+
+
+        self._generate_pgn(game_number)
 
         if self.result == '1-0':
             final_game_value = 1.0
@@ -108,14 +116,15 @@ class DataGenerationGameWorker:
             else:
                 self.logger.info(f"Game {game_number} over. Result: {self.result}")
 
-            # Generate PGN
-            game = chess.pgn.Game.from_board(self.board)
-            game.headers["Result"] = self.result
-            game.headers["White"] = self.player_1.name if self.players[chess.WHITE] == self.player_1 else self.player_2.name
-            game.headers["Black"] = self.player_2.name if self.players[chess.BLACK] == self.player_2 else self.player_1.name
 
-            exporter = chess.pgn.StringExporter(headers=True)
-            pgn_string = game.accept(exporter).strip()
+    def _generate_pgn(self, game_number):
+        game = chess.pgn.Game.from_board(self.board)
+        game.headers["Event"] = f"Self-Play Game {game_number}"
+        game.headers["Result"] = self.result
+        game.headers["White"] = self.player_1.name if self.players[chess.WHITE] == self.player_1 else self.player_2.name
+        game.headers["Black"] = self.player_2.name if self.players[chess.BLACK] == self.player_2 else self.player_1.name
 
+        exporter = chess.pgn.StringExporter(headers=True)
+        pgn_string = game.accept(exporter).strip()
 
-            self.logger.critical(f"Game PGN:\n{pgn_string}")
+        self.logger.critical(f"Game PGN:\n{pgn_string}")

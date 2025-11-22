@@ -25,7 +25,8 @@ class TalbotbotPlayer:
 
         self.model = ChessAIModel(num_input_planes=num_input_planes, num_residual_blocks=num_residual_blocks, num_filters=num_filters)
 
-        self.model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=True))
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
         self.logger.debug(f"Model loaded successfully from {model_path}")
 
         self.model.to(self.device)

@@ -1,6 +1,6 @@
 game:
   white_player: 'talbotbot'
-  white_time_per_move: 4.0
+  white_time_per_move: 10.0
   black_player: 'human'
   black_time_per_move: 4.0
   total_games: 5
@@ -10,7 +10,7 @@ talbot:
   model_path: "training/reinforcement/rl_cycles/best_models/best_model.pth"
   input_planes: 68
   filters: 128
-  resblocks: 20
+  resblocks: 16
   cpuct: 2.0
   batchsize: 16
 

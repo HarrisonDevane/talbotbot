@@ -28,7 +28,7 @@ class EvaluationTask:
         self.best_iter = best_iter
         
         # Extract best model path from model_config for clarity
-        self.num_evaluation_workers = self.evaluation_config['game_workers']
+        self.num_evaluation_workers = len(self.evaluation_config['game_worker_cores'])
 
         self.max_batch_size = self.num_evaluation_workers * self.evaluation_config['batch_size_per_worker'] * self.evaluation_config['batch_size_factor']
 

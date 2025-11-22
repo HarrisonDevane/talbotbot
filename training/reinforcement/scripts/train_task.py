@@ -9,7 +9,7 @@ import os
 import sys
 import random
 import time
-import h5py
+import math
 import numpy as np
 
 # Ensure project root is in path for imports
@@ -20,13 +20,6 @@ sys.path.insert(0, project_root)
 # Assuming these imports are correct based on your file structure
 from src_shared.model import ChessAIModel
 from src_shared.data_loader import ChessDataset, _worker_init_fn
-
-def unwrap_single_batch(batch):
-    """
-    Custom collate function for DataLoader to unwrap batches
-    from a Dataset that returns a full batch per __getitem__.
-    """
-    return batch[0]
 
 
 class TrainTask:
@@ -39,8 +32,6 @@ class TrainTask:
         self.output_dir = output_dir
         self.hdf5_path = hdf5_path
         self.cycle_number = cycle_number
-        self.shuffled_hdf5_path = None
-        self.io_chunk_size = self.training_config['io_chunk_size']
 
         self.logger = self._setup_logger()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -63,269 +54,152 @@ class TrainTask:
         return logger
 
 
-    def _duplicate_and_shuffle_hdf5(self):
-            """
-            Creates a globally and locally shuffled HDF5 file from the source.
-            The destination size is clamped to min(config_size, source_size).
-            Implements Recency-based PER (if enabled) or uniform sampling (if disabled).
-            
-            The method samples indices in units of hdf5_chunk_size, groups them into 
-            large I/O blocks (io_chunk_size) for local shuffling, and writes them
-            using batch_size for destination file chunking.
-            """
-            fixed_steps = self.training_config['training_steps']
-            recency_enabled = self.training_config['recency_priority']
-            
-            # Required state variables from the circular buffer
-            write_head_position = self.state_config['buffer_write_head']
-            
-            sampling_mode = "Recency-based PER" if recency_enabled else "Uniform Sampling"
-            self.logger.info(f"Starting HDF5 duplication and shuffle using: {sampling_mode}.")
+    def _get_shuffled_sample_indices(self):
+        """
+        Calculates a list of absolute sample indices from the original HDF5 file.
+        Weighting is applied at the individual position level, where the age 
+        is determined by the 'data_generation_positions_per_cycle' block it belongs to.
+        The final list is globally shuffled.
+        """
+        fixed_steps = self.training_config['training_steps']
+        recency_enabled = self.training_config['recency_priority']
+        write_head_position = self.state_config['buffer_write_head']
+        total_positions_source = self.state_config['buffer_positions_current']
+        batch_size = self.training_config['batch_size']
+        total_buffer_size = self.global_config['buffer_positions_total']
 
-            base_name, ext = os.path.splitext(os.path.basename(self.hdf5_path))
-            temp_file_name = f"{base_name}_shuffled_temp_{os.getpid()}{ext}"
-            self.shuffled_hdf5_path = os.path.join(os.path.dirname(self.hdf5_path), temp_file_name)
-            temp_path_writing = f"{self.shuffled_hdf5_path}.tmp"
+        sampling_mode = "Recency-based PER (Sample Weighted)" if recency_enabled else "Uniform Sampling"
+        self.logger.info(f"Starting index generation using: {sampling_mode}.")
+
+        # Total pool of individual sample indices (positions) to sample FROM
+        all_sample_indices = np.arange(total_positions_source)
+        
+        # The number of individual samples (positions) required for the training run
+        total_positions_to_sample = min(fixed_steps * batch_size, total_positions_source)
+        
+        self.logger.info(f"Target samples to sample: {total_positions_to_sample}")
+
+        
+        # --- 1. Weighted vs. Uniform Sampling (working with individual sample indices) ---
+        if recency_enabled:                        
+            decay_lambda = self.training_config['recency_decay_lambda']
+            data_positions_per_cycle = self.global_config['data_generation_positions_per_cycle'] 
             
-            current_write_position = 0 
-            all_chunk_indices = []
+            is_full = (total_positions_source == total_buffer_size)
+            
+            if is_full:
+                newest_data_position = (write_head_position - 1 + total_buffer_size) % total_buffer_size
+            else:
+                newest_data_position = total_positions_source - 1
+            
+            self.logger.info("--- Recency-based PER Initialization ---")
+            sample_weights = []
+            all_cycle_ages = []
 
-            try:
-                # Step 1: Keep the source file open for the duration of reading
-                with h5py.File(self.hdf5_path, 'r') as hf_source:
-                    
-                    total_positions_source = self.state_config['buffer_positions_current']
-                    batch_size = self.training_config['batch_size']          # E.g., 1024 (Output Chunking)
-                    hdf5_chunk_size = self.training_config['hdf5_chunk_size'] # E.g., 16 (Sampling Unit)
-                    io_chunk_size = self.training_config['io_chunk_size']    # E.g., 1024000 (I/O Unit)
-
-                    num_sampling_chunks_total_source = total_positions_source // hdf5_chunk_size
-                    chunks_per_io_chunk = io_chunk_size // hdf5_chunk_size 
-                    
-                    total_positions_to_write = min(fixed_steps * batch_size, total_positions_source)
-                    num_sampling_chunks_to_write = total_positions_to_write // hdf5_chunk_size
-                    
-                    self.logger.info(f"Target positions to write: {total_positions_to_write} ({num_sampling_chunks_to_write} HDF5 chunks)")
-
-                    aligned_write_head = (write_head_position // hdf5_chunk_size) * hdf5_chunk_size
+            for sample_pos in all_sample_indices:
                 
-                    if aligned_write_head != write_head_position:
-                        misalignment = write_head_position - aligned_write_head
-                        self.logger.info(
-                            f"Buffer write head {write_head_position} is not HDF5 chunk aligned (size {hdf5_chunk_size}). "
-                            f"Using effective read start back by {misalignment} positions: {aligned_write_head}"
-                        )
+                if is_full:
+                    distance_from_newest = (newest_data_position - sample_pos + total_buffer_size) % total_buffer_size + 1
+                else:
+                    distance_from_newest = newest_data_position - sample_pos + 1
+                
+                cycle_age = int((distance_from_newest - 1) // data_positions_per_cycle)
+                weight = np.exp(-decay_lambda * cycle_age)
+                sample_weights.append(weight)
+                all_cycle_ages.append(cycle_age)
 
+            sample_probabilities = np.array(sample_weights) / np.sum(sample_weights)
+
+            all_cycle_ages = np.array(all_cycle_ages)
+            distinct_ages = np.unique(np.array(all_cycle_ages))
+
+            self.logger.info("--- Recency Age Group Index Mapping (Weighted per Sample) ---")
+            for age in distinct_ages:
+                indices_for_age = all_sample_indices[all_cycle_ages == age]
+                
+                if len(indices_for_age) > 0:
+                    age_weight = sample_weights[indices_for_age[0]]
+                    age_prob = sample_probabilities[indices_for_age[0]]
                     
-                    if recency_enabled:
-                        self.logger.info("Using exponential decay-based sampling prioritized by discrete data generation cycle.")
-                        
-                        decay_lambda = self.training_config['recency_decay_lambda']
-                        data_positions_per_cycle = self.global_config['data_generation_positions_per_cycle']
-                        
-                        # 1. Calculate the total number of cycles (including a partial cycle, if present)
-                        # This defines the "newest cycle index" for the decay calculation.
-                        num_total_cycles = (total_positions_source + data_positions_per_cycle - 1) // data_positions_per_cycle
-                        
-                        self.logger.info(f"Calculated {num_total_cycles} cycles in the buffer (Cycle size: {data_positions_per_cycle}).")
-
-                        if total_positions_source == self.global_config['buffer_positions_total']:
-                            oldest_data_start_position = aligned_write_head
+                    sorted_indices = np.sort(indices_for_age)
+                    
+                    ranges = []
+                    start = sorted_indices[0]
+                    end = sorted_indices[0]
+                    
+                    for i in range(1, len(sorted_indices)):
+                        if sorted_indices[i] == end + 1:
+                            end = sorted_indices[i]
                         else:
-                            oldest_data_start_position = 0
-                            
-                        self.logger.info(f"Oldest data starts at physical buffer position: {oldest_data_start_position}")
-                        self.logger.info("--- Recency Cycle Weight Summary (Relative to Oldest Data) ---")
-                        for cycle_i in range(num_total_cycles):
-                            relative_start = cycle_i * data_positions_per_cycle
-                            relative_end = min((cycle_i + 1) * data_positions_per_cycle, total_positions_source)
-                            absolute_start = (relative_start + aligned_write_head) % total_positions_source
-                            
-                            cycle_length = relative_end - relative_start
-                            absolute_end = (absolute_start + cycle_length) % total_positions_source
-                            absolute_end = (absolute_end - 1 + total_positions_source) % total_positions_source
-                            
-                            # 3. Calculate Weight
-                            cycle_age = (num_total_cycles - 1) - cycle_i
-                            base_weight = np.exp(-decay_lambda * cycle_age)
-                            
-                            self.logger.info(
-                                f"Cycle {cycle_i} (Age {cycle_age}): Base Weight {base_weight:.4f} | ABSOLUTE Positions: {absolute_start} to {absolute_end}"
-                            )
-                        self.logger.info("-------------------------------------------------------------------")
+                            ranges.append(f"{start}-{end}" if start != end else f"{start}")
+                            start = sorted_indices[i]
+                            end = sorted_indices[i]
+                    ranges.append(f"{start}-{end}" if start != end else f"{start}")
+                    
+                    self.logger.info(
+                        f"Age {age}: Ranges {', '.join(ranges)} (Total: {len(indices_for_age)}) | Weight: {age_weight:.4f} | Prob: {age_prob:.10f}"
+                    )
+                    
+            final_indices = np.random.choice(
+                all_sample_indices, 
+                size=total_positions_to_sample, 
+                p=sample_probabilities, 
+                replace=self.training_config['replacement']
+            ).tolist()
 
-                        all_chunk_indices = list(range(num_sampling_chunks_total_source))
-                        chunk_weights = []
-                        
-                        # 2. Calculate distance and weight for every chunk
-                        for chunk_i in all_chunk_indices:
-                            chunk_pos = chunk_i * hdf5_chunk_size
-                            
-                            # Determine the chunk's position relative to the start of the OLDEST data.
-                            if total_positions_source == self.global_config['buffer_positions_total']:
-                                # Buffer is full (wrapped). Oldest data starts at 'effective_write_head'.
-                                pos_relative_to_start = (chunk_pos - aligned_write_head) % total_positions_source
-                            else:
-                                # Buffer is NOT full. Oldest data starts at position 0.
-                                pos_relative_to_start = chunk_pos
-                                
-                            # The cycle index (0-indexed) this position belongs to. 
-                            cycle_index = pos_relative_to_start // data_positions_per_cycle
-                            
-                            # C. Calculate the cycle age (distance from the newest cycle)
-                            cycle_age = (num_total_cycles - 1) - cycle_index
-                            
-                            # Exponential decay: Newer data (smaller age) gets higher weight.
-                            weight = np.exp(-decay_lambda * cycle_age)
-                            chunk_weights.append(weight)
+        else:
+            self.logger.info("Using uniform sampling from all available HDF5 samples.")
+            
+            final_indices = np.random.choice(
+                all_sample_indices, 
+                size=total_positions_to_sample, 
+                replace=self.training_config['replacement']
+            ).tolist()
 
-
-                        # 3. Normalize and Sample
-                        chunk_probabilities = np.array(chunk_weights) / np.sum(chunk_weights)
-                        num_chunks_to_sample = min(num_sampling_chunks_to_write, len(all_chunk_indices))
-                        
-                        all_chunk_indices = np.random.choice(
-                            all_chunk_indices, 
-                            size=num_chunks_to_sample, 
-                            p=chunk_probabilities, 
-                            replace=True
-                        ).tolist()
-
-                    else:
-                        self.logger.info("Using uniform sampling from all available HDF5 chunks.")
-                        
-                        all_chunk_indices = list(range(num_sampling_chunks_total_source))
-                        num_chunks_to_sample = min(num_sampling_chunks_to_write, len(all_chunk_indices))
-                        
-                        # Use np.random.choice without the 'p' argument for uniform sampling
-                        all_chunk_indices = np.random.choice(
-                            all_chunk_indices, 
-                            size=num_chunks_to_sample, 
-                            replace=True
-                        ).tolist()
-
-
-                    self.logger.info(f"Total HDF5 chunks for training file: {len(all_chunk_indices)}")
-
-                    # Step 2b: Create destination HDF5 datasets and close immediately
-                    with h5py.File(temp_path_writing, 'w') as hf_dest:
-                        board_shape = hf_source['inputs'].shape[1:]
-                        policy_shape = hf_source['policies'].shape[1:]
-                        
-                        # Datasets are sized to the clamped total_positions_to_write
-                        hf_dest.create_dataset('inputs', shape=(total_positions_to_write, *board_shape), dtype=np.float16, chunks=(batch_size, *board_shape), compression='gzip')
-                        hf_dest.create_dataset('policies', shape=(total_positions_to_write, *policy_shape), dtype=np.float16, chunks=(batch_size, *policy_shape), compression='gzip')
-                        hf_dest.create_dataset('values', shape=(total_positions_to_write,), dtype=np.float16, chunks=(batch_size,), compression='gzip')
-
-                    # Step 4: Open destination file for R/W and process chunks
-                    with h5py.File(temp_path_writing, 'r+') as hf_dest:
-                        
-                        # The iteration reads from the sampled list in blocks of chunks_per_io_chunk
-                        for io_chunk_idx, start_chunk_idx in enumerate(range(0, len(all_chunk_indices), chunks_per_io_chunk)):
-                            
-                            self.logger.info(f"Processing IO chunk {io_chunk_idx + 1}")
-                            
-                            if current_write_position >= total_positions_to_write:
-                                break
-
-                            end_chunk_idx = min(start_chunk_idx + chunks_per_io_chunk, len(all_chunk_indices))
-                            # This list holds the indices for all small chunks in this large I/O operation
-                            current_chunks_source_indices = all_chunk_indices[start_chunk_idx:end_chunk_idx]
-                            
-                            # Read ALL small chunks that form the current I/O block
-                            inputs_chunks, policies_chunks, values_chunks = [], [], []
-                            for chunk_i in current_chunks_source_indices:
-                                chunk_start = chunk_i * hdf5_chunk_size
-                                chunk_end = chunk_start + hdf5_chunk_size
-                                inputs_chunks.append(hf_source['inputs'][chunk_start:chunk_end])
-                                policies_chunks.append(hf_source['policies'][chunk_start:chunk_end])
-                                values_chunks.append(hf_source['values'][chunk_start:chunk_end])
-
-                            # Concatenate (forms the large I/O block) and local shuffle
-                            chunk_inputs = np.concatenate(inputs_chunks, axis=0)
-                            chunk_policies = np.concatenate(policies_chunks, axis=0)
-                            chunk_values = np.concatenate(values_chunks, axis=0)
-                            
-                            # --- Local Shuffle (Single Shuffle for the entire IO block) ---
-                            chunk_size = chunk_inputs.shape[0]
-                            local_indices = np.arange(chunk_size)
-                            np.random.shuffle(local_indices)
-                            chunk_inputs = chunk_inputs[local_indices]
-                            chunk_policies = chunk_policies[local_indices]
-                            chunk_values = chunk_values[local_indices]
-
-                            # Write Limit Logic
-                            remaining_to_write = total_positions_to_write - current_write_position
-                            write_count = min(chunk_size, remaining_to_write) 
-                            
-                            # Write the limited portion of the shuffled I/O block back to destination
-                            write_start = current_write_position
-                            write_end = current_write_position + write_count
-
-                            # This single write operation is a large block defined by the IO chunk size
-                            hf_dest['inputs'][write_start:write_end] = chunk_inputs[:write_count]
-                            hf_dest['policies'][write_start:write_end] = chunk_policies[:write_count]
-                            hf_dest['values'][write_start:write_end] = chunk_values[:write_count]
-
-                            current_write_position += write_count
-                            
-                            if write_count < chunk_size:
-                                self.logger.info(f"Write limit reached. Wrote final partial chunk of size {write_count}.")
-                                break
-
-                    os.rename(temp_path_writing, self.shuffled_hdf5_path)
-                    self.logger.info(f"Successfully created shuffled HDF5 file with {current_write_position} entries at: {self.shuffled_hdf5_path}")
-
-            except Exception as e:
-                self.logger.error(f"Failed to create shuffled HDF5 file: {e}")
-                if os.path.exists(temp_path_writing):
-                    os.remove(temp_path_writing)
-                self.shuffled_hdf5_path = None
-                raise
-
-
-    def _clean_up_shuffled_file(self):
-        """Deletes the temporary shuffled HDF5 file."""
-        if self.shuffled_hdf5_path and os.path.exists(self.shuffled_hdf5_path):
-            self.logger.info(f"Deleting temporary shuffled HDF5 file: {self.shuffled_hdf5_path}")
-            os.remove(self.shuffled_hdf5_path)
+        
+        random.shuffle(final_indices)
+        self.logger.info(f"Successfully generated {len(final_indices)} globally shuffled, sample-prioritized indices.")
+        
+        return final_indices
 
 
     def _get_dataloaders(self):
-        # We now load data from the temporary shuffled HDF5 file
-        self.logger.info(f"Loading data from shuffled HDF5 file: {self.shuffled_hdf5_path}")
         
-        chunk_size = self.training_config['batch_size']
-        full_dataset = ChessDataset(hdf5_path=self.shuffled_hdf5_path, chunk_size=chunk_size)
+        # 1. Generate the absolute, shuffled indices
+        self.training_indices = self._get_shuffled_sample_indices() 
+        batch_size = self.training_config['batch_size']
+        
+        # 2. Instantiate the random-access dataset using the ORIGINAL hdf5_path
+        full_dataset = ChessDataset(hdf5_path=self.hdf5_path, indices=self.training_indices) 
 
         num_workers = 4
 
         train_loader = DataLoader(
             full_dataset,
-            batch_size=1,
-            shuffle=True, 
+            batch_size=batch_size,
+            shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
             prefetch_factor=4 if num_workers > 0 else None,
             worker_init_fn=_worker_init_fn if num_workers > 0 else None,
-            collate_fn=unwrap_single_batch
         )
 
-        self.logger.info(f"Training set size: {len(full_dataset)} chunks ({len(train_loader)} batches)")
+        # Calculate the total steps based on the number of samples
+        total_steps = (len(self.training_indices) + batch_size - 1) // batch_size
+        self.logger.info(f"Training set size: {len(full_dataset)} samples ({total_steps} batches)")
 
-        return train_loader
+        return train_loader, full_dataset
 
 
 
     def run_training_loop(self):
         final_model_path = None
         training_steps_completed = 0
+        full_dataset = None 
         
         try:
-            self._duplicate_and_shuffle_hdf5()
-            train_loader = self._get_dataloaders()
+            train_loader, full_dataset = self._get_dataloaders()
             
-            # The number of steps in the current training file/dataloader
             total_training_steps_this_cycle = len(train_loader) 
             self.logger.info(f"Total training steps for this run: {total_training_steps_this_cycle}")
             
@@ -338,7 +212,7 @@ class TrainTask:
                 dropout_conv_start_block=self.training_config['dropout_conv_start_block']
             ).to(self.device)
 
-            # --- Loading model state and potentially optimizer state ---
+            # Loading model state
             checkpoint = torch.load(self.best_model_path, map_location=self.device)
             model.load_state_dict(checkpoint['model_state_dict'])
             self.logger.info("Model weights loaded from checkpoint dictionary.")
@@ -349,27 +223,49 @@ class TrainTask:
             value_criterion = nn.MSELoss()
 
             momentum_rate = self.training_config['momentum_rate']
+            lr_max = float(self.training_config['cosine_max'])
+            lr_min = float(self.training_config['cosine_min'])
+            warmup_steps = int(self.training_config['warmup_steps'])
+            warmup_start_lr = float(self.training_config['warmup_start_lr'])
             
-            # --- Optimizer Setup with Manual LR ---
+            # Optimizer Setup with Manual LR
             optimizer = optim.SGD(
                 model.parameters(), 
-                lr=float(self.training_config['learning_rate']),
+                lr=warmup_start_lr,
                 momentum=momentum_rate,
                 weight_decay=float(self.training_config['weight_decay'])
             )
-            # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            optimizer.param_groups[0]['lr'] = float(self.training_config['learning_rate'])
-            self.logger.info(f"Optimizer (SGD with Momentum={momentum_rate}) initialized with fixed Learning Rate: {optimizer.param_groups[0]['lr']:.4f}")
+            
+            # Initial warmup
+            def lr_lambda(current_step: int):
+                if current_step < warmup_steps:
+                    target_lr = warmup_start_lr + (lr_max - warmup_start_lr) * current_step / warmup_steps
+                    
+                    return target_lr / warmup_start_lr
+                else:
+                    T_cosine = total_training_steps_this_cycle - warmup_steps
+                    T_eff = current_step - warmup_steps
+                    
+                    target_lr = lr_min + 0.5 * (lr_max - lr_min) * (1 + math.cos(math.pi * T_eff / T_cosine))
+                    
+                    return target_lr / warmup_start_lr
 
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+            self.logger.info(
+                f"Optimizer (SGD with Momentum={momentum_rate}) initialized. "
+                f"Warmup configured (Start: {warmup_start_lr:.6f} for {warmup_steps} steps) "
+                f"followed by CosineAnnealingLR (Max: {lr_max:.6f}, Min: {lr_min:.6f}) "
+                f"over {total_training_steps_this_cycle} total steps."
+            )
+            
             scaler = GradScaler('cuda')
 
-            # --- Training Phase: Single Pass ---
+            # Training Phase: Single Pass
             model.train()
             running_total_loss = 0.0
             
-            # The loop runs for the exact number of batches defined by the temporary HDF5 file
             for batch_idx, (board_tensors, policy_target, value_targets) in enumerate(train_loader):
-                # Calculate the global step count for logging (only meaningful relative to this task)
                 current_step = batch_idx + 1
                 
                 batch_start_time = time.perf_counter()
@@ -405,7 +301,8 @@ class TrainTask:
 
                 scaler.step(optimizer)
                 scaler.update()
-                            
+                scheduler.step()
+                                
                 running_total_loss += total_loss.item()
                 
                 batch_end_time = time.perf_counter()
@@ -428,21 +325,21 @@ class TrainTask:
             self.logger.info(f"--- Training Run Summary ---")
             self.logger.info(f"Total Steps Completed This Cycle: {training_steps_completed}, Average Total Loss: {avg_total_loss_train:.4f}")
             
-            # --- Save the final model (weights AND optimizer state) ---
+            #  Save the final model (weights AND optimizer state)
             final_model_path = os.path.join(self.output_dir, f"model_iter_{self.cycle_number}.pth")
             
             # Create the checkpoint dictionary
             model_dict = {
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
+                'model_state_dict': model.state_dict()
             }
             
             torch.save(model_dict, final_model_path)
             self.logger.info(f"Final model (with optimizer state) saved to {final_model_path}")
-            
             self.logger.info("Training complete for this task!")
             
         finally:
-            self._clean_up_shuffled_file()
+            if full_dataset:
+                self.logger.info("Closing HDF5 file handle(s) in ChessDataset.")
+                full_dataset.close()
             
         return final_model_path, training_steps_completed

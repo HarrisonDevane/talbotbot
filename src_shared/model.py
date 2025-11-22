@@ -40,7 +40,7 @@ class ResidualBlock(nn.Module):
 
 
 class ChessAIModel(nn.Module):
-    def __init__(self, num_input_planes: int, num_residual_blocks: int = 68, num_filters: int = 128, 
+    def __init__(self, num_input_planes: int, num_residual_blocks: int = 18, num_filters: int = 128, 
                      dropout_rate_conv: float = 0.1, 
                      dropout_rate_fc: float = 0.2,
                      dropout_conv_start_block: int = 10): # New parameter: 1-indexed block number to start applying conv dropout
