@@ -1,13 +1,13 @@
 state:
-  best_model_cycle: 29
-  best_model_updates: 27
+  best_model_cycle: 35
+  best_model_updates: 31
   buffer_positions_current: 8192000
-  buffer_write_head: 4135567
-  current_cycle: 31
+  buffer_write_head: 55018
+  current_cycle: 36
   data_generation_positions_current: 0
-  total_games: 173451
-  total_hours_data_generation: 270.67305417882085
-  total_hours_evaluation: 34.276560615301136
-  total_hours_training: 2.5642576038837435
-  total_positions: 16489408
-  total_training_steps: 15400
+  total_games: 245880
+  total_hours_data_generation: 329.4471786435446
+  total_hours_evaluation: 37.88339297771454
+  total_hours_training: 3.166589466200935
+  total_positions: 20600859
+  total_training_steps: 19400

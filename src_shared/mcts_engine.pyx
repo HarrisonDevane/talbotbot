@@ -130,7 +130,6 @@ cdef class MCTSEngine:
         cdef MCTSNode_c.MCTSNode new_root         
         cdef object current_our_move = our_move
         cdef object current_opponent_move = opponent_move
-        self.logger.debug("A")
 
         if self.root is None:
             self.logger.info("MCTSEngine: New root node created.")
@@ -138,23 +137,19 @@ cdef class MCTSEngine:
             self._expand_root()
             return
 
-        self.logger.debug("B")
         
         # If our last move is a child of the root, we update the root to that child.
         if current_our_move and current_our_move in self.root.children:
-            self.logger.debug("C")
             new_root = self.root.children[current_our_move] 
             new_root.move = None
             new_root.parent = None
             self.root = new_root
-            self.logger.debug("D")
 
             self.logger.info(f"MCTSEngine: Root changed to child for our move {current_our_move.uci()}.")
 
             # If opponent move also exists, we further update the root to our move's child node.
             if current_opponent_move:
                 if current_opponent_move in self.root.children:
-                    self.logger.debug("E")
                     new_root = self.root.children[current_opponent_move]
                     new_root.move = None
                     new_root.parent = None
@@ -336,7 +331,7 @@ cdef class MCTSEngine:
 
 
 
-    cpdef run_simulations(self, int search_depth): # search_depth is C-typed
+    cpdef run_simulations(self, int search_depth):
         """
         Runs a specified number of MCTS simulations. Each simulation involves
         selection, queuing for inference, waiting for a result, and finally
@@ -353,7 +348,7 @@ cdef class MCTSEngine:
         if not self.root.expanded:
             self._expand_root()
 
-        self.simulation_count = 0
+        self.simulation_count = self.root.visits
         self.inference_sent = 0
         self.inference_received = 0
         self.batch_buffer = []

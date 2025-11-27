@@ -1,19 +1,31 @@
 game:
   white_player: 'talbotbot'
-  white_time_per_move: 10.0
   black_player: 'human'
-  black_time_per_move: 4.0
-  total_games: 5
   initial_fen: Null
 
-talbot:
-  model_path: "training/reinforcement/rl_cycles/best_models/best_model.pth"
+model:
+  model_path: 'training/reinforcement/rl_cycles/best_models/best_model.pth'
   input_planes: 68
   filters: 128
   resblocks: 16
-  cpuct: 2.0
-  batchsize: 16
 
-logging:
-  main_logging: True
-  main_logging_level: 20
+evaluation:
+  training: False
+  inference_worker_cores: 
+    - [12, 13, 14, 15]
+  batch_size_per_worker: 16
+  batch_size_factor: 10
+  batch_timeout: 0.001
+  cpuct: 1.5
+  search_depth: 5000
+  virtual_loss: 0.3
+  temperature_threshold_move: 0
+  temperature_high: 0
+  temperature_low: 0
+  dirichlet_alpha: 0.0
+  dirichlet_epsilon: 0.0
+  draw_cutoff: 0.0
+  resignation_probability: 0.0
+  resignation_cutoff: 0.0
+  worker_logging_level: 20
+  inference_logging_level: 20

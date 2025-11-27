@@ -66,15 +66,8 @@ class RLOrchestrator:
             num_filters=self.params_config['model']['filters']
         )
 
-        optimizer = optim.AdamW(
-            model.parameters(), 
-            lr=float(self.params_config['training']['learning_rate']), 
-            weight_decay=float(self.params_config['training']['weight_decay'])
-        )
-
         model_dict = {
             'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
         }
 
         torch.save(model_dict, os.path.join(rl_dir, 'rl_cycles', 'best_models', 'initial_model.pth'))
@@ -329,14 +322,12 @@ class RLOrchestrator:
                 best_iter = self.state_config['state']['best_model_cycle']
             )
             test_score, best_score = evaluation_task.run_for_n_games(self.params_config['global']['eval_games'])
-
+        
             total_eval_time = time.time() - start_eval_time
             self.state_config['state']['total_hours_evaluation'] += (total_eval_time / 3600)
 
             evaluation_task = None
             self.logger.info(f"3. Evaluation finished with result: {test_score}-{best_score}")
-
-            raise RuntimeError
 
             # Step 4. Save best model
             win_rate = test_score / self.params_config['global']['eval_games']

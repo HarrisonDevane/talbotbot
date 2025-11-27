@@ -85,18 +85,18 @@ class InferenceBatcher:
         import torch
 
         # Limit threads for various libraries
-        os.environ["OMP_NUM_THREADS"] = "1"
-        os.environ["MKL_NUM_THREADS"] = "1"
-        os.environ["OPENBLAS_NUM_THREADS"] = "1"
-        os.environ["NUMEXPR_NUM_THREADS"] = "1"
-        os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-        os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
-        os.environ["TF_NUM_INTEROP_THREADS"] = "1"
-
+        os.environ["OMP_NUM_THREADS"] = str(len(core_id))
+        os.environ["MKL_NUM_THREADS"] = str(len(core_id))
+        os.environ["OPENBLAS_NUM_THREADS"] = str(len(core_id))
+        os.environ["NUMEXPR_NUM_THREADS"] = str(len(core_id))
+        os.environ["VECLIB_MAXIMUM_THREADS"] = str(len(core_id))
+        os.environ["TF_NUM_INTRAOP_THREADS"] = str(len(core_id))
+        os.environ["TF_NUM_INTEROP_THREADS"] = str(len(core_id))
         torch.set_num_threads(1)
         
         # Pin to one CPU core
         psutil.Process().cpu_affinity(core_id)
+
 
     def run(self, inference_queue, result_queues, core_id, shared_input_buffer, shared_policy_buffer, shared_value_buffer):
         """
