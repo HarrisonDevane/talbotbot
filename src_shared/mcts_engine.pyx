@@ -131,6 +131,12 @@ cdef class MCTSEngine:
         cdef object current_our_move = our_move
         cdef object current_opponent_move = opponent_move
 
+        # Set new root for training
+        if self.training:
+            self.root = MCTSNode_c.MCTSNode(board.copy())
+            self._expand_root()
+            return
+
         if self.root is None:
             self.logger.info("MCTSEngine: New root node created.")
             self.root = MCTSNode_c.MCTSNode(board.copy())
@@ -161,10 +167,7 @@ cdef class MCTSEngine:
                     self._expand_root()
 
         # After updating the root, we check if it's already expanded.
-        if self.root.expanded:
-            if self.training:
-                self._add_dirichlet_noise(self.root)
-        else:
+        if not self.root.expanded:
             self.logger.warning("MCTSE Engine: New root node created due to no matching branch or initial state.")
             self.root = MCTSNode_c.MCTSNode(board.copy())
             self._expand_root()

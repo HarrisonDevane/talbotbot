@@ -34,7 +34,7 @@ class HumanPlayer:
     
 
 class ChessGUI:
-    def __init__(self, root, logger: logging.Logger):
+    def __init__(self, root, logger: logging.Logger, white_perspective):
         self.root = root
         self.root.title("Chess GUI")
 
@@ -42,7 +42,8 @@ class ChessGUI:
         self.window.title("Talbot Chess")
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
         self.logger = logger
-
+        self.white_perspective = white_perspective
+        
         self.board = chess.Board()
         self.selected_square = None
         self.legal_targets = []
@@ -90,7 +91,12 @@ class ChessGUI:
 
     def on_left_click(self, row, col):
         if self.controller:
-            square = chess.square(col, 7 - row)
+            
+            if self.white_perspective:
+                square = chess.square(col, 7 - row)
+            else:
+                square = chess.square(7 - col, row)
+                
             self.controller.handle_gui_click(square)
 
     def update_board(self, board=None, last_move=None, legal_moves=[], selected_square=None):
@@ -102,7 +108,11 @@ class ChessGUI:
 
         for (r, c), canvas in self.squares.items():
             canvas.delete("all")
-            square = chess.square(c, 7 - r)
+            
+            if self.white_perspective:
+                square = chess.square(c, 7 - r)
+            else:
+                square = chess.square(7 - c, r)
 
             # Highlight last move
             if self.last_move and (square == self.last_move.from_square or square == self.last_move.to_square):
@@ -114,6 +124,7 @@ class ChessGUI:
 
             # Draw legal move targets
             if square in self.legal_targets:
+                canvas.create_rectangle(0, 0, 96, 96, fill=self.square_colors.get((r,c)), outline="")
                 canvas.create_oval(38, 38, 58, 58, fill="#829769", outline="")
 
             # Draw piece
@@ -130,7 +141,7 @@ class ChessGUI:
         if self.controller:
             self.controller.shutdown()
         self.window.quit()
-        self.window.destroy() 
+        self.window.destroy()
 
 
 class GameController:
@@ -308,11 +319,9 @@ class GameController:
         Gracefully terminates the game thread.
         """
         self.logger.critical("\n--- SHUTDOWN INITIATED: Terminating GameController thread. ---\n")
-        self.running = False # Set the flag to stop the while loop in _game_loop_logic
+        self.running = False
         
-        # This check is now safe because self._game_thread is initialized to None in __init__
         if self._game_thread and self._game_thread.is_alive(): 
-            # Wait for the thread to finish its current sleep/move and exit
             self._game_thread.join(timeout=1.0)
             if self._game_thread.is_alive():
                 self.logger.warning("Game thread did not join gracefully within timeout.")
@@ -357,7 +366,7 @@ def main():
     buffer_free_slots = None
     
     # Max batch size for a single worker
-    max_batch_size = evaluation_config['batch_size_per_worker']
+    max_batch_size = evaluation_config['batch_size_per_worker'] * evaluation_config['batch_size_factor']
     
     # Shared Input Buffer (float32)
     shared_input_buffer = torch.zeros(
@@ -413,10 +422,10 @@ def main():
     def initialize_player(player_type, color_name):
         nonlocal worker_id
         
-        if player_type == "talbotbot":
+        if player_type == "talbot":
 
             player = SelfPlayAgent(
-                name=f"talbotbot-{color_name.lower()}",
+                name=f"talbot-{color_name.lower()}",
                 logger=logger,
                 self_play_config=evaluation_config,
                 worker_id=worker_id,
@@ -432,10 +441,6 @@ def main():
         
         elif player_type == "human":
              return HumanPlayer()
-        
-        else:
-            logger.critical(f"Unsupported player type '{player_type}' configured. Only 'talbotbot' and 'human' are supported. Exiting.")
-            sys.exit(1)
 
 
     white_player = initialize_player(white_player_type, "White")
@@ -443,7 +448,7 @@ def main():
 
     # --- 4. GAME CONTROLLER AND EXECUTION ---
     root = tk.Tk()
-    gui = ChessGUI(root, logger) 
+    gui = ChessGUI(root, logger, game_config['white_perspective']) 
 
     controller = GameController(
         logger=logger,

@@ -46,28 +46,7 @@ class SelfPlayAgent:
             self.logger.info(f"\n{'='*60}\n{' '*20}--- MOVE {move_number}: {'White' if board.turn == chess.WHITE else 'Black'}, PLY {ply_count} STARTED ---\n{'='*60}\n")
             move_start_time = time.time()
 
-            if self.mcts is None:
-                self.mcts = MCTSEngine(
-                    logger=self.logger, 
-                    worker_id=self.worker_id,
-                    training=self.self_play_config['training'],
-                    worker_batch_size=self.worker_batch_size,
-                    inference_queue=self.inference_queue,
-                    result_queue=self.result_queue,
-                    cpuct=self.self_play_config['cpuct'], 
-                    virtual_loss=self.self_play_config['virtual_loss'],
-                    dirichlet_alpha=self.self_play_config['dirichlet_alpha'],
-                    dirichlet_epsilon=self.self_play_config['dirichlet_epsilon'],
-                    draw_cutoff=self.self_play_config['draw_cutoff'],
-                    shared_input_buffer=self.shared_input_buffer,
-                    shared_policy_buffer=self.shared_policy_buffer,
-                    shared_value_buffer=self.shared_value_buffer,
-                    buffer_free_slots=self.buffer_free_slots
-                    
-                )
-                self.mcts.set_new_root(board.copy(), None, None) 
-            else:
-                self.mcts.set_new_root(board.copy(), self.our_last_move, last_move_played)
+            self.mcts.set_new_root(board.copy(), self.our_last_move, last_move_played)
             
             self.logger.info(f"Current player: {self.name}")
             self.logger.info(f"Our last move: {self.our_last_move}. Last move played {last_move_played}")
@@ -171,20 +150,23 @@ class SelfPlayAgent:
                 total_visits = np.sum(visits)
 
                 if total_visits > 0:
+                    # Calculate the raw probabilities for the training target.
+                    training_probs = visits / total_visits
+
                     temperature = self.self_play_config['temperature_low']
                     if move_number <= self.self_play_config['temperature_threshold_move']:
                         temperature = self.self_play_config['temperature_high']
                     
+                    # 2. Calculate probabilities for move selection
                     if temperature < 1e-6:
-                        probabilities = visits / total_visits
-                        best_move_index = np.argmax(probabilities)
+                        best_move_index = np.argmax(visits)
                         best_move = moves[best_move_index]
                     else:
                         visits_exp = visits ** (1.0 / temperature)
-                        probabilities = visits_exp / np.sum(visits_exp)
-                        best_move = moves[np.random.choice(len(moves), p=probabilities)]
+                        playing_probs = visits_exp / np.sum(visits_exp)
+                        best_move = moves[np.random.choice(len(moves), p=playing_probs)]
                     
-                    for move, prob in zip(moves, probabilities):
+                    for move, prob in zip(moves, training_probs):
                         from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
                         flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                         policy_vector[flat_index] = prob

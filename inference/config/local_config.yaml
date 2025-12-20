@@ -1,7 +1,8 @@
 game:
-  white_player: 'talbotbot'
+  white_player: 'talbot'
   black_player: 'human'
   initial_fen: Null
+  white_perspective: False
 
 model:
   model_path: 'training/reinforcement/rl_cycles/best_models/best_model.pth'
@@ -14,13 +15,13 @@ evaluation:
   inference_worker_cores: 
     - [12, 13, 14, 15]
   batch_size_per_worker: 16
-  batch_size_factor: 10
+  batch_size_factor: 2
   batch_timeout: 0.001
-  cpuct: 1.5
+  cpuct: 2.5
   search_depth: 5000
   virtual_loss: 0.3
-  temperature_threshold_move: 0
-  temperature_high: 0
+  temperature_threshold_move: 5
+  temperature_high: 0.3
   temperature_low: 0
   dirichlet_alpha: 0.0
   dirichlet_epsilon: 0.0

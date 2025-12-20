@@ -61,100 +61,25 @@ class TrainTask:
         is determined by the 'data_generation_positions_per_cycle' block it belongs to.
         The final list is globally shuffled.
         """
-        fixed_steps = self.training_config['training_steps']
-        recency_enabled = self.training_config['recency_priority']
-        write_head_position = self.state_config['buffer_write_head']
+        sampling_ratio = self.training_config['sampling_ratio']
         total_positions_source = self.state_config['buffer_positions_current']
         batch_size = self.training_config['batch_size']
-        total_buffer_size = self.global_config['buffer_positions_total']
-
-        sampling_mode = "Recency-based PER (Sample Weighted)" if recency_enabled else "Uniform Sampling"
-        self.logger.info(f"Starting index generation using: {sampling_mode}.")
 
         # Total pool of individual sample indices (positions) to sample FROM
         all_sample_indices = np.arange(total_positions_source)
         
-        # The number of individual samples (positions) required for the training run
+        # Train for dynamic number of steps based on a fixed sampling ratio
+        fixed_steps = int(sampling_ratio * (self.global_config['data_generation_positions_per_cycle'] / batch_size))
         total_positions_to_sample = min(fixed_steps * batch_size, total_positions_source)
         
         self.logger.info(f"Target samples to sample: {total_positions_to_sample}")
-
+        self.logger.info("Using uniform sampling from all available HDF5 samples.")
         
-        # --- 1. Weighted vs. Uniform Sampling (working with individual sample indices) ---
-        if recency_enabled:                        
-            decay_lambda = self.training_config['recency_decay_lambda']
-            data_positions_per_cycle = self.global_config['data_generation_positions_per_cycle'] 
-            
-            is_full = (total_positions_source == total_buffer_size)
-            
-            if is_full:
-                newest_data_position = (write_head_position - 1 + total_buffer_size) % total_buffer_size
-            else:
-                newest_data_position = total_positions_source - 1
-            
-            self.logger.info("--- Recency-based PER Initialization ---")
-            sample_weights = []
-            all_cycle_ages = []
-
-            for sample_pos in all_sample_indices:
-                
-                if is_full:
-                    distance_from_newest = (newest_data_position - sample_pos + total_buffer_size) % total_buffer_size + 1
-                else:
-                    distance_from_newest = newest_data_position - sample_pos + 1
-                
-                cycle_age = int((distance_from_newest - 1) // data_positions_per_cycle)
-                weight = np.exp(-decay_lambda * cycle_age)
-                sample_weights.append(weight)
-                all_cycle_ages.append(cycle_age)
-
-            sample_probabilities = np.array(sample_weights) / np.sum(sample_weights)
-
-            all_cycle_ages = np.array(all_cycle_ages)
-            distinct_ages = np.unique(np.array(all_cycle_ages))
-
-            self.logger.info("--- Recency Age Group Index Mapping (Weighted per Sample) ---")
-            for age in distinct_ages:
-                indices_for_age = all_sample_indices[all_cycle_ages == age]
-                
-                if len(indices_for_age) > 0:
-                    age_weight = sample_weights[indices_for_age[0]]
-                    age_prob = sample_probabilities[indices_for_age[0]]
-                    
-                    sorted_indices = np.sort(indices_for_age)
-                    
-                    ranges = []
-                    start = sorted_indices[0]
-                    end = sorted_indices[0]
-                    
-                    for i in range(1, len(sorted_indices)):
-                        if sorted_indices[i] == end + 1:
-                            end = sorted_indices[i]
-                        else:
-                            ranges.append(f"{start}-{end}" if start != end else f"{start}")
-                            start = sorted_indices[i]
-                            end = sorted_indices[i]
-                    ranges.append(f"{start}-{end}" if start != end else f"{start}")
-                    
-                    self.logger.info(
-                        f"Age {age}: Ranges {', '.join(ranges)} (Total: {len(indices_for_age)}) | Weight: {age_weight:.4f} | Prob: {age_prob:.10f}"
-                    )
-                    
-            final_indices = np.random.choice(
-                all_sample_indices, 
-                size=total_positions_to_sample, 
-                p=sample_probabilities, 
-                replace=self.training_config['replacement']
-            ).tolist()
-
-        else:
-            self.logger.info("Using uniform sampling from all available HDF5 samples.")
-            
-            final_indices = np.random.choice(
-                all_sample_indices, 
-                size=total_positions_to_sample, 
-                replace=self.training_config['replacement']
-            ).tolist()
+        final_indices = np.random.choice(
+            all_sample_indices, 
+            size=total_positions_to_sample, 
+            replace=self.training_config['replacement']
+        ).tolist()
 
         
         random.shuffle(final_indices)
@@ -172,7 +97,7 @@ class TrainTask:
         # 2. Instantiate the random-access dataset using the ORIGINAL hdf5_path
         full_dataset = ChessDataset(hdf5_path=self.hdf5_path, indices=self.training_indices) 
 
-        num_workers = 4
+        num_workers = self.training_config['data_loader_workers']
 
         train_loader = DataLoader(
             full_dataset,
@@ -189,7 +114,6 @@ class TrainTask:
         self.logger.info(f"Training set size: {len(full_dataset)} samples ({total_steps} batches)")
 
         return train_loader, full_dataset
-
 
 
     def run_training_loop(self):
@@ -222,45 +146,36 @@ class TrainTask:
             policy_criterion = nn.KLDivLoss(reduction='batchmean')
             value_criterion = nn.MSELoss()
 
+            target_lr = float(self.training_config['learning_rate'])
             momentum_rate = self.training_config['momentum_rate']
-            lr_max = float(self.training_config['cosine_max'])
-            lr_min = float(self.training_config['cosine_min'])
-            warmup_steps = int(self.training_config['warmup_steps'])
-            warmup_start_lr = float(self.training_config['warmup_start_lr'])
             
-            # Optimizer Setup with Manual LR
+            # 2. Setup Optimizer with that fixed LR
             optimizer = optim.SGD(
                 model.parameters(), 
-                lr=warmup_start_lr,
+                lr=target_lr,
                 momentum=momentum_rate,
                 weight_decay=float(self.training_config['weight_decay'])
             )
-            
-            # Initial warmup
-            def lr_lambda(current_step: int):
-                if current_step < warmup_steps:
-                    target_lr = warmup_start_lr + (lr_max - warmup_start_lr) * current_step / warmup_steps
-                    
-                    return target_lr / warmup_start_lr
-                else:
-                    T_cosine = total_training_steps_this_cycle - warmup_steps
-                    T_eff = current_step - warmup_steps
-                    
-                    target_lr = lr_min + 0.5 * (lr_max - lr_min) * (1 + math.cos(math.pi * T_eff / T_cosine))
-                    
-                    return target_lr / warmup_start_lr
 
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-            self.logger.info(
-                f"Optimizer (SGD with Momentum={momentum_rate}) initialized. "
-                f"Warmup configured (Start: {warmup_start_lr:.6f} for {warmup_steps} steps) "
-                f"followed by CosineAnnealingLR (Max: {lr_max:.6f}, Min: {lr_min:.6f}) "
-                f"over {total_training_steps_this_cycle} total steps."
-            )
-            
             scaler = GradScaler('cuda')
 
+            # 3. Load Optimizer State (Preserve Momentum)
+            if 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = target_lr
+                
+                self.logger.info(f"Optimizer state loaded, but Learning Rate forced to static value: {target_lr}")
+
+            if 'scaler_state_dict' in checkpoint:
+                scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            
+            self.logger.info(
+                f"Optimizer (SGD with Momentum={momentum_rate}) initialized. "
+                f"Using static Learning Rate: {target_lr}"
+            )
+            
             # Training Phase: Single Pass
             model.train()
             running_total_loss = 0.0
@@ -301,8 +216,7 @@ class TrainTask:
 
                 scaler.step(optimizer)
                 scaler.update()
-                scheduler.step()
-                                
+                                                
                 running_total_loss += total_loss.item()
                 
                 batch_end_time = time.perf_counter()
@@ -330,7 +244,9 @@ class TrainTask:
             
             # Create the checkpoint dictionary
             model_dict = {
-                'model_state_dict': model.state_dict()
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict()
             }
             
             torch.save(model_dict, final_model_path)

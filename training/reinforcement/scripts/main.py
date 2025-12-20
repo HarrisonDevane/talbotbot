@@ -7,12 +7,10 @@ import h5py
 import shutil
 import random
 import torch
-import torch.optim as optim
 
 # Assuming this import is in your project structure
 from data_generation_task import DataGenerationTask
 from train_task import TrainTask
-from evaluation_task import EvaluationTask
 
 # --- Configuration Paths ---
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -36,15 +34,17 @@ class RLOrchestrator:
         with open(CONFIG_RL_STATE_FILE, 'r') as f:
             self.state_config = yaml.safe_load(f)
 
+        self.current_steps = self.state_config['state']['current_training_steps']
         self.current_cycle = self.state_config['state']['current_cycle']
-        self.stop_cycle = self.params_config['global']['stop_cycle']
+
+        self.total_steps = self.params_config['global']['total_training_steps']
+        self.save_interval = self.params_config['global']['save_interval_steps']
 
 
         self.best_model_path = os.path.abspath(os.path.join(RL_CYCLES_DIR, "best_models", "best_model.pth"))
 
         if not os.path.exists(self.best_model_path):
             self._create_new_model()
-
 
         os.makedirs(RL_CYCLES_DIR, exist_ok=True)
 
@@ -70,8 +70,10 @@ class RLOrchestrator:
             'model_state_dict': model.state_dict(),
         }
 
-        torch.save(model_dict, os.path.join(rl_dir, 'rl_cycles', 'best_models', 'initial_model.pth'))
-        torch.save(model_dict, os.path.join(rl_dir, 'rl_cycles', 'best_models', 'best_model.pth'))
+        os.makedirs(os.path.join(RL_CYCLES_DIR, 'best_models'),  exist_ok=True)
+
+        torch.save(model_dict, os.path.join(RL_CYCLES_DIR, 'best_models', 'initial_model.pth'))
+        torch.save(model_dict, os.path.join(RL_CYCLES_DIR, 'best_models', 'best_model.pth'))
 
 
     def _setup_cycle_logger(self, cycle_dir):
@@ -196,7 +198,7 @@ class RLOrchestrator:
                 self.logger.info("Creating new HDF5 datasets for the buffer with explicit chunking.")
                 
                 # Get the batch size from your config
-                hdf5_chunk_size = self.params_config['training']['hdf5_chunk_size']
+                hdf5_chunk_size = self.params_config['global']['hdf5_chunk_size']
                 
                 # Use the shape of the first data chunk to define the rest of the dimensions
                 board_shape = boards.shape[1:]
@@ -221,7 +223,7 @@ class RLOrchestrator:
         """
         The main orchestration loop.
         """
-        while self.current_cycle <= self.stop_cycle:
+        while self.current_steps <= self.total_steps:
             # --- Setup cycle-specific directories and logger ---
             cycle_dir = os.path.join(RL_CYCLES_DIR, f"iteration_{self.current_cycle}")
             os.makedirs(cycle_dir, exist_ok=True)
@@ -232,11 +234,9 @@ class RLOrchestrator:
             # Initial messages are now logged here, inside the first cycle's log
             if self.current_cycle == self.state_config['state']['current_cycle']:
                 self.logger.info(f"Orchestrator initialized. Reading state from: {CONFIG_RL_STATE_FILE}")
-                self.logger.info(f"Last completed cycle: {self.current_cycle}. Total cycles to run: {self.stop_cycle - self.current_cycle}.")
                 self.logger.info(f"Last saved self-play positions: {self.state_config['state']['data_generation_positions_current']}")
                 self.logger.info(f"Current buffer size: {self.state_config['state']['buffer_positions_current']}")
             
-            self.logger.info(f"\n--- Starting RL Cycle {self.current_cycle} (run {self.current_cycle} of {self.stop_cycle}) ---")
             self.logger.info(f"Cycle-specific logs will be stored in: {cycle_dir}")
 
             # Step 1: Run self-play data generation in chunks
@@ -255,8 +255,7 @@ class RLOrchestrator:
                     output_dir=cycle_dir,
                     best_model_path=self.best_model_path,
                     model_config=self.params_config['model'],
-                    data_generation_config=self.params_config['data_generation'],
-                    best_iter = self.state_config['state']['best_model_cycle']
+                    data_generation_config=self.params_config['data_generation']
                 )
 
                 start_data_gen_time = time.time()
@@ -303,48 +302,19 @@ class RLOrchestrator:
             )
             test_model_path, steps = train_task.run_training_loop()
             total_train_time = time.time() - start_train_time
+
             self.state_config['state']['total_hours_training'] += (total_train_time / 3600)
-
             train_task = None
+
             self.logger.info(f"2. Model has trained successfully for {steps} steps.")
+            self.current_steps += steps
+            self.state_config['state']['current_training_steps'] = self.current_steps
+                        
+            # Override the best model with the new model
+            self.logger.info(f"Saving new model from {test_model_path} to {self.best_model_path}...")
+            shutil.copy(test_model_path, self.best_model_path)
+            os.remove(test_model_path)
             
-            # # Step 3. Evaluation
-            self.logger.info(f"3. Initiating evaluation by self play for {self.params_config['global']['eval_games']} games against current best model...")
-            start_eval_time = time.time()
-
-            evaluation_task = EvaluationTask(
-                output_dir=cycle_dir,
-                best_model_path=self.best_model_path,
-                test_model_path=test_model_path,
-                model_config=self.params_config['model'],
-                evaluation_config=self.params_config['evaluation'],
-                current_iter = self.current_cycle,
-                best_iter = self.state_config['state']['best_model_cycle']
-            )
-            test_score, best_score = evaluation_task.run_for_n_games(self.params_config['global']['eval_games'])
-        
-            total_eval_time = time.time() - start_eval_time
-            self.state_config['state']['total_hours_evaluation'] += (total_eval_time / 3600)
-
-            evaluation_task = None
-            self.logger.info(f"3. Evaluation finished with result: {test_score}-{best_score}")
-
-            # Step 4. Save best model
-            win_rate = test_score / self.params_config['global']['eval_games']
-            if win_rate > self.params_config['global']['eval_cutoff']:
-                self.logger.info(f"New model has a win rate of {win_rate:.3f} (> {self.params_config['global']['eval_cutoff']}), accepting it as the new best model.")
-                                
-                
-                # Override the best model with the new, better model
-                self.logger.info(f"Saving new model from {test_model_path} to {self.best_model_path}...")
-                shutil.copy(test_model_path, self.best_model_path)
-
-                self.state_config['state']['best_model_updates'] += 1
-                self.state_config['state']['total_training_steps'] += steps
-                self.state_config['state']['best_model_cycle'] = self.current_cycle
-                
-            self.logger.info(f"Current best cycle: {self.state_config['state']['best_model_cycle']}...")
-
             # After the loop is complete, update the state for the next cycle
             self.state_config['state']['data_generation_positions_current'] = 0
             self.state_config['state']['current_cycle'] = self.current_cycle+1
@@ -352,27 +322,28 @@ class RLOrchestrator:
             self.logger.info("Saving state for the next cycle...")
             self._save_state()
 
-            # Save copy of best model and replay buffer every save interval
-            if self.current_cycle > 0 and self.current_cycle % self.params_config['global']['best_model_save_interval'] == 0:
-                current_best_model = os.path.join(rl_dir, f'rl_cycles/best_models/best_model_iter_{self.current_cycle}.pth')
+            os.makedirs(os.path.join(RL_CYCLES_DIR, 'backup'),  exist_ok=True)
 
-                self.logger.info(f"Saving current best model to after {self.params_config['global']['best_model_save_interval']} to {current_best_model}")
+            # Save config and state each cycle
+            self.logger.info(f"Saving current state as backup")
+            shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(RL_CYCLES_DIR, f'backup/state_{self.current_steps}.yaml'))
+
+            self.logger.info(f"Saving current config as backup")
+            shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(RL_CYCLES_DIR, f'backup/config_{self.current_steps}.yaml'))
+
+            # Save copy of best model and replay buffer every save interval
+            if self.current_steps // self.save_interval > (self.current_steps - steps) // self.save_interval:
+                current_best_model = os.path.join(RL_CYCLES_DIR, f'best_models/best_model_{self.current_steps}.pth')
+
                 shutil.copy(self.best_model_path, current_best_model)
 
                 self.logger.info(f"Saving current circular buffer as backup")
-                shutil.copy(self.buffer_file_path, os.path.join(rl_dir, f'rl_cycles/backup/circular_buffer_cycle_{self.current_cycle}.hdf5'))
-
-                self.logger.info(f"Saving current state as backup")
-                shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(rl_dir, f'rl_cycles/backup/state_cycle_{self.current_cycle}.yaml'))
-
-                self.logger.info(f"Saving current config as backup")
-                shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(rl_dir, f'rl_cycles/backup/config_cycle_{self.current_cycle}.yaml'))
+                shutil.copy(self.buffer_file_path, os.path.join(RL_CYCLES_DIR, f'backup/circular_buffer_{self.current_steps}.hdf5'))
 
             self.current_cycle += 1
-            os.remove(test_model_path)
 
             # Increment loop
-            if self.current_cycle < self.stop_cycle:
+            if self.current_steps <= self.total_steps:
                 self.logger.info(f"Sleeping for 10 seconds before starting cycle {self.current_cycle}...")
                 time.sleep(10)
         
