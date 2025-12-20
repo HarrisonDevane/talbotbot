@@ -2,7 +2,7 @@ global:
   total_training_steps: 100000                       # Total gradient updates to perform
   save_interval_steps: 1000                          # How often to backup the "best_model.pth" to a timestamped file
   buffer_positions_total: 16384000                   # Replay Buffer Size
-  data_generation_positions_per_cycle: 10240        # How many positions to generate before pausing to train
+  data_generation_positions_per_cycle: 102400        # How many positions to generate before pausing to train
   data_generation_save_interval: 10240               # Yield data to main process every 10k positions (ram cleanup)
   hdf5_chunk_size: 16                                # HDF5 storage chunking. Small is better for random access reading.
 
@@ -21,7 +21,7 @@ data_generation:
   batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
   batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
   cpuct: 1.75                                        # PUCT Exploration constant (Standard AlphaZero: 1.0 - 2.5)
-  search_depth: [50]                                # MCTS Simulations per move
+  search_depth: [800]                                # MCTS Simulations per move
   search_depth_weights: [1.0]                        # Probability of using the above depth (allows variable depth training)
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   temperature_threshold_move: 15                     # Moves < 15 use Temp=1 (random), Moves > 15 use Temp=0 (argmax)
