@@ -21,7 +21,7 @@ data_generation:
   batch_size_factor: 10
   batch_timeout: 0.001
   cpuct: 1.75
-  search_depth: [100]
+  search_depth: [800]
   search_depth_weights: [1.0]
   virtual_loss: 0.3
   temperature_threshold_move: 15
