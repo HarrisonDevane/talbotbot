@@ -1,10 +1,10 @@
 state:
-  buffer_positions_current: 41159
-  buffer_write_head: 20533
-  current_cycle: 2
-  current_training_steps: 7
+  buffer_positions_current: 0
+  buffer_write_head: 0
+  current_cycle: 1
+  current_training_steps: 0
   data_generation_positions_current: 0
-  total_games: 254
-  total_hours_data_generation: 0.17565267052915362
-  total_hours_training: 0.021853188077608745
-  total_positions: 41159
+  total_games: 0
+  total_hours_data_generation: 0
+  total_hours_training: 0
+  total_positions: 0
