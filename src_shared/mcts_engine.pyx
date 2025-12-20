@@ -162,13 +162,13 @@ cdef class MCTSEngine:
                     self.root = new_root
                     self.logger.info(f"MCTSEngine: Root changed to child for opponent move {current_opponent_move.uci()}.")
                 else:
-                    self.logger.info("MCTSE Engine: New root node created due to opponent move not in tree.")
+                    self.logger.info("MCTS Engine: New root node created due to opponent move not in tree.")
                     self.root = MCTSNode_c.MCTSNode(board.copy())
                     self._expand_root()
 
         # After updating the root, we check if it's already expanded.
         if not self.root.expanded:
-            self.logger.warning("MCTSE Engine: New root node created due to no matching branch or initial state.")
+            self.logger.warning("MCTS Engine: New root node created due to no matching branch or initial state.")
             self.root = MCTSNode_c.MCTSNode(board.copy())
             self._expand_root()
 
@@ -290,7 +290,7 @@ cdef class MCTSEngine:
         self.time_misc += (time.perf_counter() - time_misc_start)
 
 
-    cdef _retrieve_infernce(self):
+    cdef _retrieve_inference(self):
         cdef double time_retrieval_start
         cdef int buffer_index
         cdef object raw_policy_probs, raw_value_output
@@ -313,11 +313,12 @@ cdef class MCTSEngine:
                 value_output = raw_value_output.item()
 
                 self.buffer_free_slots.put(buffer_index) 
+                self.time_retrieval += (time.perf_counter() - time_retrieval_start)
 
                 if not node.expanded:
                     self._expand(node, policy_probs)
                 self._backpropagate(node, value_output, is_terminal=False)
-                                        
+
             except queue.Empty:
                 break
 
@@ -366,7 +367,7 @@ cdef class MCTSEngine:
             
         while self.simulation_count < search_depth:
             # Process any available results first (non-blocking)
-            self._retrieve_infernce()
+            self._retrieve_inference()
 
             # Put batch on queue if worker_batch_size is reached
             current_batch_size = len(self.batch_buffer)
@@ -380,7 +381,7 @@ cdef class MCTSEngine:
 
                 # Root is queued + not waiting for inference results -> break
                 if self.inference_received >= self.inference_sent:
-                    self.logger.info(f"Only terminal nodes remaning - breaking MCTS loop")
+                    self.logger.info(f"Only terminal nodes remaining - breaking MCTS loop")
                     break
 
                 time.sleep(0.001)
@@ -389,12 +390,12 @@ cdef class MCTSEngine:
             node = self._select()
 
             if node == self.root:
-                self.logger.debug(f"Root chosen - restaring loop")
+                self.logger.debug(f"Root chosen - restarting loop")
                 time.sleep(0.001)
                 continue
 
             if self.buffer_free_slots.qsize() == 0:
-                self.logger.debug(f"No free buffer indicies")
+                self.logger.debug(f"No free buffer indices")
                 time.sleep(0.001)
                 continue
 
@@ -433,8 +434,9 @@ cdef class MCTSEngine:
                 self.shared_input_buffer[buffer_index].copy_(board_input)
     
                 self.batch_buffer.append((self.worker_id, buffer_index))
-                self.time_misc = (time.perf_counter() - time_misc_start) 
                 self._virtual_loss(node, is_applying=True)
+
+                self.time_misc += (time.perf_counter() - time_misc_start) 
 
                 self.simulation_count += 1
                 self.logger.debug(f"[Misc] Node queued for inference. Simulation count: {self.simulation_count}, batch size: {len(self.batch_buffer)}")
@@ -631,7 +633,6 @@ cdef class MCTSEngine:
         """
         Checks for forced wins, forced losses and draws by decision
         """
-        cdef double time_backpropagation_start = time.perf_counter()
         cdef double avg_value
         cdef object winning_children
         cdef object best_win
@@ -667,8 +668,6 @@ cdef class MCTSEngine:
             else:
                 node.forced_outcome = None
                 node.distance_to_mate = None
-
-        self.time_backpropagation += (time.perf_counter() - time_backpropagation_start)
 
 
     cdef _backpropagate(self, MCTSNode_c.MCTSNode node, double value, bint is_terminal):
@@ -707,7 +706,6 @@ cdef class MCTSEngine:
         """
         Applies or removes a virtual loss to a node and its ancestors.
         """
-        cdef double time_backpropagation_start = time.perf_counter()
         cdef int multiplier
         cdef MCTSNode_c.MCTSNode current_node = node
         
@@ -720,5 +718,3 @@ cdef class MCTSEngine:
             current_node.visits += 1 * multiplier
             current_node.value_sum += self.virtual_loss * multiplier
             current_node = current_node.parent
-
-        self.time_backpropagation += (time.perf_counter() - time_backpropagation_start)

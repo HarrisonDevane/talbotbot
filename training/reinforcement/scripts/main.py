@@ -7,12 +7,11 @@ import h5py
 import shutil
 import random
 import torch
+import textwrap
 
-# Assuming this import is in your project structure
 from data_generation_task import DataGenerationTask
 from train_task import TrainTask
 
-# --- Configuration Paths ---
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 rl_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 
@@ -25,17 +24,42 @@ CONFIG_RL_PARAMS_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_confi
 
 class RLOrchestrator:
     def __init__(self):
-        # Initialize logger as None. It will be set for the first time inside the run() method.
         self.logger = None
 
         with open(CONFIG_RL_PARAMS_FILE, 'r') as f:
             self.params_config = yaml.safe_load(f)
 
+        # Create state file (is missing)
+        if not os.path.exists(CONFIG_RL_STATE_FILE):            
+            default_state_yaml = textwrap.dedent("""
+            state:
+                # Replay Buffer State
+                buffer:
+                    count: 0                    # Total valid positions currently in the buffer
+                    head_ptr: 0                 # Circular buffer index (where next sample goes)
+
+                # Lifetime Statistics (Global accumulators)
+                lifetime:
+                    cycle_idx: 1                # Tracks the macro loop (Generate -> Train -> Eval)
+                    training_step: 0            # Tracks global gradient updates (batches trained)
+                    games_played: 0             # Total games played since inception
+                    samples_generated: 0        # Total positions generated (including overwritten ones)
+                    hours_generating: 0         # Total hours spent in self-play
+                    hours_training: 0           # Total hours spent updating weights
+
+                # Ephemeral / Current Cycle Stats
+                current_cycle:
+                    samples_collected: 0        # Positions generated in the current specific cycle
+                """).strip()
+            
+            with open(CONFIG_RL_STATE_FILE, 'w') as f:
+                f.write(default_state_yaml)
+
         with open(CONFIG_RL_STATE_FILE, 'r') as f:
             self.state_config = yaml.safe_load(f)
 
-        self.current_steps = self.state_config['state']['current_training_steps']
-        self.current_cycle = self.state_config['state']['current_cycle']
+        self.current_steps = self.state_config['state']['lifetime']['training_step']
+        self.current_cycle = self.state_config['state']['lifetime']['cycle_idx']
 
         self.total_steps = self.params_config['global']['total_training_steps']
         self.save_interval = self.params_config['global']['save_interval_steps']
@@ -119,8 +143,8 @@ class RLOrchestrator:
                 raise Exception("Buffer file is corrupted. Cannot proceed.") from e
 
         # Proceed with the original, efficient in-place modification
-        current_size = self.state_config['state']['buffer_positions_current']
-        current_write_head = self.state_config['state']['buffer_write_head']
+        current_size = self.state_config['state']['buffer']['count']
+        current_write_head = self.state_config['state']['buffer']['head_ptr']
         
         with h5py.File(self.buffer_file_path, 'a') as hf:
             if 'inputs' in hf and 'policies' in hf and 'values' in hf:
@@ -153,7 +177,7 @@ class RLOrchestrator:
                     policies_dset[current_size : current_size + append_count] = policies_to_append
                     values_dset[current_size : current_size + append_count] = values_to_append
 
-                    self.state_config['state']['buffer_positions_current'] = new_size
+                    self.state_config['state']['buffer']['count'] = new_size
 
                     # Remove appended data from the remaining pool
                     boards_remaining = boards_remaining[append_count:]
@@ -185,19 +209,17 @@ class RLOrchestrator:
 
                     # Write head moves forward circularly
                     new_write_head = (current_write_head + num_remaining) % max_positions
-                    self.state_config['state']['buffer_write_head'] = new_write_head
+                    self.state_config['state']['buffer']['head_ptr'] = new_write_head
 
                 # final size is always clamped to max_positions
-                self.state_config['state']['buffer_positions_current'] = min(
-                    self.state_config['state']['buffer_positions_current'] + num_remaining, max_positions
+                self.state_config['state']['buffer']['count'] = min(
+                    self.state_config['state']['buffer']['count'] + num_remaining, max_positions
                 )
-                final_size = self.state_config['state']['buffer_positions_current']
+                final_size = self.state_config['state']['buffer']['count']
 
             else:
                 # File is brand new or was just created
                 self.logger.info("Creating new HDF5 datasets for the buffer with explicit chunking.")
-                
-                # Get the batch size from your config
                 hdf5_chunk_size = self.params_config['global']['hdf5_chunk_size']
                 
                 # Use the shape of the first data chunk to define the rest of the dimensions
@@ -210,8 +232,7 @@ class RLOrchestrator:
                 hf.create_dataset('values', data=values, maxshape=(None,),dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size,))
                 
                 # Update the new state variables
-                self.state_config['state']['buffer_positions_current'] = len(new_data)
-                self.state_config['state']['buffer_write_head'] = len(new_data)
+                self.state_config['state']['buffer']['count'] = len(new_data)
                 final_size = len(new_data)
 
         self.logger.info(
@@ -231,11 +252,10 @@ class RLOrchestrator:
             # --- Create a NEW logger for this cycle ---
             self.logger = self._setup_cycle_logger(cycle_dir)
 
-            # Initial messages are now logged here, inside the first cycle's log
-            if self.current_cycle == self.state_config['state']['current_cycle']:
-                self.logger.info(f"Orchestrator initialized. Reading state from: {CONFIG_RL_STATE_FILE}")
-                self.logger.info(f"Last saved self-play positions: {self.state_config['state']['data_generation_positions_current']}")
-                self.logger.info(f"Current buffer size: {self.state_config['state']['buffer_positions_current']}")
+
+            self.logger.info(f"Orchestrator initialized. Reading state from: {CONFIG_RL_STATE_FILE}")
+            self.logger.info(f"Last saved self-play positions: {self.state_config['state']['current_cycle']['samples_collected']}")
+            self.logger.info(f"Current buffer size: {self.state_config['state']['buffer']['count']}")
             
             self.logger.info(f"Cycle-specific logs will be stored in: {cycle_dir}")
 
@@ -246,38 +266,39 @@ class RLOrchestrator:
             save_interval = self.params_config['global']['data_generation_save_interval']
             
             # Get the starting point from the state config
-            positions_generated_this_cycle = self.state_config['state']['data_generation_positions_current']
-            remaining_positions_this_cycle = total_positions_for_cycle - positions_generated_this_cycle
+            positions_generated_current_cycle = self.state_config['state']['current_cycle']['samples_collected']
+            remaining_positions_current_cycle = total_positions_for_cycle - positions_generated_current_cycle
             
             # Instantiate the DataGenerationTask once for the cycle
-            if remaining_positions_this_cycle > 0:
+            if remaining_positions_current_cycle > 0:
                 data_generation_task = DataGenerationTask(
                     output_dir=cycle_dir,
+                    current_steps=self.current_steps,
                     best_model_path=self.best_model_path,
                     model_config=self.params_config['model'],
                     data_generation_config=self.params_config['data_generation']
                 )
 
                 start_data_gen_time = time.time()
-                for new_data_chunk, games_in_chunk in data_generation_task.run_for_n_positions(remaining_positions_this_cycle, save_interval):
+                for new_data_chunk, games_in_chunk in data_generation_task.run_for_n_positions(remaining_positions_current_cycle, save_interval):
                     
                     # Process the new chunk of data
                     self._update_circular_buffer(new_data_chunk)
                     
-                    positions_generated_this_cycle += len(new_data_chunk)
-                    self.state_config['state']['data_generation_positions_current'] = positions_generated_this_cycle
-                    self.state_config['state']['total_positions'] += len(new_data_chunk)
-                    self.state_config['state']['total_games'] += games_in_chunk
+                    positions_generated_current_cycle += len(new_data_chunk)
+                    self.state_config['state']['current_cycle']['samples_collected'] = positions_generated_current_cycle
+                    self.state_config['state']['lifetime']['samples_generated'] += len(new_data_chunk)
+                    self.state_config['state']['lifetime']['games_played'] += games_in_chunk
 
                     total_data_gen_time = time.time() - start_data_gen_time
-                    self.state_config['state']['total_hours_data_generation'] += (total_data_gen_time / 3600)
+                    self.state_config['state']['lifetime']['hours_generating'] += (total_data_gen_time / 3600)
                     start_data_gen_time = time.time()
 
 
                     # Periodically save the state to the YAML file
                     self.logger.info(
                         f"Chunk saved. Total positions for cycle {self.current_cycle}: "
-                        f"{positions_generated_this_cycle}/{remaining_positions_this_cycle}. Saving state..."
+                        f"{positions_generated_current_cycle}/{remaining_positions_current_cycle}. Saving state..."
                     )
                     self._save_state()
 
@@ -303,12 +324,12 @@ class RLOrchestrator:
             test_model_path, steps = train_task.run_training_loop()
             total_train_time = time.time() - start_train_time
 
-            self.state_config['state']['total_hours_training'] += (total_train_time / 3600)
+            self.state_config['state']['lifetime']['hours_training'] += (total_train_time / 3600)
             train_task = None
 
             self.logger.info(f"2. Model has trained successfully for {steps} steps.")
             self.current_steps += steps
-            self.state_config['state']['current_training_steps'] = self.current_steps
+            self.state_config['state']['optimization_step'] = self.current_steps
                         
             # Override the best model with the new model
             self.logger.info(f"Saving new model from {test_model_path} to {self.best_model_path}...")
@@ -316,8 +337,8 @@ class RLOrchestrator:
             os.remove(test_model_path)
             
             # After the loop is complete, update the state for the next cycle
-            self.state_config['state']['data_generation_positions_current'] = 0
-            self.state_config['state']['current_cycle'] = self.current_cycle+1
+            self.state_config['state']['current_cycle']['samples_collected'] = 0
+            self.state_config['state']['lifetime']['cycle_idx'] = self.current_cycle+1
             
             self.logger.info("Saving state for the next cycle...")
             self._save_state()

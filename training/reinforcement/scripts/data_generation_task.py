@@ -13,7 +13,7 @@ rl_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 project_root = os.path.abspath(os.path.join(current_script_dir, "../../.."))
 sys.path.insert(0, project_root)
 
-from src_shared.self_play_agent import SelfPlayAgent
+from src_shared.talbot_agent import TalbotAgent
 from src_shared.inference_batcher import InferenceBatcher
 import src_shared.utils
 
@@ -144,11 +144,12 @@ class DataGenerationTask:
     It manages the creation of inference and worker processes, and handles inter-process
     communication via queues.
     """
-    def __init__(self, output_dir, best_model_path, model_config, data_generation_config):
+    def __init__(self, output_dir, current_steps, best_model_path, model_config, data_generation_config):
         self.output_dir = output_dir
         self.best_model_path = best_model_path
         self.model_config = model_config
         self.data_generation_config = data_generation_config
+        self.current_steps = current_steps
         self.num_workers = len(data_generation_config['game_worker_cores'])
         self.num_inference_batchers = len(data_generation_config['inference_worker_cores'])
 
@@ -208,7 +209,7 @@ class DataGenerationTask:
 
 
     @staticmethod
-    def _worker_main(worker_id, core_id, output_dir, inference_queues, result_queue, data_queue, data_generation_config, game_number_counter, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+    def _worker_main(worker_id, core_id, output_dir, inference_queues, result_queue, data_queue, data_generation_config, current_steps, game_number_counter, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
         """Target function for a single self-play worker process."""
 
         os.environ["OMP_NUM_THREADS"] = "1"
@@ -238,8 +239,8 @@ class DataGenerationTask:
         inference_queue_for_worker = inference_queues[worker_id % len(inference_queues)]
         
         # Instantiate the MCTS player, configured to use the queues
-        mcts_player = SelfPlayAgent(
-            name=f'talbot (self-play)',
+        mcts_player = TalbotAgent(
+            name=f'talbot_{current_steps}',
             logger=worker_logger,
             self_play_config=data_generation_config,
             worker_id=worker_id,
@@ -321,7 +322,7 @@ class DataGenerationTask:
             p = mp.Process(
                 target=DataGenerationTask._worker_main,
                 args=(i, self.data_generation_config['game_worker_cores'][i], self.output_dir, self.inference_queues, self.result_queues[i], self.data_queue,
-                      self.data_generation_config, self.game_number_counter, self.shared_input_buffer, self.shared_policy_buffer, self.shared_value_buffer, self.buffer_free_slots),
+                      self.data_generation_config, self.current_steps, self.game_number_counter, self.shared_input_buffer, self.shared_policy_buffer, self.shared_value_buffer, self.buffer_free_slots),
                 daemon=True
             )
             self.worker_processes.append(p)

@@ -57,12 +57,9 @@ class TrainTask:
     def _get_shuffled_sample_indices(self):
         """
         Calculates a list of absolute sample indices from the original HDF5 file.
-        Weighting is applied at the individual position level, where the age 
-        is determined by the 'data_generation_positions_per_cycle' block it belongs to.
-        The final list is globally shuffled.
         """
         sampling_ratio = self.training_config['sampling_ratio']
-        total_positions_source = self.state_config['buffer_positions_current']
+        total_positions_source = self.state_config['buffer']['count']
         batch_size = self.training_config['batch_size']
 
         # Total pool of individual sample indices (positions) to sample FROM

@@ -11,7 +11,7 @@ sys.path.insert(0, project_root)
 import src_shared.utils
 from src_shared.mcts_engine import MCTSEngine
 
-class SelfPlayAgent:
+class TalbotAgent:
     """
     A chess player wrapper for an MCTS engine designed for a multiprocessing
     environment with a central batcher. This class manages the game state

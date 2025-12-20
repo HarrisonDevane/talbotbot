@@ -21,7 +21,7 @@ project_root = os.path.abspath(os.path.join(current_script_dir, "../.."))
 sys.path.insert(0, project_root)
 sys.path.insert(0, inference_root)
 
-from src_shared.self_play_agent import SelfPlayAgent 
+from src_shared.talbot_agent import TalbotAgent 
 from src_shared.inference_batcher import InferenceBatcher 
 import src_shared.utils as utils
 
@@ -424,7 +424,7 @@ def main():
         
         if player_type == "talbot":
 
-            player = SelfPlayAgent(
+            player = TalbotAgent(
                 name=f"talbot-{color_name.lower()}",
                 logger=logger,
                 self_play_config=evaluation_config,
