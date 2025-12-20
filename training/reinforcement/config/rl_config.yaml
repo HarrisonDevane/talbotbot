@@ -2,7 +2,7 @@ global:
   total_training_steps: 100000
   save_interval_steps: 1000
   buffer_positions_total: 16384000
-  data_generation_positions_per_cycle: 30000
+  data_generation_positions_per_cycle: 204800
   data_generation_save_interval: 20480
   hdf5_chunk_size: 256
 
