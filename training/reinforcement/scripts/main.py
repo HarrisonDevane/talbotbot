@@ -41,7 +41,7 @@ class RLOrchestrator:
                 # Lifetime Statistics (Global accumulators)
                 lifetime:
                     cycle_idx: 1                # Tracks the macro loop (Generate -> Train -> Eval)
-                    training_step: 0            # Tracks global gradient updates (batches trained)
+                    training_steps: 0           # Tracks global gradient updates (batches trained)
                     games_played: 0             # Total games played since inception
                     samples_generated: 0        # Total positions generated (including overwritten ones)
                     hours_generating: 0         # Total hours spent in self-play
@@ -58,7 +58,7 @@ class RLOrchestrator:
         with open(CONFIG_RL_STATE_FILE, 'r') as f:
             self.state_config = yaml.safe_load(f)
 
-        self.current_steps = self.state_config['state']['lifetime']['training_step']
+        self.current_steps = self.state_config['state']['lifetime']['training_steps']
         self.current_cycle = self.state_config['state']['lifetime']['cycle_idx']
 
         self.total_steps = self.params_config['global']['total_training_steps']
@@ -329,7 +329,7 @@ class RLOrchestrator:
 
             self.logger.info(f"2. Model has trained successfully for {steps} steps.")
             self.current_steps += steps
-            self.state_config['state']['optimization_step'] = self.current_steps
+            self.state_config['state']['lifetime']['training_steps'] = self.current_steps
                         
             # Override the best model with the new model
             self.logger.info(f"Saving new model from {test_model_path} to {self.best_model_path}...")

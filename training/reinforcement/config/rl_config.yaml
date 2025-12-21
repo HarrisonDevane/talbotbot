@@ -1,7 +1,7 @@
 global:
-  total_training_steps: 100000                       # Total gradient updates to perform
-  save_interval_steps: 1000                          # How often to backup the "best_model.pth" to a timestamped file
-  buffer_positions_total: 16384000                   # Replay Buffer Size
+  total_training_steps: 20000                        # Total gradient updates to perform
+  save_interval_steps: 500                           # How often to backup the "best_model.pth" and replay buffer
+  buffer_positions_total: 8192000                    # Replay Buffer Size
   data_generation_positions_per_cycle: 102400        # How many positions to generate before pausing to train
   data_generation_save_interval: 10240               # Yield data to main process every 10k positions (ram cleanup)
   hdf5_chunk_size: 16                                # HDF5 storage chunking. Small is better for random access reading.
@@ -21,7 +21,7 @@ data_generation:
   batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
   batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
   cpuct: 1.75                                        # PUCT Exploration constant (Standard AlphaZero: 1.0 - 2.5)
-  search_depth: [800]                                # MCTS Simulations per move
+  search_depth: [600]                                # MCTS Simulations per move
   search_depth_weights: [1.0]                        # Probability of using the above depth (allows variable depth training)
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   temperature_threshold_move: 15                     # Moves < 15 use Temp=1 (random), Moves > 15 use Temp=0 (argmax)
@@ -31,7 +31,7 @@ data_generation:
   dirichlet_epsilon: 0.25                            # Noise weight (25% noise, 75% policy)
   draw_cutoff: 0.0                                   # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
-  resignation_cutoff: -0.975                         # If root node value < -0.975, bot resigns to save compute time
+  resignation_cutoff: -0.975                         # Bot resigns to save compute time
   main_logging_level: 20                             # INFO level
   worker_logging_level: 50                           # CRITICAL only (only keeps PGN)
   inference_logging_level: 20                        # INFO level
@@ -44,7 +44,11 @@ training:
   value_loss_weight: 1.0                             # Weight for Win/Loss Prediction loss
   log_interval: 1                                    # Log training stats
   weight_decay: 1e-4                                 # L2 Regularization
-  learning_rate: 1e-2                                # SGD Learning Rate
+  lr_high: 1e-1                                      # SGD Learning Rate for different phases of training
+  lr_high_cutoff: 2000
+  lr_mid: 1e-2
+  lr_mid_cutoff: 10000
+  lr_low: 1e-3                                       
   momentum_rate: 0.9                                 # SGD Momentum
   data_loader_workers: 4                             # CPU threads loading data from HDF5
   dropout_rate_conv: 0.0                             # Dropout in convolutional layers

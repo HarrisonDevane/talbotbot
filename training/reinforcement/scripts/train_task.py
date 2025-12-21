@@ -143,8 +143,18 @@ class TrainTask:
             policy_criterion = nn.KLDivLoss(reduction='batchmean')
             value_criterion = nn.MSELoss()
 
-            target_lr = float(self.training_config['learning_rate'])
+            current_step_count = self.state_config['lifetime']['training_steps']
+
+            # Get LR based on step count
+            if current_step_count < self.training_config['lr_high_cutoff']:
+                target_lr = float(self.training_config['lr_high'])
+            elif current_step_count < self.training_config['lr_mid_cutoff']:
+                target_lr = float(self.training_config['lr_mid'])
+            else:
+                target_lr = float(self.training_config['lr_low'])
+
             momentum_rate = self.training_config['momentum_rate']
+
             
             # 2. Setup Optimizer with that fixed LR
             optimizer = optim.SGD(
