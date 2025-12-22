@@ -31,7 +31,7 @@ data_generation:
   dirichlet_epsilon: 0.25                            # Noise weight (25% noise, 75% policy)
   draw_cutoff: -0.9                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
-  resignation_cutoff: -0.975                         # Bot resigns to save compute time
+  resignation_cutoff: -0.95                          # Bot resigns to save compute time
   main_logging_level: 20                             # INFO level
   worker_logging_level: 50                           # CRITICAL only (only keeps PGN)
   inference_logging_level: 20                        # INFO level
