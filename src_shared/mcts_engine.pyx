@@ -653,8 +653,8 @@ cdef class MCTSEngine:
                 best_win = min(winning_children, key=lambda c: c.distance_to_mate)
                 node.distance_to_mate = best_win.distance_to_mate + 1
 
-            # Rule 2: Check for draw (only if no win above), and the current position is losing
-            elif any(child.forced_outcome == 0 for child in node.children.values()) and (avg_value <= self.draw_cutoff):
+            # Rule 2: Check for draw (only if no win above), and the current position is evaluated as losing
+            elif any(child.forced_outcome == 0 for child in node.children.values()) and (avg_value <= 0.0):
                 node.forced_outcome = 0
                 node.distance_to_mate = 0
 

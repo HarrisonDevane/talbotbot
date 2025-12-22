@@ -427,7 +427,7 @@ def main():
             player = TalbotAgent(
                 name=f"talbot-{color_name.lower()}",
                 logger=logger,
-                self_play_config=evaluation_config,
+                talbot_config=evaluation_config,
                 worker_id=worker_id,
                 inference_queue=inference_queue,
                 result_queue=result_queue,

@@ -17,16 +17,16 @@ class TalbotAgent:
     environment with a central batcher. This class manages the game state
     for a single game worker and communicates with the MCTS instance.
     """
-    def __init__(self, name, logger, self_play_config, worker_id, inference_queue, result_queue, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+    def __init__(self, name, logger, talbot_config, worker_id, inference_queue, result_queue, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
         self.name = name
         self.logger = logger
-        self.self_play_config = self_play_config
+        self.talbot_config = talbot_config
         
         # The agent now has direct access to the queues for its MCTS engine
         self.worker_id = worker_id
         self.inference_queue = inference_queue
         self.result_queue = result_queue
-        self.worker_batch_size = self.self_play_config['batch_size_per_worker']
+        self.worker_batch_size = self.talbot_config['batch_size_per_worker']
         self.shared_input_buffer = shared_input_buffer
         self.shared_policy_buffer = shared_policy_buffer
         self.shared_value_buffer = shared_value_buffer
@@ -77,8 +77,8 @@ class TalbotAgent:
                 
                 self.logger.info(f"{len(best_winning_moves)} forced win/s in {min_dtm} moves were found.")
 
-            # If a position is losing (defined by the average root node value) but has a forced draw available, take the draw.
-            elif (self.mcts.root.forced_outcome == 0) and any(c.forced_outcome == 0 for c in self.mcts.root.children.values()):
+            # If a position is losing (defined by the average root node value) but has a forced draw available, take the draw based on the cutoff
+            elif (self.mcts.root.forced_outcome == 0) and any(c.forced_outcome == 0 for c in self.mcts.root.children.values()) and (self.mcts.root.value_sum / self.mcts.root.visits <= self.talbot_config['draw_cutoff']):
                 draw_moves = [
                     move for move, child in self.mcts.root.children.items()
                     if child.forced_outcome == 0
@@ -132,7 +132,7 @@ class TalbotAgent:
                 self.logger.info(f"Forced loss detected at the root. Selecting move that delays the loss the longest ({losing_child_for_parent.distance_to_mate} moves).")
             
             # Resign if below threshold
-            elif (self.use_resignation and self.mcts.root.value_sum / self.mcts.root.visits < self.self_play_config['resignation_cutoff']):
+            elif (self.use_resignation and self.mcts.root.value_sum / self.mcts.root.visits < self.talbot_config['resignation_cutoff']):
                 return None, policy_vector, simulation_count
 
             # Final Fallback: Default to normalized visit counts.
@@ -153,9 +153,9 @@ class TalbotAgent:
                     # Calculate the raw probabilities for the training target.
                     training_probs = visits / total_visits
 
-                    temperature = self.self_play_config['temperature_low']
-                    if move_number <= self.self_play_config['temperature_threshold_move']:
-                        temperature = self.self_play_config['temperature_high']
+                    temperature = self.talbot_config['temperature_low']
+                    if move_number <= self.talbot_config['temperature_threshold_move']:
+                        temperature = self.talbot_config['temperature_high']
                     
                     # 2. Calculate probabilities for move selection
                     if temperature < 1e-6:
@@ -191,19 +191,19 @@ class TalbotAgent:
         self.mcts = MCTSEngine(
             logger=self.logger, 
             worker_id=self.worker_id,
-            training=self.self_play_config['training'],
+            training=self.talbot_config['training'],
             worker_batch_size=self.worker_batch_size,
             inference_queue=self.inference_queue,
             result_queue=self.result_queue,
-            cpuct=self.self_play_config['cpuct'],
-            virtual_loss=self.self_play_config['virtual_loss'],
-            dirichlet_alpha=self.self_play_config['dirichlet_alpha'],
-            dirichlet_epsilon=self.self_play_config['dirichlet_epsilon'],
-            draw_cutoff=self.self_play_config['draw_cutoff'],
+            cpuct=self.talbot_config['cpuct'],
+            virtual_loss=self.talbot_config['virtual_loss'],
+            dirichlet_alpha=self.talbot_config['dirichlet_alpha'],
+            dirichlet_epsilon=self.talbot_config['dirichlet_epsilon'],
+            draw_cutoff=self.talbot_config['draw_cutoff'],
             shared_input_buffer=self.shared_input_buffer,
             shared_policy_buffer=self.shared_policy_buffer,
             shared_value_buffer=self.shared_value_buffer,
             buffer_free_slots=self.buffer_free_slots
         )
         self.our_last_move = None
-        self.use_resignation = self.self_play_config['training'] and random.random() < self.self_play_config['resignation_probability']
+        self.use_resignation = self.talbot_config['training'] and random.random() < self.talbot_config['resignation_probability']

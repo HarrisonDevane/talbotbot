@@ -242,7 +242,7 @@ class DataGenerationTask:
         mcts_player = TalbotAgent(
             name=f'talbot_{current_steps}',
             logger=worker_logger,
-            self_play_config=data_generation_config,
+            talbot_config=data_generation_config,
             worker_id=worker_id,
             inference_queue=inference_queue_for_worker,
             result_queue=result_queue,

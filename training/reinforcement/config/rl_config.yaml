@@ -29,7 +29,7 @@ data_generation:
   temperature_low: 0.0                               # Temperature for mid/endgame (Exploitation)
   dirichlet_alpha: 0.3                               # Noise shape parameter (0.3 is standard for Chess)
   dirichlet_epsilon: 0.25                            # Noise weight (25% noise, 75% policy)
-  draw_cutoff: 0.0                                   # Value threshold to consider a game a draw (minimax)
+  draw_cutoff: -1.0                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.975                         # Bot resigns to save compute time
   main_logging_level: 20                             # INFO level
@@ -45,10 +45,10 @@ training:
   log_interval: 1                                    # Log training stats
   weight_decay: 1e-4                                 # L2 Regularization
   lr_high: 1e-1                                      # SGD Learning Rate for different phases of training
-  lr_high_cutoff: 2000
+  lr_high_cutoff: 1000
   lr_mid: 1e-2
   lr_mid_cutoff: 10000
-  lr_low: 1e-3                                       
+  lr_low: 1e-3
   momentum_rate: 0.9                                 # SGD Momentum
   data_loader_workers: 4                             # CPU threads loading data from HDF5
   dropout_rate_conv: 0.0                             # Dropout in convolutional layers
