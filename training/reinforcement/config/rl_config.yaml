@@ -7,7 +7,7 @@ global:
   hdf5_chunk_size: 16                                # HDF5 storage chunking. Small is better for random access reading.
 
 model:
-  input_planes: 68                                   # 68-plane feature stack (P1 pieces, P2 pieces, reps, etc.)
+  input_planes: 69                                   # 68-plane feature stack (P1 pieces, P2 pieces, reps, etc.)
   filters: 128                                       # Convolutional filters (Network "width")
   resblocks: 16                                      # Residual blocks (Network "depth")
 

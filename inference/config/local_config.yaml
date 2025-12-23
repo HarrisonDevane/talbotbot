@@ -6,7 +6,7 @@ game:
 
 model:
   model_path: 'training/reinforcement/rl_cycles/best_models/best_model.pth'
-  input_planes: 68
+  input_planes: 69
   filters: 128
   resblocks: 16
 

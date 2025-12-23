@@ -73,7 +73,7 @@ class DataGenerationGameWorker:
                 self.logger.info(f"Game {game_number} ended by resignation.")
 
             else:
-                board_state_tensor = src_shared.utils.board_to_tensor_68(current_board)                
+                board_state_tensor = src_shared.utils.board_to_tensor_69(current_board)                
                 raw_training_data.append({
                     "board_state": board_state_tensor,
                     "policy": policy_vector,

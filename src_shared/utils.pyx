@@ -13,10 +13,10 @@ cimport numpy as cnp  # For c-typed access to NumPy data structures/types
 from libc.math cimport tanh
 
 cdef int _BOARD_DIM = 8
-cdef int _INPUT_CHANNELS = 68
-cdef int _TOTAL_INPUT_SIZE = 68 * 8 * 8
+cdef int _INPUT_CHANNELS = 69
+cdef int _TOTAL_INPUT_SIZE = _INPUT_CHANNELS * _BOARD_DIM * _BOARD_DIM
 cdef int _POLICY_CHANNELS = 73
-cdef int _TOTAL_POLICY_MOVES = 8 * 8 * 73
+cdef int _TOTAL_POLICY_MOVES = _POLICY_CHANNELS * _BOARD_DIM * _BOARD_DIM
 
 # Expose as Python globals
 BOARD_DIM = _BOARD_DIM
@@ -52,7 +52,7 @@ PAWN_PROMO_MOVE_TYPES_LIST = list(PAWN_PROMO_MOVE_TYPES_MAPPING.keys())
 
 # UPDATED: Now accepts orientation_color to handle "Me" vs "Opponent" logic
 cdef cnp.ndarray _get_piece_planes(board_state: object, orientation_color: bint):
-    """Helper for board_to_tensor_68. Fills planes relative to orientation_color."""
+    """Helper for board_to_tensor_69. Fills planes relative to orientation_color."""
     cdef cnp.ndarray piece_planes = np.zeros((12, _BOARD_DIM, _BOARD_DIM), dtype=np.float32)
     cdef dict piece_to_plane = {
         chess.PAWN: 0, chess.KNIGHT: 1, chess.BISHOP: 2,
@@ -78,13 +78,12 @@ cdef cnp.ndarray _get_piece_planes(board_state: object, orientation_color: bint)
     return piece_planes
 
 
-cpdef cnp.ndarray board_to_tensor_68(object board):
+cpdef cnp.ndarray board_to_tensor_69(object board):
     """
     Encode a python-chess Board into a (68, 8, 8) numpy float32 tensor.
     Fully Relative Representation with Spatial Invariance.
     """
-    cdef int num_input_planes = 18 + (4 * 12) + 2 # = 68
-    cdef cnp.ndarray planes = np.zeros((num_input_planes, _BOARD_DIM, _BOARD_DIM), dtype=np.float32)
+    cdef cnp.ndarray planes = np.zeros((_INPUT_CHANNELS, _BOARD_DIM, _BOARD_DIM), dtype=np.float32)
     
     # --- Local C-Typed variables ---
     cdef int ep_file, start_plane_idx, i
@@ -141,7 +140,10 @@ cpdef cnp.ndarray board_to_tensor_68(object board):
     planes[66, :, :] = 1.0 if board.is_repetition(count=2) else 0.0
     planes[67, :, :] = 1.0 if board.is_repetition(count=3) else 0.0
 
-    # 5. Spatial Flip
+    # 5. Add 50-move rule counter
+    planes[68, :, :] = board.halfmove_clock / 100.0
+
+    # 6. Spatial Flip
     if board.turn == chess.BLACK:
         planes = np.flip(planes, axis=(1, 2)).copy()
 

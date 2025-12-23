@@ -456,7 +456,7 @@ cdef class MCTSEngine:
                 self.in_flight_nodes[buffer_index] = node
                 self.logger.debug(f"Free Nodes: {self.buffer_free_slots.qsize()}")
                 
-                numpy_board = src_shared.utils.board_to_tensor_68(node.board)
+                numpy_board = src_shared.utils.board_to_tensor_69(node.board)
                 board_input = torch.from_numpy(numpy_board).float()
                 
                 if self.use_fp16:
@@ -575,7 +575,7 @@ cdef class MCTSEngine:
 
         buffer_index = self.buffer_free_slots.get() 
 
-        board_input = torch.from_numpy(src_shared.utils.board_to_tensor_68(self.root.board)).float()
+        board_input = torch.from_numpy(src_shared.utils.board_to_tensor_69(self.root.board)).float()
         if self.use_fp16:
             board_input = board_input.half()
         self.shared_input_buffer[buffer_index].copy_(board_input)

@@ -1,0 +1,18 @@
+state:
+    # Replay Buffer State
+    buffer:
+        count: 0                    # Total valid positions currently in the buffer
+        head_ptr: 0                 # Circular buffer index (where next sample goes)
+
+    # Lifetime Statistics (Global accumulators)
+    lifetime:
+        cycle_idx: 1                # Tracks the macro loop (Generate -> Train -> Eval)
+        training_steps: 0           # Tracks global gradient updates (batches trained)
+        games_played: 0             # Total games played since inception
+        samples_generated: 0        # Total positions generated (including overwritten ones)
+        hours_generating: 0         # Total hours spent in self-play
+        hours_training: 0           # Total hours spent updating weights
+
+    # Ephemeral / Current Cycle Stats
+    current_cycle:
+        samples_collected: 0        # Positions generated in the current specific cycle
