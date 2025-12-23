@@ -10,6 +10,7 @@ cdef class MCTSNode:
     cdef public int visits
     cdef public double value_sum
     cdef public double prior_probability_from_parent
+    cdef public double raw_value
     cdef public bint expanded
     cdef public bint selected
     

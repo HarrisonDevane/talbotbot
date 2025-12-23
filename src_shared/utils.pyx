@@ -12,11 +12,6 @@ import cython
 cimport numpy as cnp  # For c-typed access to NumPy data structures/types
 from libc.math cimport tanh
 
-# Import C-level definitions from the pxd file.
-from .utils cimport (
-    convert_coords,
-)
-
 cdef int _BOARD_DIM = 8
 cdef int _INPUT_CHANNELS = 68
 cdef int _TOTAL_INPUT_SIZE = 68 * 8 * 8
@@ -55,19 +50,9 @@ PAWN_PROMO_MOVE_TYPES_LIST = list(PAWN_PROMO_MOVE_TYPES_MAPPING.keys())
 
 # --- Helper Functions (C-typed) ---
 
-@cython.cdivision(True)
-cdef inline tuple convert_coords(int rank, int file):
-    """
-    Converts python-chess (rank, file) to (row, col) where (0,0) is a8 and (7,7) is h1
-    """
-    cdef int row = 7 - rank
-    cdef int col = file
-    return row, col
-
-
-# Return type placed before function name
-cdef cnp.ndarray _get_piece_planes(board_state: object):
-    """Helper for board_to_tensor_68, requires GIL due to chess and NumPy calls."""
+# UPDATED: Now accepts orientation_color to handle "Me" vs "Opponent" logic
+cdef cnp.ndarray _get_piece_planes(board_state: object, orientation_color: bint):
+    """Helper for board_to_tensor_68. Fills planes relative to orientation_color."""
     cdef cnp.ndarray piece_planes = np.zeros((12, _BOARD_DIM, _BOARD_DIM), dtype=np.float32)
     cdef dict piece_to_plane = {
         chess.PAWN: 0, chess.KNIGHT: 1, chess.BISHOP: 2,
@@ -77,11 +62,17 @@ cdef cnp.ndarray _get_piece_planes(board_state: object):
     cdef object square, piece
 
     for square, piece in board_state.piece_map().items():
-        row, col = convert_coords(chess.square_rank(square), chess.square_file(square))
+        # Standard Matrix coordinates (Rank 7 -> Row 0)
+        row = 7 - chess.square_rank(square)
+        col = chess.square_file(square)
         
-        base_plane = 0 if piece.color == chess.WHITE else 6
+        # Relative Logic: "Me" (0-5) vs "Opponent" (6-11)
+        if piece.color == orientation_color:
+            base_plane = 0 
+        else:
+            base_plane = 6 
+        
         plane_idx = base_plane + piece_to_plane[piece.piece_type]
-        
         piece_planes[plane_idx, row, col] = 1.0
         
     return piece_planes
@@ -90,52 +81,67 @@ cdef cnp.ndarray _get_piece_planes(board_state: object):
 cpdef cnp.ndarray board_to_tensor_68(object board):
     """
     Encode a python-chess Board into a (68, 8, 8) numpy float32 tensor.
+    Fully Relative Representation with Spatial Invariance.
     """
     cdef int num_input_planes = 18 + (4 * 12) + 2 # = 68
     cdef cnp.ndarray planes = np.zeros((num_input_planes, _BOARD_DIM, _BOARD_DIM), dtype=np.float32)
     
-    # --- Local C-Typed variables for loop/calculations ---
-    cdef int row, col, base_plane, plane_idx, start_plane_idx, i
-    cdef int ep_file 
-    cdef object square, piece
-    cdef object piece_to_plane = {
-        chess.PAWN: 0, chess.KNIGHT: 1, chess.BISHOP: 2,
-        chess.ROOK: 3, chess.QUEEN: 4, chess.KING: 5,
-    }
-    cdef object temp_board, hist_piece_planes
+    # --- Local C-Typed variables ---
+    cdef int ep_file, start_plane_idx, i
+    cdef object temp_board, hist_piece_planes, current_planes
+    cdef bint us, them
 
-    # Current Board State (Planes 0-17)
-    for square, piece in board.piece_map().items():
-        row, col = convert_coords(chess.square_rank(square), chess.square_file(square))
-        base_plane = 0 if piece.color == chess.WHITE else 6
-        plane_idx = base_plane + piece_to_plane[piece.piece_type]
-        planes[plane_idx, row, col] = 1.0
+    # 1. Current Board State (Planes 0-11)
+    current_planes = _get_piece_planes(board, board.turn)
+    planes[0:12, :, :] = current_planes
 
-    # Board state flags
+    # 2. Auxiliary Planes (12-17)
     planes[12, :, :] = 1.0 if board.turn == chess.WHITE else 0.0
-    planes[13, :, :] = 1.0 if board.has_kingside_castling_rights(chess.WHITE) else 0.0
-    planes[14, :, :] = 1.0 if board.has_queenside_castling_rights(chess.WHITE) else 0.0
-    planes[15, :, :] = 1.0 if board.has_kingside_castling_rights(chess.BLACK) else 0.0
-    planes[16, :, :] = 1.0 if board.has_queenside_castling_rights(chess.BLACK) else 0.0
 
+    # Planes 13-16: Castling Rights (Relative + Spatial)
+    us = board.turn
+    them = not board.turn
+
+    if board.turn == chess.WHITE:
+        # White: Kingside is Right (Spatial), Queenside is Left
+        # Ch 13/14 = Mine, Ch 15/16 = Theirs
+        planes[13, :, :] = 1.0 if board.has_kingside_castling_rights(us) else 0.0
+        planes[14, :, :] = 1.0 if board.has_queenside_castling_rights(us) else 0.0
+        planes[15, :, :] = 1.0 if board.has_kingside_castling_rights(them) else 0.0
+        planes[16, :, :] = 1.0 if board.has_queenside_castling_rights(them) else 0.0
+    else:
+        # Black: Queenside is Right (Spatial), Kingside is Left
+        # We want Ch 13 to always mean "Castle Right"
+        # So we map Black's Queenside rights to Ch 13
+        planes[13, :, :] = 1.0 if board.has_queenside_castling_rights(us) else 0.0
+        planes[14, :, :] = 1.0 if board.has_kingside_castling_rights(us) else 0.0
+        planes[15, :, :] = 1.0 if board.has_queenside_castling_rights(them) else 0.0
+        planes[16, :, :] = 1.0 if board.has_kingside_castling_rights(them) else 0.0
+
+    # Plane 17: En Passant
+    # We DO NOT pre-flip. The global flip later handles this correctly.
     if board.ep_square is not None:
         ep_file = chess.square_file(board.ep_square) 
         planes[17, :, ep_file] = 1.0
 
-    # Historical Board States (Planes 18-65)
+    # 3. Historical Board States (Planes 18-65)
     temp_board = board.copy()
     for i in range(4):
         if not temp_board.move_stack: 
             break
         temp_board.pop()
-        hist_piece_planes = _get_piece_planes(temp_board)
+        
+        # History relative to ROOT player (trajectory consistency)
+        hist_piece_planes = _get_piece_planes(temp_board, board.turn)
+        
         start_plane_idx = 18 + (i * 12)
         planes[start_plane_idx : start_plane_idx + 12, :, :] = hist_piece_planes
 
-    # Repetition Channels (Planes 66-67)
+    # 4. Repetition Channels (Planes 66-67)
     planes[66, :, :] = 1.0 if board.is_repetition(count=2) else 0.0
     planes[67, :, :] = 1.0 if board.is_repetition(count=3) else 0.0
 
+    # 5. Spatial Flip
     if board.turn == chess.BLACK:
         planes = np.flip(planes, axis=(1, 2)).copy()
 
@@ -159,13 +165,22 @@ cpdef tuple move_to_policy_components(object move, object board):
     from_rank, from_file = chess.square_rank(move.from_square), chess.square_file(move.from_square)
     to_rank, to_file = chess.square_rank(move.to_square), chess.square_file(move.to_square)
 
-    # Coordinate normalization (C-typed logic)
+    # Coordinate normalization (Explicit Geometry Logic)
     if board.turn == chess.WHITE:
-        from_row_norm, from_col_norm = convert_coords(from_rank, from_file)
-        to_row_norm, to_col_norm = convert_coords(to_rank, to_file)
+        # White Perspective (Standard Matrix: Top-Left is a8)
+        # Rank 7 -> Row 0, File 0 -> Col 0
+        from_row_norm = 7 - from_rank
+        from_col_norm = from_file
+        to_row_norm = 7 - to_rank
+        to_col_norm = to_file
     else:
-        from_row_norm, from_col_norm = from_rank, from_file
-        to_row_norm, to_col_norm = to_rank, to_file
+        # Black Perspective (Rotated 180 Matrix: Top-Left is h1)
+        # Rank 0 -> Row 0, File 7 -> Col 0
+        # This matches np.flip(axis=(1,2)) used in input tensor
+        from_row_norm = from_rank
+        from_col_norm = 7 - from_file
+        to_row_norm = to_rank
+        to_col_norm = 7 - to_file
 
     dr = to_row_norm - from_row_norm
     df = to_col_norm - from_col_norm
@@ -227,7 +242,7 @@ cpdef tuple move_to_policy_components(object move, object board):
     return from_row_norm, from_col_norm, channel
 
 
-# FIX: Changed return type from 'chess.Move' to 'object' (line 222 in your code)
+# FIX: Changed return type from 'chess.Move' to 'object'
 cpdef object policy_components_to_move(int from_row_norm, int from_col_norm, int channel, object board):
     """Converts a (row, col, channel) index back to a chess.Move."""
     
@@ -240,13 +255,17 @@ cpdef object policy_components_to_move(int from_row_norm, int from_col_norm, int
     cdef int offset_idx, dr_norm, dir_idx, distance, sr_norm, sf_norm
     cdef object moving_piece # chess.Piece object
 
-    # Inverse coordinate normalization (C-typed logic)
+    # Inverse coordinate normalization (Matches the explicit geometry above)
     if board.turn == chess.WHITE:
+        # Inverse of (7 - rank) is (7 - row)
         actual_from_rank = 7 - from_row_norm
         actual_from_file = from_col_norm
     else:
+        # Inverse of (rank) is (row)
         actual_from_rank = from_row_norm
-        actual_from_file = from_col_norm
+        # Inverse of (7 - file) is (7 - col) -- FIX APPLIED
+        actual_from_file = 7 - from_col_norm
+
     actual_from_square = chess.square(actual_from_file, actual_from_rank)
 
     # 1. Underpromotions (channels 64-72)
@@ -266,13 +285,14 @@ cpdef object policy_components_to_move(int from_row_norm, int from_col_norm, int
 
         if not (0 <= to_col_norm <= 7): return None
         
+        # Inverse logic for destination
         if board.turn == chess.WHITE:
             actual_to_rank = 7 - to_row_norm
             actual_to_file = to_col_norm
         else:
             actual_to_rank = to_row_norm
-            actual_to_file = to_col_norm
-        
+            actual_to_file = 7 - to_col_norm # FIX APPLIED
+
         actual_to_square = chess.square(actual_to_file, actual_to_rank)
         move = chess.Move(actual_from_square, actual_to_square, promotion=promotion_piece)
 
@@ -296,7 +316,7 @@ cpdef object policy_components_to_move(int from_row_norm, int from_col_norm, int
             actual_to_file = to_col_norm
         else:
             actual_to_rank = to_row_norm
-            actual_to_file = to_col_norm
+            actual_to_file = 7 - to_col_norm # FIX APPLIED
 
         actual_to_square = chess.square(actual_to_file, actual_to_rank)
         move = chess.Move(actual_from_square, actual_to_square)
@@ -325,7 +345,7 @@ cpdef object policy_components_to_move(int from_row_norm, int from_col_norm, int
             actual_to_file = to_col_norm
         else:
             actual_to_rank = to_row_norm
-            actual_to_file = to_col_norm
+            actual_to_file = 7 - to_col_norm # FIX APPLIED
         
         actual_to_square = chess.square(actual_to_file, actual_to_rank)
         move = chess.Move(actual_from_square, actual_to_square)
@@ -356,7 +376,6 @@ cpdef inline int policy_components_to_flat_index(int from_row, int from_col, int
     return index
 
 @cython.cdivision(True)
-# FIX: Removed 'nogil' because it returns a Python tuple (line 351 in your code)
 cpdef inline tuple policy_flat_index_to_components(int flat_index):
     """Converts a single integer index back into its (from_row, from_col, channel) tuple."""
     

@@ -131,19 +131,51 @@ cdef class MCTSEngine:
         cdef object current_our_move = our_move
         cdef object current_opponent_move = opponent_move
 
-        # Set new root for training
+        # Reset tree but keep expanded nodes during training
         if self.training:
-            self.root = MCTSNode_c.MCTSNode(board.copy())
-            self._expand_root()
-            return
+            if current_our_move and current_our_move in self.root.children:
+                # 1. Promote the child to be the new root
+                new_root = self.root.children[current_our_move]
+                new_root.move = None
+                new_root.parent = None
+                self.root = new_root
+                
+                # 2. Reset statistics
+                self.root.visits = 1
+                self.root.value_sum = self.root.raw_value
+                self.root.forced_outcome = None
+                
+                # 3. Set child stats to default
+                for child in self.root.children.values():
+                    if child.expanded:
+                        child.visits = 1
+                        child.value_sum = child.raw_value
+                        child.forced_outcome = None
 
-        if self.root is None:
-            self.logger.info("MCTSEngine: New root node created.")
-            self.root = MCTSNode_c.MCTSNode(board.copy())
-            self._expand_root()
-            return
+                        # Remove grandchildren
+                        for grandchild in child.children.values():
+                            if grandchild.expanded:
+                                grandchild.visits = 0
+                                grandchild.value_sum = 0
+                                grandchild.expanded = False
+                                grandchild.forced_outcome = None
+                                grandchild.children.clear()
 
-        
+
+                        # Also update root stats:
+                        self.root.visits += 1
+                        self.root.value_sum -= child.raw_value
+                        self.logger.debug(f"MCTSEngine: Resetting node {child.move.uci()}.")
+
+                self.logger.debug(f"MCTSEngine: Reused tree. Root and expanded children reset to visits=1.")
+                self.logger.debug(f"{self.root.expanded}")
+                self.logger.debug(f"{self.root.children}")
+
+                # 4. Re-Apply Noise
+                self._add_dirichlet_noise(self.root)
+                return
+
+
         # If our last move is a child of the root, we update the root to that child.
         if current_our_move and current_our_move in self.root.children:
             new_root = self.root.children[current_our_move] 
@@ -685,6 +717,8 @@ cdef class MCTSEngine:
             current_node.distance_to_mate = 0
         else:
             self._virtual_loss(current_node, is_applying=False)
+
+        current_node.raw_value = value
 
         while current_node is not None:
             if not is_terminal:
