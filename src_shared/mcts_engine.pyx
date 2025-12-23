@@ -145,14 +145,14 @@ cdef class MCTSEngine:
                 self.root.value_sum = self.root.raw_value
                 self.root.forced_outcome = None
                 
-                # 3. Set child stats to default
+                # 3. Set child stats to their default
                 for child in self.root.children.values():
                     if child.expanded:
                         child.visits = 1
                         child.value_sum = child.raw_value
                         child.forced_outcome = None
 
-                        # Remove grandchildren
+                        # Unexpand grandchildren but preserve probs
                         for grandchild in child.children.values():
                             if grandchild.expanded:
                                 grandchild.visits = 0
@@ -160,7 +160,6 @@ cdef class MCTSEngine:
                                 grandchild.expanded = False
                                 grandchild.forced_outcome = None
                                 grandchild.children.clear()
-
 
                         # Also update root stats:
                         self.root.visits += 1
