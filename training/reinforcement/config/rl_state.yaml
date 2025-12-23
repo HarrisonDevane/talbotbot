@@ -1,0 +1,13 @@
+state:
+  buffer:
+    count: 527900
+    head_ptr: 0
+  current_cycle:
+    samples_collected: 10370
+  lifetime:
+    cycle_idx: 6
+    games_played: 3256
+    hours_generating: 7.974234142038558
+    hours_training: 0.033158779342969256
+    samples_generated: 527900
+    training_steps: 125
