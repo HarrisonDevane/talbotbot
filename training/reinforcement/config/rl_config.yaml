@@ -1,6 +1,6 @@
 global:
   total_training_steps: 20000                        # Total gradient updates to perform
-  save_interval_steps: 500                           # How often to backup the "best_model.pth" and replay buffer
+  save_interval_steps: 1000                          # How often to backup the "best_model.pth" and replay buffer
   buffer_positions_total: 8192000                    # Replay Buffer Size
   data_generation_positions_per_cycle: 102400        # How many positions to generate before pausing to train
   data_generation_save_interval: 10240               # Yield data to main process every 10k positions (ram cleanup)
