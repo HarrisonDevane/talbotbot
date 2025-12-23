@@ -21,7 +21,7 @@ data_generation:
   batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
   batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
   cpuct: 1.75                                        # PUCT Exploration constant (Standard AlphaZero: 1.0 - 2.5)
-  search_depth: [600]                                # MCTS Simulations per move
+  search_depth: [800]                                # MCTS Simulations per move
   search_depth_weights: [1.0]                        # Probability of using the above depth (allows variable depth training)
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   temperature_threshold_move: 15                     # Moves < 15 use Temp=1 (random), Moves > 15 use Temp=0 (argmax)
