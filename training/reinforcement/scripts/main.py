@@ -125,15 +125,13 @@ class RLOrchestrator:
         Calculates the target buffer capacity for the current training step.
         Returns a linear ramp from min_size to max_size.
         """
-        current_step = self.state_config['lifetime']['training_steps']
 
-
-        if current_step >= self.params_config['global']['buffer_ramp_steps']:
+        if self.current_steps >= self.params_config['global']['buffer_ramp_steps']:
             return self.params_config['global']['max_buffer_size']
         
         # Linear Interpolation Formula
         # Capacity = Min + (Progress % * (Max - Min))
-        progress = current_step / self.params_config['global']['buffer_ramp_steps']
+        progress = self.current_steps / self.params_config['global']['buffer_ramp_steps']
         growth_range = self.params_config['global']['max_buffer_size'] - self.params_config['global']['min_buffer_size']
         
         current_capacity = self.params_config['global']['min_buffer_size'] + (progress * growth_range)
