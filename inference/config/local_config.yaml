@@ -1,8 +1,8 @@
 game:
-  white_player: 'talbot'
-  black_player: 'human'
+  white_player: 'human'
+  black_player: 'talbot'
   initial_fen: Null
-  white_perspective: False
+  white_perspective: True
 
 model:
   model_path: 'training/reinforcement/rl_cycles/best_models/best_model.pth'

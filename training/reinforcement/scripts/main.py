@@ -120,9 +120,29 @@ class RLOrchestrator:
         with open(CONFIG_RL_STATE_FILE, 'w') as f:
             yaml.safe_dump(self.state_config, f)
 
+    def get_dynamic_buffer_limit(self):
+        """
+        Calculates the target buffer capacity for the current training step.
+        Returns a linear ramp from min_size to max_size.
+        """
+        current_step = self.state_config['lifetime']['training_steps']
+
+
+        if current_step >= self.params_config['global']['buffer_ramp_steps']:
+            return self.params_config['global']['max_buffer_size']
+        
+        # Linear Interpolation Formula
+        # Capacity = Min + (Progress % * (Max - Min))
+        progress = current_step / self.params_config['global']['buffer_ramp_steps']
+        growth_range = self.params_config['global']['max_buffer_size'] - self.params_config['global']['min_buffer_size']
+        
+        current_capacity = self.params_config['global']['min_buffer_size'] + (progress * growth_range)
+        
+        return int(current_capacity)
+
 
     def _update_circular_buffer(self, new_data):
-        max_positions = self.params_config['global']['buffer_positions_total']
+        max_positions = self.get_dynamic_buffer_limit()
         
         boards = np.array([item['board_state'] for item in new_data], dtype=np.float16)
         policies = np.array([item['policy'] for item in new_data], dtype=np.float16)
@@ -183,8 +203,6 @@ class RLOrchestrator:
                     boards_remaining = boards_remaining[append_count:]
                     policies_remaining = policies_remaining[append_count:]
                     values_remaining = values_remaining[append_count:]
-
-                    current_write_head = new_size % max_positions
 
                 ### STEP 2: CIRCULAR OVERWRITE for remaining data ###
                 num_remaining = len(boards_remaining)
