@@ -361,17 +361,17 @@ class RLOrchestrator:
             self.logger.info("Saving state for the next cycle...")
             self._save_state()
 
-            os.makedirs(os.path.join(RL_CYCLES_DIR, 'backup'),  exist_ok=True)
-
             # Save config and state each cycle
             self.logger.info(f"Saving current state as backup")
-            shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(RL_CYCLES_DIR, f'backup/state_{self.current_steps}.yaml'))
+            shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(cycle_dir, f'state_{self.current_steps}.yaml'))
 
             self.logger.info(f"Saving current config as backup")
-            shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(RL_CYCLES_DIR, f'backup/config_{self.current_steps}.yaml'))
+            shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(cycle_dir, f'config_{self.current_steps}.yaml'))
 
             # Save copy of best model and replay buffer every save interval
             if self.current_steps // self.save_interval > (self.current_steps - steps) // self.save_interval:
+                os.makedirs(os.path.join(RL_CYCLES_DIR, 'backup'),  exist_ok=True)
+
                 current_best_model = os.path.join(RL_CYCLES_DIR, f'best_models/best_model_{self.current_steps}.pth')
 
                 shutil.copy(self.best_model_path, current_best_model)

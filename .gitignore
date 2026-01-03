@@ -92,3 +92,4 @@ training/reinforcement/rl_cycles/backup/*
 # Autorun script
 autorun.bat
 autorun.bat - Shortcut.lnk
+crash_log.txt
