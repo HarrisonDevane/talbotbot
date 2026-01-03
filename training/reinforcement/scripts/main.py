@@ -172,66 +172,54 @@ class RLOrchestrator:
                 policies_dset = hf['policies']
                 values_dset = hf['values']
 
-                boards_remaining = boards
-                policies_remaining = policies
-                values_remaining = values
+                if inputs_dset.shape[0] < max_positions:
+                    self.logger.info(f"Resizing HDF5 datasets to {max_positions}")
+                    inputs_dset.resize(max_positions, axis=0)
+                    policies_dset.resize(max_positions, axis=0)
+                    values_dset.resize(max_positions, axis=0)
 
-                ### STEP 1: APPEND to unfilled part of buffer ###
-                if current_size < max_positions:
-                    space_left = max_positions - current_size
-                    append_count = min(len(boards_remaining), space_left)
+                num_remaining = len(boards)
+                
+                # Check if the new data fits contiguously without wrapping
+                # (e.g. Ptr=395k, Data=10k, Max=410k -> 405k <= 410k -> Fits!)
+                if current_write_head + num_remaining <= max_positions:
+                    # Case A: No Wrap (or flows into new space)
+                    inputs_dset[current_write_head : current_write_head + num_remaining] = boards
+                    policies_dset[current_write_head : current_write_head + num_remaining] = policies
+                    values_dset[current_write_head : current_write_head + num_remaining] = values
 
-                    boards_to_append = boards_remaining[:append_count]
-                    policies_to_append = policies_remaining[:append_count]
-                    values_to_append = values_remaining[:append_count]
+                    # Pointer simply moves forward
+                    current_write_head += num_remaining
+                
+                else:
+                    # Case B: Wrap Around
+                    # (e.g. Ptr=405k, Data=10k, Max=410k -> 415k > 410k -> Split)
+                    first_part_len = max_positions - current_write_head
+                    second_part_len = num_remaining - first_part_len
 
-                    # Resize datasets to accommodate append
-                    new_size = current_size + append_count
-                    inputs_dset.resize(new_size, axis=0)
-                    policies_dset.resize(new_size, axis=0)
-                    values_dset.resize(new_size, axis=0)
+                    # Write to the end (filling the new space)
+                    inputs_dset[current_write_head:] = boards[:first_part_len]
+                    policies_dset[current_write_head:] = policies[:first_part_len]
+                    values_dset[current_write_head:] = values[:first_part_len]
 
-                    inputs_dset[current_size : current_size + append_count] = boards_to_append
-                    policies_dset[current_size : current_size + append_count] = policies_to_append
-                    values_dset[current_size : current_size + append_count] = values_to_append
+                    # Wrap the rest to 0 (overwriting oldest data)
+                    inputs_dset[:second_part_len] = boards[first_part_len:]
+                    policies_dset[:second_part_len] = policies[first_part_len:]
+                    values_dset[:second_part_len] = values[first_part_len:]
 
-                    self.state_config['state']['buffer']['count'] = new_size
+                    # Pointer wraps to the end of the second part
+                    current_write_head = second_part_len
 
-                    # Remove appended data from the remaining pool
-                    boards_remaining = boards_remaining[append_count:]
-                    policies_remaining = policies_remaining[append_count:]
-                    values_remaining = values_remaining[append_count:]
-
-                ### STEP 2: CIRCULAR OVERWRITE for remaining data ###
-                num_remaining = len(boards_remaining)
-                if num_remaining > 0:
-                    if current_write_head + num_remaining <= max_positions:
-                        # fits in one go
-                        inputs_dset[current_write_head : current_write_head + num_remaining] = boards_remaining
-                        policies_dset[current_write_head : current_write_head + num_remaining] = policies_remaining
-                        values_dset[current_write_head : current_write_head + num_remaining] = values_remaining
-                    else:
-                        # wraparound
-                        first_part_len = max_positions - current_write_head
-                        second_part_len = num_remaining - first_part_len
-
-                        inputs_dset[current_write_head:] = boards_remaining[:first_part_len]
-                        policies_dset[current_write_head:] = policies_remaining[:first_part_len]
-                        values_dset[current_write_head:] = values_remaining[:first_part_len]
-
-                        inputs_dset[:second_part_len] = boards_remaining[first_part_len:]
-                        policies_dset[:second_part_len] = policies_remaining[first_part_len:]
-                        values_dset[:second_part_len] = values_remaining[first_part_len:]
-
-                    # Write head moves forward circularly
-                    new_write_head = (current_write_head + num_remaining) % max_positions
-                    self.state_config['state']['buffer']['head_ptr'] = new_write_head
-
-                # final size is always clamped to max_positions
+                # --- 3. UPDATE STATE ---
+                # Ensure the pointer is strictly modulo the size (safety)
+                current_write_head = current_write_head % max_positions
+                
+                self.state_config['state']['buffer']['head_ptr'] = current_write_head
+                
+                # Count is clamped to max_positions
                 self.state_config['state']['buffer']['count'] = min(
-                    self.state_config['state']['buffer']['count'] + num_remaining, max_positions
+                    current_size + num_remaining, max_positions
                 )
-                final_size = self.state_config['state']['buffer']['count']
 
             else:
                 # File is brand new or was just created
@@ -249,6 +237,7 @@ class RLOrchestrator:
                 
                 # Update the new state variables
                 self.state_config['state']['buffer']['count'] = len(new_data)
+                self.state_config['state']['buffer']['head_ptr'] = len(new_data) % max_positions
                 final_size = len(new_data)
 
         self.logger.info(
