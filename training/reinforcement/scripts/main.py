@@ -238,11 +238,6 @@ class RLOrchestrator:
                 # Update the new state variables
                 self.state_config['state']['buffer']['count'] = len(new_data)
                 self.state_config['state']['buffer']['head_ptr'] = len(new_data) % max_positions
-                final_size = len(new_data)
-
-        self.logger.info(
-            f"Circular buffer updated. It now contains {final_size} of "
-            f"{max_positions} total positions.")
 
 
     def run(self):
