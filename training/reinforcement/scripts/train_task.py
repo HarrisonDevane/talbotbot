@@ -143,12 +143,12 @@ class TrainTask:
             policy_criterion = nn.KLDivLoss(reduction='batchmean')
             value_criterion = nn.MSELoss()
 
-            current_step_count = self.state_config['lifetime']['training_steps']
+            global_step = self.state_config['lifetime']['training_steps']
 
             # Get LR based on step count
-            if current_step_count < self.training_config['lr_high_cutoff']:
+            if global_step < self.training_config['lr_high_cutoff']:
                 target_lr = float(self.training_config['lr_high'])
-            elif current_step_count < self.training_config['lr_mid_cutoff']:
+            elif global_step < self.training_config['lr_mid_cutoff']:
                 target_lr = float(self.training_config['lr_mid'])
             else:
                 target_lr = float(self.training_config['lr_low'])
@@ -188,7 +188,7 @@ class TrainTask:
             running_total_loss = 0.0
             
             for batch_idx, (board_tensors, policy_target, value_targets) in enumerate(train_loader):
-                current_step = batch_idx + 1
+                current_step = global_step + batch_idx + 1
                 
                 batch_start_time = time.perf_counter()
                 
@@ -230,7 +230,7 @@ class TrainTask:
                 
                 # Log detailed info to file at intervals
                 if current_step % self.training_config['log_interval'] == 0:
-                    self.logger.info(f"Training Step {current_step}/{total_training_steps_this_cycle}: "
+                    self.logger.info(f"Training Step {current_step}/{total_training_steps_this_cycle + global_step}: "
                                      f"P_Loss={policy_loss.item():.4f}, "
                                      f"V_Loss={value_loss.item():.4f}, "
                                      f"T_Loss={total_loss.item():.4f}, "

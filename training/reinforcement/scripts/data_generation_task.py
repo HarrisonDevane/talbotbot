@@ -144,11 +144,12 @@ class DataGenerationTask:
     It manages the creation of inference and worker processes, and handles inter-process
     communication via queues.
     """
-    def __init__(self, output_dir, current_steps, best_model_path, model_config, data_generation_config):
+    def __init__(self, output_dir, current_steps, best_model_path, model_config, data_generation_config, state_config):
         self.output_dir = output_dir
         self.best_model_path = best_model_path
         self.model_config = model_config
         self.data_generation_config = data_generation_config
+        self.state_config = state_config
         self.current_steps = current_steps
         self.num_workers = len(data_generation_config['game_worker_cores'])
         self.num_inference_batchers = len(data_generation_config['inference_worker_cores'])
@@ -190,7 +191,7 @@ class DataGenerationTask:
         
         self.inference_processes = []
         self.worker_processes = []
-        self.game_number_counter = mp.Value('i', 0) 
+        self.game_number_counter = mp.Value('i', self.state_config['state']['lifetime']['games_played']) 
 
 
     @staticmethod

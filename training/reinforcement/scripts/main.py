@@ -37,6 +37,7 @@ class RLOrchestrator:
                 buffer:
                     count: 0                    # Total valid positions currently in the buffer
                     head_ptr: 0                 # Circular buffer index (where next sample goes)
+                    wraps: 0                    # Number of buffer wraps
 
                 # Lifetime Statistics (Global accumulators)
                 lifetime:
@@ -190,6 +191,7 @@ class RLOrchestrator:
 
                     # Pointer simply moves forward
                     current_write_head += num_remaining
+                    new_count = max(current_size, current_write_head)
                 
                 else:
                     # Case B: Wrap Around
@@ -209,17 +211,15 @@ class RLOrchestrator:
 
                     # Pointer wraps to the end of the second part
                     current_write_head = second_part_len
+                    new_count = max_positions
+                    self.state_config['state']['buffer']['wraps'] += 1
 
                 # --- 3. UPDATE STATE ---
                 # Ensure the pointer is strictly modulo the size (safety)
                 current_write_head = current_write_head % max_positions
                 
                 self.state_config['state']['buffer']['head_ptr'] = current_write_head
-                
-                # Count is clamped to max_positions
-                self.state_config['state']['buffer']['count'] = min(
-                    current_size + num_remaining, max_positions
-                )
+                self.state_config['state']['buffer']['count'] = new_count
 
             else:
                 # File is brand new or was just created
@@ -246,7 +246,10 @@ class RLOrchestrator:
         """
         while self.current_steps <= self.total_steps:
             # --- Setup cycle-specific directories and logger ---
-            cycle_dir = os.path.join(RL_CYCLES_DIR, f"iteration_{self.current_cycle}")
+            cycle_dir = os.path.join(
+                RL_CYCLES_DIR, 
+                f"iter_{self.current_cycle:04d}_step_{self.current_steps}"
+            )            
             os.makedirs(cycle_dir, exist_ok=True)
             
             # --- Create a NEW logger for this cycle ---
@@ -276,7 +279,8 @@ class RLOrchestrator:
                     current_steps=self.current_steps,
                     best_model_path=self.best_model_path,
                     model_config=self.params_config['model'],
-                    data_generation_config=self.params_config['data_generation']
+                    data_generation_config=self.params_config['data_generation'],
+                    state_config=self.state_config
                 )
 
                 start_data_gen_time = time.time()
@@ -345,10 +349,10 @@ class RLOrchestrator:
 
             # Save config and state each cycle
             self.logger.info(f"Saving current state as backup")
-            shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(cycle_dir, f'state_{self.current_steps}.yaml'))
+            shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(cycle_dir, f'iter_{self.current_cycle:04d}_step_{self.current_steps}_state.yaml'))
 
             self.logger.info(f"Saving current config as backup")
-            shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(cycle_dir, f'config_{self.current_steps}.yaml'))
+            shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(cycle_dir, f'iter_{self.current_cycle:04d}_step_{self.current_steps}_config.yaml'))
 
             # Save copy of best model and replay buffer every save interval
             if self.current_steps // self.save_interval > (self.current_steps - steps) // self.save_interval:
