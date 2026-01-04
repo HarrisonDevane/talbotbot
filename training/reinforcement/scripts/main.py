@@ -74,7 +74,7 @@ class RLOrchestrator:
         os.makedirs(RL_CYCLES_DIR, exist_ok=True)
 
         # Get buffer path from the global config file and make it absolute
-        buffer_file_name = os.path.abspath(os.path.join(RL_CYCLES_DIR, "circular_buffer.hdf5"))
+        buffer_file_name = os.path.abspath(os.path.join(RL_CYCLES_DIR, "replay_memory.hdf5"))
         self.buffer_file_path = buffer_file_name
 
     def _create_new_model(self):
@@ -358,12 +358,12 @@ class RLOrchestrator:
             if self.current_steps // self.save_interval > (self.current_steps - steps) // self.save_interval:
                 os.makedirs(os.path.join(RL_CYCLES_DIR, 'backup'),  exist_ok=True)
 
-                current_best_model = os.path.join(RL_CYCLES_DIR, f'best_models/best_model_{self.current_steps}.pth')
+                current_best_model = os.path.join(RL_CYCLES_DIR, f'best_models/iter_{self.current_cycle:04d}_step_{self.current_steps}_model.pth')
 
                 shutil.copy(self.best_model_path, current_best_model)
 
                 self.logger.info(f"Saving current circular buffer as backup")
-                shutil.copy(self.buffer_file_path, os.path.join(RL_CYCLES_DIR, f'backup/circular_buffer_{self.current_steps}.hdf5'))
+                shutil.copy(self.buffer_file_path, os.path.join(RL_CYCLES_DIR, f'backup/iter_{self.current_cycle:04d}_step_{self.current_steps}_replay_memory.hdf5'))
 
             self.current_cycle += 1
 
