@@ -34,10 +34,9 @@ class TalbotAgent:
 
         # These are reset each game
         self.mcts = None
-        self.our_last_move = None
         self.use_resignation = None
     
-    def get_move(self, board, ply_count, search_depth, last_move_played):
+    def get_move(self, board, ply_count, search_depth):
             """
             Runs MCTS simulations and selects a move based on a temperature schedule.
             """
@@ -45,11 +44,27 @@ class TalbotAgent:
 
             self.logger.info(f"\n{'='*60}\n{' '*20}--- MOVE {move_number}: {'White' if board.turn == chess.WHITE else 'Black'}, PLY {ply_count} STARTED ---\n{'='*60}\n")
             move_start_time = time.time()
-
-            self.mcts.set_new_root(board.copy(), self.our_last_move, last_move_played)
             
             self.logger.info(f"Current player: {self.name}")
-            self.logger.info(f"Our last move: {self.our_last_move}. Last move played {last_move_played}")
+
+            self.mcts = MCTSEngine(
+                logger=self.logger, 
+                worker_id=self.worker_id,
+                training=self.talbot_config['training'],
+                worker_batch_size=self.worker_batch_size,
+                inference_queue=self.inference_queue,
+                result_queue=self.result_queue,
+                cpuct=self.talbot_config['cpuct'],
+                virtual_loss=self.talbot_config['virtual_loss'],
+                draw_cutoff=self.talbot_config['draw_cutoff'],
+                k_candidates=self.talbot_config['gumbel_k'],
+                sigma_scale=self.talbot_config['gumbel_sigma'],
+                board=board,
+                shared_input_buffer=self.shared_input_buffer,
+                shared_policy_buffer=self.shared_policy_buffer,
+                shared_value_buffer=self.shared_value_buffer,
+                buffer_free_slots=self.buffer_free_slots
+            )
 
             simulation_count = self.mcts.run_simulations(search_depth)
 
@@ -140,40 +155,51 @@ class TalbotAgent:
                 # Ignore moves that lead to forced losses or chosen draws
                 eligible_moves = {
                     move: child for move, child in self.mcts.root.children.items()
-                    if child.forced_outcome not in [0, 1]
+                    if child.forced_outcome not in [0, 1] and child.visits > 0
                 }
+
                 if not eligible_moves:
-                    eligible_moves = self.mcts.root.children
+                    eligible_moves = {
+                        move: child for move, child in self.mcts.root.children.items()
+                        if child.visits > 0
+                    }
 
-                moves = list(eligible_moves.keys())
-                visits = np.array([eligible_moves[move].visits for move in moves])
-                total_visits = np.sum(visits)
-
-                if total_visits > 0:
-                    # Calculate the raw probabilities for the training target.
-                    training_probs = visits / total_visits
-
-                    temperature = self.talbot_config['temperature_low']
-                    if move_number <= self.talbot_config['temperature_threshold_move']:
-                        temperature = self.talbot_config['temperature_high']
+                if eligible_moves:
+                    sigma = self.talbot_config['gumbel_sigma']
+                    scores = []
+                    moves = list(eligible_moves.keys())
                     
-                    # 2. Calculate probabilities for move selection
-                    if temperature < 1e-6:
-                        best_move_index = np.argmax(visits)
-                        best_move = moves[best_move_index]
-                    else:
-                        visits_exp = visits ** (1.0 / temperature)
-                        playing_probs = visits_exp / np.sum(visits_exp)
-                        best_move = moves[np.random.choice(len(moves), p=playing_probs)]
-                    
-                    for move, prob in zip(moves, training_probs):
+                    # Calculate scores for Softmax
+                    for move in moves:
+                        child = eligible_moves[move]
+                        
+                        # Logit = ln(Prior)
+                        prior = max(child.prior_probability_from_parent, 1e-8)
+                        logit = np.log(prior)
+                        
+                        # Q-Value (Flip perspective: Q = -value / visits)
+                        q_value = -child.value_sum / child.visits
+                        
+                        # Score = Logit + Sigma * Q
+                        scores.append(logit + (sigma * q_value))
+
+                    # Compute Softmax
+                    scores = np.array(scores)
+                    scores -= np.max(scores) # Stability shift
+                    exps = np.exp(scores)
+                    softmax_probs = exps / np.sum(exps)
+
+                    # Assign Policy Vector
+                    for move, prob in zip(moves, softmax_probs):
                         from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
                         flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                         policy_vector[flat_index] = prob
+                    
+                    # Select Move by Sampling from this improved distribution
+                    best_move = moves[np.random.choice(len(moves), p=softmax_probs)]
+                    
+                    self.logger.info(f"Generated Q-based policy for {len(moves)} eligible moves.")
 
-                self.logger.info("Using standard temperature-based selection and visit counts.")
-
-            self.our_last_move = best_move
             move_end_time = time.time()
             total_move_time = move_end_time - move_start_time
             simulation_speed = (simulation_count / total_move_time) if total_move_time > 0 else 0
@@ -187,23 +213,5 @@ class TalbotAgent:
         Resets the player's state for a new game.
         """
         self.logger.debug(f"Resetting state for a new game.")
-        
-        self.mcts = MCTSEngine(
-            logger=self.logger, 
-            worker_id=self.worker_id,
-            training=self.talbot_config['training'],
-            worker_batch_size=self.worker_batch_size,
-            inference_queue=self.inference_queue,
-            result_queue=self.result_queue,
-            cpuct=self.talbot_config['cpuct'],
-            virtual_loss=self.talbot_config['virtual_loss'],
-            dirichlet_alpha=self.talbot_config['dirichlet_alpha'],
-            dirichlet_epsilon=self.talbot_config['dirichlet_epsilon'],
-            draw_cutoff=self.talbot_config['draw_cutoff'],
-            shared_input_buffer=self.shared_input_buffer,
-            shared_policy_buffer=self.shared_policy_buffer,
-            shared_value_buffer=self.shared_value_buffer,
-            buffer_free_slots=self.buffer_free_slots
-        )
-        self.our_last_move = None
+        self.mcts = None
         self.use_resignation = self.talbot_config['training'] and random.random() < self.talbot_config['resignation_probability']

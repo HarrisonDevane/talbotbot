@@ -7,6 +7,7 @@ import math
 import time
 import logging
 import queue
+import operator
 import numpy as np
 cimport numpy as cnp
 import src_shared.utils
@@ -16,21 +17,6 @@ cnp.import_array()
 
 cdef extern from "math.h":
     double sqrt(double x)
-
-cdef extern from "Python.h":
-    double Py_BLOCK_THREADS
-    double PyThreadState_Swap(void *tstate)
-    void *PyGILState_Ensure()
-    void PyGILState_Release(void *state)
-
-def _visits_key_func(item):
-    """
-    Key function for sorting MCTSNode children by visits.
-    Casts item[1] to the C-type MCTSNode for direct attribute access.
-    """
-    cdef MCTSNode_c.MCTSNode child_node
-    child_node = <MCTSNode_c.MCTSNode>item[1]
-    return child_node.visits
 
 
 cdef class MCTSEngine:
@@ -48,10 +34,10 @@ cdef class MCTSEngine:
     cdef public int simulation_count
     cdef public int inference_sent
     cdef public int inference_received
+    cdef public int k_candidates
+    cdef public double sigma_scale
     cdef public bint use_fp16
     cdef public bint training
-    cdef public double dirichlet_alpha
-    cdef public double dirichlet_epsilon
 
     cdef public double time_selection
     cdef public double time_expansion
@@ -59,7 +45,7 @@ cdef class MCTSEngine:
     cdef public double time_retrieval
     cdef public double time_queueing
     cdef public double time_misc
-    cdef public double time_shutdown    
+    cdef public double time_wait_for_inference    
 
     cdef public MCTSNode_c.MCTSNode root 
     
@@ -75,8 +61,8 @@ cdef class MCTSEngine:
     cdef public object shared_value_buffer
     cdef public object buffer_free_slots
 
-    def __init__(self, logger: logging.Logger, training: bool, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, virtual_loss: float, dirichlet_alpha: float, 
-                dirichlet_epsilon: float, draw_cutoff: float, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+    def __init__(self, logger: logging.Logger, training: bool, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, virtual_loss: float,
+             draw_cutoff: float, k_candidates: int, sigma_scale: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
 
         self.logger = logger
         self.training = training
@@ -90,11 +76,12 @@ cdef class MCTSEngine:
         self.worker_id = worker_id
         self.cpuct = cpuct
         self.virtual_loss = virtual_loss
-        self.dirichlet_alpha = dirichlet_alpha
-        self.dirichlet_epsilon = dirichlet_epsilon
         self.draw_cutoff = draw_cutoff
 
-        self.root = None
+        self.k_candidates = k_candidates
+        self.sigma_scale = sigma_scale
+
+        self.root = MCTSNode_c.MCTSNode(board.copy())
         self.in_flight_nodes = {}
 
         # Initializing for run simulations method
@@ -110,7 +97,7 @@ cdef class MCTSEngine:
         self.time_retrieval = 0.0
         self.time_queueing = 0.0
         self.time_misc = 0.0
-        self.time_shutdown = 0.0
+        self.time_wait_for_inference = 0.0
         
         # Set the number of threads for internal PyTorch CPU operations.
         torch.set_num_threads(1)
@@ -121,95 +108,12 @@ cdef class MCTSEngine:
         self.policy_probs_dtype = torch.float16 if self.use_fp16 else torch.float32
 
 
-    cpdef set_new_root(self, board: chess.Board, our_move: chess.Move, opponent_move: chess.Move):
-        """
-        Updates the MCTS root based on the sequence of moves.
-        If our_move and opponent_move allow traversal, the tree is kept.
-        Otherwise, a new tree is started.
-        """
-        cdef MCTSNode_c.MCTSNode new_root         
-        cdef object current_our_move = our_move
-        cdef object current_opponent_move = opponent_move
-
-        # Reset tree but keep expanded nodes during training
-        if self.training:
-            if current_our_move and current_our_move in self.root.children:
-                # 1. Promote the child to be the new root
-                new_root = self.root.children[current_our_move]
-                new_root.move = None
-                new_root.parent = None
-                self.root = new_root
-                
-                # 2. Reset statistics
-                self.root.visits = 1
-                self.root.value_sum = self.root.raw_value
-                self.root.forced_outcome = None
-                
-                # 3. Set child stats to their default
-                for child in self.root.children.values():
-                    if child.expanded:
-                        child.visits = 1
-                        child.value_sum = child.raw_value
-                        child.forced_outcome = None
-
-                        # Unexpand grandchildren but preserve probs
-                        for grandchild in child.children.values():
-                            if grandchild.expanded:
-                                grandchild.visits = 0
-                                grandchild.value_sum = 0
-                                grandchild.expanded = False
-                                grandchild.forced_outcome = None
-                                grandchild.children.clear()
-
-                        # Also update root stats:
-                        self.root.visits += 1
-                        self.root.value_sum -= child.raw_value
-                        self.logger.debug(f"MCTSEngine: Resetting node {child.move.uci()}.")
-
-                self.logger.debug(f"MCTSEngine: Reused tree. Root and expanded children reset to visits=1.")
-                self.logger.debug(f"{self.root.expanded}")
-                self.logger.debug(f"{self.root.children}")
-
-                # 4. Re-Apply Noise
-                self._add_dirichlet_noise(self.root)
-                return
-
-
-        # If our last move is a child of the root, we update the root to that child.
-        if current_our_move and current_our_move in self.root.children:
-            new_root = self.root.children[current_our_move] 
-            new_root.move = None
-            new_root.parent = None
-            self.root = new_root
-
-            self.logger.info(f"MCTSEngine: Root changed to child for our move {current_our_move.uci()}.")
-
-            # If opponent move also exists, we further update the root to our move's child node.
-            if current_opponent_move:
-                if current_opponent_move in self.root.children:
-                    new_root = self.root.children[current_opponent_move]
-                    new_root.move = None
-                    new_root.parent = None
-                    self.root = new_root
-                    self.logger.info(f"MCTSEngine: Root changed to child for opponent move {current_opponent_move.uci()}.")
-                else:
-                    self.logger.info("MCTS Engine: New root node created due to opponent move not in tree.")
-                    self.root = MCTSNode_c.MCTSNode(board.copy())
-                    self._expand_root()
-
-        # After updating the root, we check if it's already expanded.
-        if not self.root.expanded:
-            self.logger.warning("MCTS Engine: New root node created due to no matching branch or initial state.")
-            self.root = MCTSNode_c.MCTSNode(board.copy())
-            self._expand_root()
-
-
-    cdef _shutdown(self):
+    cdef _wait_for_inference(self):
         """
         Handles the final flush of the inference queue and waits for all
         remaining results to complete backpropagation.
         """             
-        cdef double time_shutdown_start = time.perf_counter()
+        cdef double time_wait_for_inference_start = time.perf_counter()
         cdef int buffer_index
         cdef object raw_policy_probs, raw_value_output
         cdef MCTSNode_c.MCTSNode node
@@ -218,15 +122,15 @@ cdef class MCTSEngine:
 
         cdef int batch_buffer_size = len(self.batch_buffer)
 
-        self.logger.debug(f"[Misc] Final flush: self.batch_buffer size: {batch_buffer_size}")
+        self.logger.debug(f"[Misc] Flush: self.batch_buffer size: {batch_buffer_size}")
         if self.batch_buffer:
             self._submit_batch()
             self.logger.debug(f"[Misc] Flushed final partial batch of size {batch_buffer_size} to inference queue. Inferences sent: {self.inference_sent}")
 
-        # Wait for remaining nodes - this is explicitly acknowledged as a blocking shutdown step
+        # Wait for remaining nodes - this is explicitly acknowledged as a blocking wait_for_inference step
         while self.inference_received < self.inference_sent:
             try:
-                buffer_index = self.result_queue.get(timeout=0.01)
+                buffer_index = self.result_queue.get()
 
                 node = self.in_flight_nodes.pop(buffer_index)
                 self.inference_received += 1
@@ -247,12 +151,12 @@ cdef class MCTSEngine:
 
             except queue.Empty:
                 self.logger.debug(f"[Misc] Result queue empty during final wait (self.inference_received={self.inference_received}, self.inference_sent={self.inference_sent}). Waiting for more results...")
-                time.sleep(0.01)
+                break
 
-        self.time_shutdown += (time.perf_counter() - time_shutdown_start)
+        self.time_wait_for_inference += (time.perf_counter() - time_wait_for_inference_start)
 
     
-    cpdef _select(self):
+    cpdef _select(self, MCTSNode_c.MCTSNode start_node):
         """
         Traverses the MCTS tree from the root to a leaf node using the 
         Upper Confidence Bound for Trees (UCT) selection rule.
@@ -263,7 +167,7 @@ cdef class MCTSEngine:
         # Timing remains a Python object operation, as requested.
         cdef double time_selection_start = time.perf_counter()
 
-        cdef MCTSNode_c.MCTSNode node = self.root
+        cdef MCTSNode_c.MCTSNode node = start_node
         cdef MCTSNode_c.MCTSNode best_child = None
         cdef double best_uct_score = -float('inf')
         cdef double best_prior_for_tie_break = -1.0
@@ -272,8 +176,6 @@ cdef class MCTSEngine:
         cdef double uct
         cdef MCTSNode_c.MCTSNode child
         
-        path = [node]
-
         while node.children and node.expanded and not node.selected:
             
             best_child = None
@@ -297,7 +199,6 @@ cdef class MCTSEngine:
                     best_child = child
 
             node = best_child
-            path.append(node)
         
         # Timing remains a Python object operation
         self.time_selection += (time.perf_counter() - time_selection_start)
@@ -307,7 +208,7 @@ cdef class MCTSEngine:
     def _mark_selected(self, MCTSNode_c.MCTSNode node):
 
         cdef double time_misc_start = time.perf_counter()
-        cdef MCTSNode_c.MCTSNode current_node = node.parent
+        cdef MCTSNode_c.MCTSNode current_node = node
 
         while current_node is not None:
             if all(child.selected for child in current_node.children.values()):
@@ -365,63 +266,88 @@ cdef class MCTSEngine:
         self.time_queueing += (time.perf_counter() - time_queueing_start)
 
 
-
-    cpdef run_simulations(self, int search_depth):
-        """
-        Runs a specified number of MCTS simulations. Each simulation involves
-        selection, queuing for inference, waiting for a result, and finally
-        expansion and backpropagation.
-        """
-        
-        cdef MCTSNode_c.MCTSNode node
-        cdef double time_expansion_start, time_misc_start
-        cdef double value
+    cdef _handle_terminal_node(self, MCTSNode_c.MCTSNode leaf):
+        cdef double time_expansion_start = time.perf_counter()
         cdef object result
-        cdef object numpy_board, board_input
-        cdef int current_batch_size
+        cdef double value = 0.0
         
-        if not self.root.expanded:
-            self._expand_root()
-
-        self.simulation_count = self.root.visits
-        self.inference_sent = 0
-        self.inference_received = 0
-        self.batch_buffer = []
-
-        self.time_selection = 0.0
-        self.time_expansion = 0.0
-        self.time_backpropagation = 0.0
-        self.time_retrieval = 0.0
-        self.time_queueing = 0.0
-        self.time_misc = 0.0
-        self.time_shutdown = 0.0
+        result = leaf.board.result(claim_draw=True)
+        self._mark_selected(leaf)
+        
+        if result == "1-0":
+            value = 1.0 if leaf.board.turn == chess.WHITE else -1.0
+        elif result == "0-1":
+            value = 1.0 if leaf.board.turn == chess.BLACK else -1.0
             
-        while self.simulation_count < search_depth:
-            # Process any available results first (non-blocking)
-            self._retrieve_inference()
+        self.time_expansion += (time.perf_counter() - time_expansion_start)
+        self._backpropagate(leaf, value, is_terminal=True)
+        self.simulation_count += 1
 
-            # Put batch on queue if worker_batch_size is reached
+
+    cdef _queue_leaf_for_inference(self, MCTSNode_c.MCTSNode leaf):
+        cdef double time_misc_start = time.perf_counter()
+        cdef int buffer_index
+        cdef object numpy_board, board_input
+        
+        while self.buffer_free_slots.qsize() == 0:
+            self._retrieve_inference()
+            
+            if self.batch_buffer:
+                self._submit_batch()
+            
+            time.sleep(0.001)
+
+        buffer_index = self.buffer_free_slots.get() 
+        self._mark_selected(leaf)
+        self.in_flight_nodes[buffer_index] = leaf
+        
+        numpy_board = src_shared.utils.board_to_tensor_69(leaf.board)
+        board_input = torch.from_numpy(numpy_board).float()
+        
+        if self.use_fp16:
+            board_input = board_input.half()
+
+        self.shared_input_buffer[buffer_index].copy_(board_input)
+
+        self.batch_buffer.append((self.worker_id, buffer_index))
+        self._virtual_loss(leaf, is_applying=True)
+
+        self.time_misc += (time.perf_counter() - time_misc_start) 
+        self.simulation_count += 1
+
+
+    cdef _run_single_async_simulation(self, MCTSNode_c.MCTSNode start_node):
+        """ 
+        Runs one descent starting from start_node, handles queueing. 
+        """
+        cdef MCTSNode_c.MCTSNode leaf
+        cdef int current_batch_size
+        cdef double time_misc_start
+
+        while True:
+            self._retrieve_inference()
             current_batch_size = len(self.batch_buffer)
+
             if current_batch_size >= self.worker_batch_size:
                 self._submit_batch()
             
-            # Check if root is queued for inference (this handles when all nodes in tree are queued)
-            if self.root.selected:
+            # Check if start node is queued for inference (this handles when all nodes in tree are queued)
+            if start_node.selected:
                 if current_batch_size > 0:
                     self._submit_batch()
 
                 # Root is queued + not waiting for inference results -> break
                 if self.inference_received >= self.inference_sent:
                     self.logger.info(f"Only terminal nodes remaining - breaking MCTS loop")
-                    break
+                    return
 
                 time.sleep(0.001)
                 continue
 
-            node = self._select()
+            leaf = self._select(start_node)
 
-            if node == self.root:
-                self.logger.debug(f"Root chosen - restarting loop")
+            if leaf == start_node:
+                self.logger.debug(f"Start node chosen - restarting loop")
                 time.sleep(0.001)
                 continue
 
@@ -429,176 +355,161 @@ cdef class MCTSEngine:
                 self.logger.debug(f"No free buffer indices")
                 time.sleep(0.001)
                 continue
-
-            # Expansion/Simulation: Check for game-over or queue for inference
-            if node.board.is_game_over(claim_draw=True):
-                time_expansion_start = time.perf_counter()
-                result = node.board.result(claim_draw=True)
-                node.selected = True
-                value = 0.0
-                
-                # Fast comparisons and assignments
-                if result == "1-0":
-                    value = 1.0 if node.board.turn == chess.WHITE else -1.0
-                elif result == "0-1":
-                    value = 1.0 if node.board.turn == chess.BLACK else -1.0
-                
-                self.time_expansion += (time.perf_counter() - time_expansion_start)
-                self._backpropagate(node, value, is_terminal=True)
-                self.simulation_count += 1
-                self.logger.debug(f"[Misc] Game-over handling completed. Simulation count: {self.simulation_count}")
-
-            # Otherwise -> queue for inference
-            else:
-                time_misc_start = time.perf_counter()
-                buffer_index = self.buffer_free_slots.get() 
-                node.selected = True
-                self.in_flight_nodes[buffer_index] = node
-                self.logger.debug(f"Free Nodes: {self.buffer_free_slots.qsize()}")
-                
-                numpy_board = src_shared.utils.board_to_tensor_69(node.board)
-                board_input = torch.from_numpy(numpy_board).float()
-                
-                if self.use_fp16:
-                    board_input = board_input.half()
-
-                self.shared_input_buffer[buffer_index].copy_(board_input)
     
-                self.batch_buffer.append((self.worker_id, buffer_index))
-                self._virtual_loss(node, is_applying=True)
+            if leaf.board.is_game_over(claim_draw=True):
+                self._handle_terminal_node(leaf)
+            else:
+                self._queue_leaf_for_inference(leaf)
 
-                self.time_misc += (time.perf_counter() - time_misc_start) 
+            return
 
-                self.simulation_count += 1
-                self.logger.debug(f"[Misc] Node queued for inference. Simulation count: {self.simulation_count}, batch size: {len(self.batch_buffer)}")
 
-            # If all legal children of the parent are now queued, mark parent too
-            self._mark_selected(node)
+    cpdef run_simulations(self, int total_simulations):
+        """
+        Executes the Gumbel MuZero 'Sequential Halving' search.
+        """
+        cdef int num_phases
+        cdef int sim_budget_per_phase
+        cdef int sims_per_candidate
+        cdef list all_moves
+        cdef list active_candidates
+        cdef MCTSNode_c.MCTSNode child
+        cdef int actual_k
+        cdef int i
         
-        # Cleanup
-        self._shutdown()
+        self.simulation_count = 0
+        self.inference_sent = 0
+        self.inference_received = 0
+        self.batch_buffer = []
+
+        # Reset timings
+        self.time_selection = 0.0
+        self.time_expansion = 0.0
+        self.time_backpropagation = 0.0
+        self.time_retrieval = 0.0
+        self.time_queueing = 0.0
+        self.time_misc = 0.0
+        self.time_wait_for_inference = 0.0
+
+    
+        self._queue_leaf_for_inference(self.root)
+        self._submit_batch()
+        self._wait_for_inference()
+
+        all_moves = list(self.root.children.keys())
+        actual_k = min(self.k_candidates, len(all_moves))
         
-        self.logger.info(f"\n--- MCTS Root Children Analysis (Final State) ---")
-        self.logger.info(
-                f"Root node: Visits: {self.root.visits}, "
-                f"Average Value: {self.root.value_sum / self.root.visits if self.root.visits > 0 else 0.0:.4f}, "
-            )
-
-        cdef double sqrt_parent_visits_term
-        cdef double prior_prob
-        cdef double uct
-        cdef MCTSNode_c.MCTSNode child_node
-        cdef object move_obj
-        cdef object log_message
-
-        self.logger.debug(f"Free Nodes: {self.buffer_free_slots.qsize()}")
+        # Calculate phases: e.g. log2(16) = 4 phases
+        num_phases = int(math.ceil(math.log2(actual_k)))
+        if num_phases < 1: num_phases = 1
         
-        sorted_children = sorted(self.root.children.items(), key=_visits_key_func, reverse=True)
+        sim_budget_per_phase = total_simulations // num_phases
+        if sim_budget_per_phase < 1: sim_budget_per_phase = 1
 
-        for move_obj, child_node in sorted_children:
-            sqrt_parent_visits_term = sqrt(child_node.visits) if child_node.visits > 0 else 0.0
-            prior_prob = child_node.prior_probability_from_parent
-            uct = child_node.uct_score(self.cpuct, prior_prob, sqrt_parent_visits_term)
+        # 2. Gumbel Injection (Calculate Noise & Logits Locally)
+        candidate_data = []
 
-            log_message = (
-                f"Move: {move_obj.uci()}, "
-                f"Prior Probability: {prior_prob:.4f}, "
-                f"Visits: {child_node.visits}, "
-                f"Average Value: {-child_node.value_sum / child_node.visits if child_node.visits > 0 else 0.0:.4f}, "
-                f"UCT Score: {uct:.4f}, "
-                f"Forced outcome: {child_node.forced_outcome}, "
-                f"Distance to mate: {child_node.distance_to_mate}"
-            )
-            self.logger.info(log_message)
+        for move in all_moves:
+            child = self.root.children[move]
+            
+            # Recover logit: ln(P)
+            logit = math.log(max(child.prior_probability_from_parent, 1e-8))
+            
+            if self.training:
+                noise = np.random.gumbel(0, 1)
+            else:
+                noise = 0.0
+            
+            candidate_data.append({
+                'move': move,
+                'node': child,
+                'logit': logit,
+                'noise': noise,
+                'score': logit + noise
+            })
 
-        self.logger.info(f"\n--- Aggregate Selection Phase Timings ({self.simulation_count} simulations) ---")
+        # 3. Initial Candidates (Score = Logit + Noise)
+        candidate_data.sort(key=operator.itemgetter('score'), reverse=True)
+        active_candidates = candidate_data[:actual_k]
+
+        for cand in active_candidates:
+            child = cand['node']
+
+            if child.board.is_game_over(claim_draw=True):
+                self._handle_terminal_node(child)
+            else:
+                self._queue_leaf_for_inference(child)
+
+        self._submit_batch()
+
+        # Barrier
+        self._wait_for_inference()
+
+        # 4. Sequential Halving Phase Loop
+        for phase in range(num_phases):
+            if len(active_candidates) == 0:
+                break
+
+            sims_per_candidate = sim_budget_per_phase // len(active_candidates)
+            if sims_per_candidate < 1: sims_per_candidate = 1
+            
+            # A. Run Batch Simulations
+            for i in range(sims_per_candidate):
+                for candidate in active_candidates:
+                    child = candidate['node']
+                    self._run_single_async_simulation(child)
+
+            # B. Sync Barrier (Wait for all GPUs to finish)
+            self._wait_for_inference() 
+
+            # C. Score Update & Pruning
+            # We prune at the end of every phase except the very last one
+            if len(active_candidates) > 1 and phase < (num_phases - 1):
+                
+                for cand in active_candidates:
+                    node_ptr = cand['node']
+                    q = -node_ptr.value_sum / node_ptr.visits if node_ptr.visits > 0 else 0.0
+                    cand['score'] = cand['logit'] + cand['noise'] + (self.sigma_scale * q)
+
+                active_candidates.sort(key=operator.itemgetter('score'), reverse=True)
+                
+                # Halve the candidates
+                cutoff = len(active_candidates) // 2
+                active_candidates = active_candidates[:cutoff]
+
+        self.simulation_count = total_simulations
+
+        # --- CHILD STATS (Sorted by Q) ---
+        self.logger.info(f"\n{'Move':<8} {'Visits':>8} {'Prior':>8} {'Q-Val':>8} {'Outcome':>8}")
+        self.logger.info("-" * 50)
+
+        cdef list stats = []
+        cdef double q_val
+        cdef object outcome
+
+        for move, child in self.root.children.items():
+            if child.visits > 0:
+                # Calculate Q from Parent Perspective (-child value)
+                q_val = -child.value_sum / child.visits
+                stats.append((child, q_val))
+
+        # Sort by Q-Value Descending
+        stats.sort(key=operator.itemgetter(1), reverse=True)
+
+        for child, q_val in stats:
+            outcome = str(child.forced_outcome) if child.forced_outcome is not None else ""
+            self.logger.info(f"{child.move.uci():<8} {child.visits:>8} {child.prior_probability_from_parent:>8.4f} {q_val:>8.4f} {outcome:>8}")
+
+        # Logging
+        self.logger.info(f"\n--- Gumbel Search ({total_simulations} sims) Timings ---")
         self.logger.info(f"{'Selection time:':<25}{self.time_selection:.4f}")
         self.logger.info(f"{'Queueing time:':<25}{self.time_queueing:.4f}")
         self.logger.info(f"{'Retrieving time:':<25}{self.time_retrieval:.4f}")
         self.logger.info(f"{'Expansion time:':<25}{self.time_expansion:.4f}")
         self.logger.info(f"{'Backpropagation time:':<25}{self.time_backpropagation:.4f}")
-        self.logger.info(f"{'Misc time:':<25}{self.time_misc:.4f}")
-        self.logger.info(f"{'Shutdown time:':<25}{self.time_shutdown:.4f}")
+        self.logger.info(f"{'Forced waiting for inference time:':<25}{self.time_wait_for_inference:.4f}")
 
         return self.simulation_count
-
-
-    cdef _add_dirichlet_noise(self, MCTSNode_c.MCTSNode node):
-        """
-        Adds Dirichlet noise directly to the prior probabilities stored on the 
-        root's children (the legal moves), then updates the children.
-        """
-        cdef double time_misc_start = time.perf_counter()
-        cdef object child_nodes_list, legal_probs_list, legal_probs_tensor, alpha, dirichlet_noise
-        cdef object noisy_legal_probs_tensor
-        cdef int i
-        cdef MCTSNode_c.MCTSNode child_node
-        
-        self.logger.debug("[Dirichlet Noise] Starting to add noise to root children...")
-
-        child_nodes_list_py = list(node.children.values())
-        
-        # Create a Float32 tensor on CPU for the Dirichlet distribution calculation
-        legal_probs_list = [c.prior_probability_from_parent for c in child_nodes_list_py]
-        legal_probs_tensor = torch.tensor(legal_probs_list, dtype=torch.float32)
-        
-        # Generate Dirichlet noise
-        alpha = torch.full((len(legal_probs_list),), self.dirichlet_alpha, dtype=torch.float32)
-        dirichlet_noise = torch.distributions.dirichlet.Dirichlet(alpha).sample()
-
-        # Mix the original priors and the noise
-        noisy_legal_probs_tensor = (
-            (1.0 - self.dirichlet_epsilon) * legal_probs_tensor +
-            self.dirichlet_epsilon * dirichlet_noise
-        )
-
-        # Write the new noisy priors back to the children
-        noisy_legal_probs_list = noisy_legal_probs_tensor.tolist()
-
-        for i in range(len(child_nodes_list_py)):
-            child_node = <MCTSNode_c.MCTSNode>child_nodes_list_py[i] 
-            child_node.prior_probability_from_parent = noisy_legal_probs_list[i]
-
-        self.logger.debug(f"[Dirichlet Noise] Added Dirichlet noise to root children.")
-        self.time_misc += (time.perf_counter() - time_misc_start)
-
-
-    cdef _expand_root(self):
-        """
-        A helper method to perform a single initial expansion of the root node
-        when the tree is first created or reset.
-        """
-        cdef object board_input, raw_policy_probs
-        cdef object policy_probs 
-        cdef object raw_value_output
-        cdef int buffer_index
-
-        buffer_index = self.buffer_free_slots.get() 
-
-        board_input = torch.from_numpy(src_shared.utils.board_to_tensor_69(self.root.board)).float()
-        if self.use_fp16:
-            board_input = board_input.half()
-        self.shared_input_buffer[buffer_index].copy_(board_input)
-        
-        self._virtual_loss(self.root, is_applying=True)
-        self.inference_queue.put([(self.worker_id, buffer_index)])
-
-        buffer_index = self.result_queue.get()
-        self.inference_received += 1
-
-        raw_policy_probs = self.shared_policy_buffer[buffer_index] 
-        raw_value_output = self.shared_value_buffer[buffer_index]
-
-        policy_probs = raw_policy_probs.to(self.policy_probs_dtype)
-        value_output = raw_value_output.item()
-
-        self.buffer_free_slots.put(buffer_index) 
-        
-        self._expand(self.root, policy_probs)
-        self._backpropagate(self.root, value_output, is_terminal=False)
-
-        if self.training:
-            self._add_dirichlet_noise(self.root)
 
 
     cpdef _expand(self, MCTSNode_c.MCTSNode node, policy_probs: torch.Tensor):
@@ -709,7 +620,6 @@ cdef class MCTSEngine:
         cdef double time_backpropagation_start = time.perf_counter()
         cdef MCTSNode_c.MCTSNode current_node = node
         cdef double value_for_backprop = value
-        cdef object path_moves = set() 
         
         if is_terminal:
             current_node.forced_outcome = int(value) 
@@ -725,7 +635,6 @@ cdef class MCTSEngine:
             
             current_node.visits += 1
             current_node.value_sum += value_for_backprop
-            path_moves.add(current_node.move) 
             
             self._backpropagate_minimax(current_node)
 

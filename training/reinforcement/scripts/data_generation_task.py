@@ -64,7 +64,7 @@ class DataGenerationGameWorker:
             player = self.players[self.current_turn]
             current_board = self.board.copy()
 
-            move, policy_vector, simulation_count = player.get_move(current_board, ply_count, search_depth, None)
+            move, policy_vector, simulation_count = player.get_move(current_board, ply_count, search_depth)
             total_simulations += simulation_count
 
             if move is None:
