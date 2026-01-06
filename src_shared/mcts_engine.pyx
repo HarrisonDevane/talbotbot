@@ -462,20 +462,11 @@ cdef class MCTSEngine:
             # B. Sync Barrier (Wait for all GPUs to finish)
             self._wait_for_inference() 
 
-# ... inside run_simulations loop ...
-
-            # B. Sync Barrier
-            self._wait_for_inference() 
-
             # C. Score Update & Pruning
             if len(active_candidates) > 1 and phase < (num_phases - 1):
-                
-                # --- FIX: RELATIVE NORMALIZATION (DeepMind Style) ---
-                # We find the min/max Q of the CURRENT candidates.
-                # This ensures the best candidate is ALWAYS mapped to 1.0,
-                # creating a strong signal that overpowers the noise.
-                min_q = 99999.0
-                max_q = -99999.0
+
+                min_q = float('inf')
+                max_q = -float('inf')
                 
                 # 1. Find Min/Max
                 for cand in active_candidates:

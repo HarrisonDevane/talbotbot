@@ -162,8 +162,6 @@ class TalbotAgent:
                     eligible_moves = {m: c for m, c in self.mcts.root.children.items() if c.visits > 0}
 
                 if eligible_moves:
-                    # --- FIX: RELATIVE NORMALIZATION FOR TARGETS ---
-                    # We normalize relative to the *current* min/max found in the search.
                     # This amplifies small differences (e.g., -0.01 vs -0.02) into a full 0-1 signal.
                     
                     # 1. Get raw Q-values
@@ -205,8 +203,23 @@ class TalbotAgent:
 
                         scores.append(logit + (sigma * q_norm))
 
-                    # ... (Softmax and selection logic remains same)
-           
+                    scores = np.array(scores)
+                    scores -= np.max(scores)
+                    exps = np.exp(scores)
+                    softmax_probs = exps / np.sum(exps)
+
+                    # Assign Policy Vector
+                    for move, prob in zip(moves, softmax_probs):
+                        from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
+                        flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
+                        policy_vector[flat_index] = prob
+                    
+                    # Select Move
+                    best_move = moves[np.random.choice(len(moves), p=softmax_probs)]
+                    
+                    self.logger.info(f"Generated Q-based policy for {len(moves)} eligible moves.")
+                    
+                               
             move_end_time = time.time()
             total_move_time = move_end_time - move_start_time
             simulation_speed = (simulation_count / total_move_time) if total_move_time > 0 else 0
