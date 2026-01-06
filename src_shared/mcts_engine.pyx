@@ -470,10 +470,8 @@ cdef class MCTSEngine:
             # C. Score Update & Pruning
             if len(active_candidates) > 1 and phase < (num_phases - 1):
                 
-                # --- FIX 1: Robust Normalization (Use ALL children, not just candidates) ---
+                # 1. DEEPMIND NORMALIZATION: Get strict Min/Max Q from ALL children
                 current_q_values = []
-                # Use self.root.children to establish the global range [Loss, Win]
-                # This prevents "subset collapse" if all candidates are good.
                 for child in self.root.children.values():
                     if child.visits > 0:
                         current_q_values.append(-child.value_sum / child.visits)
@@ -484,11 +482,12 @@ cdef class MCTSEngine:
                 else:
                     min_q, max_q = -1.0, 1.0
                 
+                # Pure mathematical range (only protects against divide-by-zero)
                 q_range = max_q - min_q
                 if q_range < 1e-8: 
                     q_range = 1.0
 
-                # --- FIX 2: Compiler Error (Explicit Loop instead of max() generator) ---
+                # 2. DEEPMIND DYNAMIC SIGMA: (50 + max_visits)
                 max_visits = 0
                 if active_candidates:
                     for cand in active_candidates:

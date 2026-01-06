@@ -150,22 +150,19 @@ class TalbotAgent:
             elif (self.use_resignation and self.mcts.root.value_sum / self.mcts.root.visits < self.talbot_config['resignation_cutoff']):
                 return None, policy_vector, simulation_count
 
-            # Final Fallback: Default to normalized visit counts.
             else:
-                # Ignore moves that lead to forced losses or chosen draws
+                # 1. Select Eligible Moves (Candidates for the policy)
                 eligible_moves = {
                     move: child for move, child in self.mcts.root.children.items()
                     if child.forced_outcome not in [0, 1] and child.visits > 0
                 }
-
+                
                 if not eligible_moves:
-                    eligible_moves = {
-                        move: child for move, child in self.mcts.root.children.items()
-                        if child.visits > 0
-                    }
+                    eligible_moves = {m: c for m, c in self.mcts.root.children.items() if c.visits > 0}
 
                 if eligible_moves:
-                    # Calculate Min/Max from ALL visited children to preserve true scale
+                    # 1. DEEPMIND NORMALIZATION: Calculate Stats from ALL visited nodes
+                    # (Crucial: Includes "bad" moves in the range to prevent artificial confidence)
                     all_q_values = []
                     for child in self.mcts.root.children.values():
                         if child.visits > 0:
@@ -176,12 +173,12 @@ class TalbotAgent:
                     else:
                         min_q, max_q = -1.0, 1.0
                     
+                    # Pure mathematical range
                     q_range = max_q - min_q
                     if q_range < 1e-8:
                         q_range = 1.0
 
-                    # 2. Dynamic Sigma (Matches MCTS Engine)
-                    # Note: We use the max visits of the ELIGIBLE moves to determine confidence
+                    # 2. DEEPMIND DYNAMIC SIGMA
                     max_visits = max(child.visits for child in eligible_moves.values())
                     sigma = self.talbot_config['gumbel_sigma'] + max_visits
 
@@ -202,6 +199,7 @@ class TalbotAgent:
                         else:
                             q_norm = 0.0
 
+                        # Score = Logit + Sigma * Q_norm
                         scores.append(logit + (sigma * q_norm))
 
                     # Compute Softmax
@@ -210,19 +208,17 @@ class TalbotAgent:
                     exps = np.exp(scores)
                     softmax_probs = exps / np.sum(exps)
 
-                    # ... (Assign to policy_vector and return) ...
-
                     # Assign Policy Vector
                     for move, prob in zip(moves, softmax_probs):
                         from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
                         flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                         policy_vector[flat_index] = prob
                     
-                    # Select Move by Sampling from this improved distribution
+                    # Select Move
                     best_move = moves[np.random.choice(len(moves), p=softmax_probs)]
                     
                     self.logger.info(f"Generated Q-based policy for {len(moves)} eligible moves.")
-
+           
             move_end_time = time.time()
             total_move_time = move_end_time - move_start_time
             simulation_speed = (simulation_count / total_move_time) if total_move_time > 0 else 0
