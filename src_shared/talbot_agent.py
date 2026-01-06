@@ -165,23 +165,45 @@ class TalbotAgent:
                     }
 
                 if eligible_moves:
-                    sigma = self.talbot_config['gumbel_sigma']
+                    # 1. Gather Q values for normalization
+                    q_values = []
+                    for child in eligible_moves.values():
+                        if child.visits > 0:
+                            q_values.append(-child.value_sum / child.visits)
+                    
+                    if q_values:
+                        min_q, max_q = min(q_values), max(q_values)
+                    else:
+                        min_q, max_q = -1.0, 1.0
+                    
+                    q_range = max_q - min_q
+                    if q_range < 1e-8:
+                        q_range = 1.0
+
+                    # 2. Dynamic Sigma
+                    max_visits = max(child.visits for child in eligible_moves.values())
+                    # talbot_config['gumbel_sigma'] is 50.0
+                    sigma = self.talbot_config['gumbel_sigma'] + max_visits
+
                     scores = []
                     moves = list(eligible_moves.keys())
                     
-                    # Calculate scores for Softmax
                     for move in moves:
                         child = eligible_moves[move]
                         
-                        # Logit = ln(Prior)
+                        # Logit
                         prior = max(child.prior_probability_from_parent, 1e-8)
                         logit = np.log(prior)
                         
-                        # Q-Value (Flip perspective: Q = -value / visits)
-                        q_value = -child.value_sum / child.visits
-                        
-                        # Score = Logit + Sigma * Q
-                        scores.append(logit + (sigma * q_value))
+                        # Normalized Q
+                        if child.visits > 0:
+                            raw_q = -child.value_sum / child.visits
+                            q_norm = (raw_q - min_q) / q_range
+                        else:
+                            q_norm = 0.0
+
+                        # Score = Logit + Sigma * Q_norm
+                        scores.append(logit + (sigma * q_norm))
 
                     # Compute Softmax
                     scores = np.array(scores)

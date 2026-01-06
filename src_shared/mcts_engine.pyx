@@ -463,13 +463,44 @@ cdef class MCTSEngine:
             self._wait_for_inference() 
 
             # C. Score Update & Pruning
-            # We prune at the end of every phase except the very last one
             if len(active_candidates) > 1 and phase < (num_phases - 1):
                 
+                # 1. Calculate Min/Max Q for Normalization
+                current_q_values = []
                 for cand in active_candidates:
                     node_ptr = cand['node']
-                    q = -node_ptr.value_sum / node_ptr.visits if node_ptr.visits > 0 else 0.0
-                    cand['score'] = cand['logit'] + cand['noise'] + (self.sigma_scale * q)
+                    if node_ptr.visits > 0:
+                        current_q_values.append(-node_ptr.value_sum / node_ptr.visits)
+                
+                if current_q_values:
+                    min_q = min(current_q_values)
+                    max_q = max(current_q_values)
+                else:
+                    min_q, max_q = -1.0, 1.0
+                
+                q_range = max_q - min_q
+                if q_range < 1e-8: 
+                    q_range = 1.0
+
+                # 2. Dynamic Sigma (FIX: Use explicit loop instead of generator)
+                max_visits = 0
+                if active_candidates:
+                    for cand in active_candidates:
+                        if cand['node'].visits > max_visits:
+                            max_visits = cand['node'].visits
+                
+                dynamic_sigma = (self.sigma_scale + max_visits) * 1.0
+
+                # 3. Apply Score
+                for cand in active_candidates:
+                    node_ptr = cand['node']
+                    if node_ptr.visits > 0:
+                        q = -node_ptr.value_sum / node_ptr.visits
+                        q_norm = (q - min_q) / q_range
+                    else:
+                        q_norm = 0.5 
+
+                    cand['score'] = cand['logit'] + cand['noise'] + (dynamic_sigma * q_norm)
 
                 active_candidates.sort(key=operator.itemgetter('score'), reverse=True)
                 
