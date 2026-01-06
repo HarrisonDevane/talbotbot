@@ -470,24 +470,12 @@ cdef class MCTSEngine:
             # C. Score Update & Pruning
             if len(active_candidates) > 1 and phase < (num_phases - 1):
                 
-                # 1. DEEPMIND NORMALIZATION: Get strict Min/Max Q from ALL children
-                current_q_values = []
-                for child in self.root.children.values():
-                    if child.visits > 0:
-                        current_q_values.append(-child.value_sum / child.visits)
-                
-                if current_q_values:
-                    min_q = min(current_q_values)
-                    max_q = max(current_q_values)
-                else:
-                    min_q, max_q = -1.0, 1.0
-                
-                # Pure mathematical range (only protects against divide-by-zero)
-                q_range = max_q - min_q
-                if q_range < 1e-8: 
-                    q_range = 1.0
+                # Use fixed bounds [-1, 1] to match the Policy Target logic.
+                min_q = -1.0
+                max_q = 1.0
+                q_range = 2.0
 
-                # 2. DEEPMIND DYNAMIC SIGMA: (50 + max_visits)
+                # 2. DEEPMIND DYNAMIC SIGMA
                 max_visits = 0
                 if active_candidates:
                     for cand in active_candidates:
@@ -501,17 +489,13 @@ cdef class MCTSEngine:
                     node_ptr = cand['node']
                     if node_ptr.visits > 0:
                         q = -node_ptr.value_sum / node_ptr.visits
-                        q_norm = (q - min_q) / q_range
+                        q_norm = (q - min_q) / q_range # Always divides by 2.0
                     else:
-                        q_norm = 0.5 
+                        q_norm = 0.5 # Neutral (0.0) maps to 0.5
 
                     cand['score'] = cand['logit'] + cand['noise'] + (dynamic_sigma * q_norm)
 
                 active_candidates.sort(key=operator.itemgetter('score'), reverse=True)
-                
-                # Halve the candidates
-                cutoff = len(active_candidates) // 2
-                active_candidates = active_candidates[:cutoff]
 
         self.simulation_count = total_simulations
 

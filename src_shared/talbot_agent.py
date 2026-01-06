@@ -150,8 +150,9 @@ class TalbotAgent:
             elif (self.use_resignation and self.mcts.root.value_sum / self.mcts.root.visits < self.talbot_config['resignation_cutoff']):
                 return None, policy_vector, simulation_count
 
+           
             else:
-                # 1. Select Eligible Moves (Candidates for the policy)
+                # 1. Select Eligible Moves
                 eligible_moves = {
                     move: child for move, child in self.mcts.root.children.items()
                     if child.forced_outcome not in [0, 1] and child.visits > 0
@@ -161,24 +162,11 @@ class TalbotAgent:
                     eligible_moves = {m: c for m, c in self.mcts.root.children.items() if c.visits > 0}
 
                 if eligible_moves:
-                    # 1. DEEPMIND NORMALIZATION: Calculate Stats from ALL visited nodes
-                    # (Crucial: Includes "bad" moves in the range to prevent artificial confidence)
-                    all_q_values = []
-                    for child in self.mcts.root.children.values():
-                        if child.visits > 0:
-                            all_q_values.append(-child.value_sum / child.visits)
-                    
-                    if all_q_values:
-                        min_q, max_q = min(all_q_values), max(all_q_values)
-                    else:
-                        min_q, max_q = -1.0, 1.0
-                    
-                    # Pure mathematical range
-                    q_range = max_q - min_q
-                    if q_range < 1e-8:
-                        q_range = 1.0
+                    # We normalize strictly against the game bounds [-1, 1].
+                    min_q, max_q = -1.0, 1.0
+                    q_range = 2.0
 
-                    # 2. DEEPMIND DYNAMIC SIGMA
+                    # 2. DYNAMIC SIGMA
                     max_visits = max(child.visits for child in eligible_moves.values())
                     sigma = self.talbot_config['gumbel_sigma'] + max_visits
 
@@ -192,12 +180,13 @@ class TalbotAgent:
                         prior = max(child.prior_probability_from_parent, 1e-8)
                         logit = np.log(prior)
                         
-                        # Normalized Q
+                        # Normalized Q (Global Scale)
                         if child.visits > 0:
                             raw_q = -child.value_sum / child.visits
+                            # Maps -1->0, 1->1
                             q_norm = (raw_q - min_q) / q_range
                         else:
-                            q_norm = 0.0
+                            q_norm = 0.5
 
                         # Score = Logit + Sigma * Q_norm
                         scores.append(logit + (sigma * q_norm))
