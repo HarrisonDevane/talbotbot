@@ -462,15 +462,21 @@ cdef class MCTSEngine:
             # B. Sync Barrier (Wait for all GPUs to finish)
             self._wait_for_inference() 
 
+# ... inside run_simulations loop ...
+
+            # B. Sync Barrier
+            self._wait_for_inference() 
+
             # C. Score Update & Pruning
             if len(active_candidates) > 1 and phase < (num_phases - 1):
                 
-                # 1. Calculate Min/Max Q for Normalization
+                # --- FIX 1: Robust Normalization (Use ALL children, not just candidates) ---
                 current_q_values = []
-                for cand in active_candidates:
-                    node_ptr = cand['node']
-                    if node_ptr.visits > 0:
-                        current_q_values.append(-node_ptr.value_sum / node_ptr.visits)
+                # Use self.root.children to establish the global range [Loss, Win]
+                # This prevents "subset collapse" if all candidates are good.
+                for child in self.root.children.values():
+                    if child.visits > 0:
+                        current_q_values.append(-child.value_sum / child.visits)
                 
                 if current_q_values:
                     min_q = min(current_q_values)
@@ -482,7 +488,7 @@ cdef class MCTSEngine:
                 if q_range < 1e-8: 
                     q_range = 1.0
 
-                # 2. Dynamic Sigma (FIX: Use explicit loop instead of generator)
+                # --- FIX 2: Compiler Error (Explicit Loop instead of max() generator) ---
                 max_visits = 0
                 if active_candidates:
                     for cand in active_candidates:

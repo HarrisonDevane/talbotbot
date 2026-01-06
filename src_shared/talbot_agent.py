@@ -165,14 +165,14 @@ class TalbotAgent:
                     }
 
                 if eligible_moves:
-                    # 1. Gather Q values for normalization
-                    q_values = []
-                    for child in eligible_moves.values():
+                    # Calculate Min/Max from ALL visited children to preserve true scale
+                    all_q_values = []
+                    for child in self.mcts.root.children.values():
                         if child.visits > 0:
-                            q_values.append(-child.value_sum / child.visits)
+                            all_q_values.append(-child.value_sum / child.visits)
                     
-                    if q_values:
-                        min_q, max_q = min(q_values), max(q_values)
+                    if all_q_values:
+                        min_q, max_q = min(all_q_values), max(all_q_values)
                     else:
                         min_q, max_q = -1.0, 1.0
                     
@@ -180,9 +180,9 @@ class TalbotAgent:
                     if q_range < 1e-8:
                         q_range = 1.0
 
-                    # 2. Dynamic Sigma
+                    # 2. Dynamic Sigma (Matches MCTS Engine)
+                    # Note: We use the max visits of the ELIGIBLE moves to determine confidence
                     max_visits = max(child.visits for child in eligible_moves.values())
-                    # talbot_config['gumbel_sigma'] is 50.0
                     sigma = self.talbot_config['gumbel_sigma'] + max_visits
 
                     scores = []
@@ -202,14 +202,15 @@ class TalbotAgent:
                         else:
                             q_norm = 0.0
 
-                        # Score = Logit + Sigma * Q_norm
                         scores.append(logit + (sigma * q_norm))
 
                     # Compute Softmax
                     scores = np.array(scores)
-                    scores -= np.max(scores) # Stability shift
+                    scores -= np.max(scores)
                     exps = np.exp(scores)
                     softmax_probs = exps / np.sum(exps)
+
+                    # ... (Assign to policy_vector and return) ...
 
                     # Assign Policy Vector
                     for move, prob in zip(moves, softmax_probs):
