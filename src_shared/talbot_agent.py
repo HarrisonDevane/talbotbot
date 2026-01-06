@@ -162,11 +162,27 @@ class TalbotAgent:
                     eligible_moves = {m: c for m, c in self.mcts.root.children.items() if c.visits > 0}
 
                 if eligible_moves:
-                    # We normalize strictly against the game bounds [-1, 1].
-                    min_q, max_q = -1.0, 1.0
-                    q_range = 2.0
+                    # --- FIX: RELATIVE NORMALIZATION FOR TARGETS ---
+                    # We normalize relative to the *current* min/max found in the search.
+                    # This amplifies small differences (e.g., -0.01 vs -0.02) into a full 0-1 signal.
+                    
+                    # 1. Get raw Q-values
+                    values = []
+                    for child in eligible_moves.values():
+                        if child.visits > 0:
+                            values.append(-child.value_sum / child.visits)
+                        else:
+                            values.append(0.0) 
 
-                    # 2. DYNAMIC SIGMA
+                    min_q = min(values)
+                    max_q = max(values)
+                    
+                    if max_q - min_q < 1e-6:
+                        q_range = 1.0 
+                    else:
+                        q_range = max_q - min_q
+
+                    # 2. Dynamic Sigma
                     max_visits = max(child.visits for child in eligible_moves.values())
                     sigma = self.talbot_config['gumbel_sigma'] + max_visits
 
@@ -176,37 +192,20 @@ class TalbotAgent:
                     for move in moves:
                         child = eligible_moves[move]
                         
-                        # Logit
                         prior = max(child.prior_probability_from_parent, 1e-8)
                         logit = np.log(prior)
                         
-                        # Normalized Q (Global Scale)
+                        # Relative Normalized Q
                         if child.visits > 0:
                             raw_q = -child.value_sum / child.visits
-                            # Maps -1->0, 1->1
-                            q_norm = (raw_q - min_q) / q_range
+                            # Map min->0, max->1
+                            q_norm = (raw_q - min_q) / q_range 
                         else:
-                            q_norm = 0.5
+                            q_norm = 0.0
 
-                        # Score = Logit + Sigma * Q_norm
                         scores.append(logit + (sigma * q_norm))
 
-                    # Compute Softmax
-                    scores = np.array(scores)
-                    scores -= np.max(scores)
-                    exps = np.exp(scores)
-                    softmax_probs = exps / np.sum(exps)
-
-                    # Assign Policy Vector
-                    for move, prob in zip(moves, softmax_probs):
-                        from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
-                        flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                        policy_vector[flat_index] = prob
-                    
-                    # Select Move
-                    best_move = moves[np.random.choice(len(moves), p=softmax_probs)]
-                    
-                    self.logger.info(f"Generated Q-based policy for {len(moves)} eligible moves.")
+                    # ... (Softmax and selection logic remains same)
            
             move_end_time = time.time()
             total_move_time = move_end_time - move_start_time

@@ -470,17 +470,36 @@ cdef class MCTSEngine:
             # C. Score Update & Pruning
             if len(active_candidates) > 1 and phase < (num_phases - 1):
                 
-                # Use fixed bounds [-1, 1] to match the Policy Target logic.
-                min_q = -1.0
-                max_q = 1.0
-                q_range = 2.0
+                # --- FIX: RELATIVE NORMALIZATION (DeepMind Style) ---
+                # We find the min/max Q of the CURRENT candidates.
+                # This ensures the best candidate is ALWAYS mapped to 1.0,
+                # creating a strong signal that overpowers the noise.
+                min_q = 99999.0
+                max_q = -99999.0
+                
+                # 1. Find Min/Max
+                for cand in active_candidates:
+                    node_ptr = cand['node']
+                    if node_ptr.visits > 0:
+                        q = -node_ptr.value_sum / node_ptr.visits
+                        if q < min_q: min_q = q
+                        if q > max_q: max_q = q
+                
+                # Safety for first pass or equal values
+                if min_q > max_q: # Should not happen if visits > 0
+                    min_q = -1.0
+                    max_q = 1.0
+                
+                if max_q - min_q < 1e-5:
+                    max_q += 1e-5 # Prevent divide by zero
+                    
+                q_range = max_q - min_q
 
-                # 2. DEEPMIND DYNAMIC SIGMA
+                # 2. Dynamic Sigma
                 max_visits = 0
-                if active_candidates:
-                    for cand in active_candidates:
-                        if cand['node'].visits > max_visits:
-                            max_visits = cand['node'].visits
+                for cand in active_candidates:
+                    if cand['node'].visits > max_visits:
+                        max_visits = cand['node'].visits
                 
                 dynamic_sigma = (self.sigma_scale + max_visits) * 1.0
 
@@ -489,13 +508,21 @@ cdef class MCTSEngine:
                     node_ptr = cand['node']
                     if node_ptr.visits > 0:
                         q = -node_ptr.value_sum / node_ptr.visits
-                        q_norm = (q - min_q) / q_range # Always divides by 2.0
+                        # Rel Norm: Maps min->0, max->1
+                        q_norm = (q - min_q) / q_range
                     else:
-                        q_norm = 0.5 # Neutral (0.0) maps to 0.5
+                        # Unvisited nodes are usually treated as neutral or pessimistic
+                        # In Gumbel Top-K, if we are pruning, we generally want to keep unvisiteds 
+                        # alive or score them 0. Let's score 0.0 to be safe (worst case).
+                        q_norm = 0.0 
 
                     cand['score'] = cand['logit'] + cand['noise'] + (dynamic_sigma * q_norm)
 
                 active_candidates.sort(key=operator.itemgetter('score'), reverse=True)
+                
+                cutoff = len(active_candidates) // 2
+                active_candidates = active_candidates[:cutoff]
+
 
         self.simulation_count = total_simulations
 
