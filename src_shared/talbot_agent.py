@@ -47,6 +47,15 @@ class TalbotAgent:
             
             self.logger.info(f"Current player: {self.name}")
 
+            if not self.talbot_config['training']:                
+                if ply_count < self.talbot_config['gumbel_move_cutoff']*2:
+                    current_noise = self.talbot_config['gumbel_noise']
+                else:
+                    current_noise = 0.0
+            else:
+                # Training Mode: Always full noise
+                current_noise = self.talbot_config['gumbel_noise']
+
             self.mcts = MCTSEngine(
                 logger=self.logger, 
                 worker_id=self.worker_id,
@@ -59,6 +68,7 @@ class TalbotAgent:
                 draw_cutoff=self.talbot_config['draw_cutoff'],
                 k_candidates=self.talbot_config['gumbel_k'],
                 sigma_scale=self.talbot_config['gumbel_sigma'],
+                noise=current_noise,
                 board=board,
                 shared_input_buffer=self.shared_input_buffer,
                 shared_policy_buffer=self.shared_policy_buffer,
