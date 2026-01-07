@@ -37,7 +37,6 @@ cdef class MCTSEngine:
     cdef public int gumbel_k
     cdef public double gumbel_sigma
     cdef public double gumbel_noise
-    cdef public double gumbel_min_norm
     cdef public bint use_fp16
     cdef public bint training
 
@@ -64,7 +63,7 @@ cdef class MCTSEngine:
     cdef public object buffer_free_slots
 
     def __init__(self, logger: logging.Logger, training: bool, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, virtual_loss: float,
-             draw_cutoff: float, gumbel_k: int, gumbel_sigma: float, gumbel_noise: float, gumbel_min_norm: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+             draw_cutoff: float, gumbel_k: int, gumbel_sigma: float, gumbel_noise: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
 
         self.logger = logger
         self.training = training
@@ -83,7 +82,6 @@ cdef class MCTSEngine:
         self.gumbel_noise = gumbel_noise
         self.gumbel_k = gumbel_k
         self.gumbel_sigma = gumbel_sigma
-        self.gumbel_min_norm = gumbel_min_norm
 
         self.root = MCTSNode_c.MCTSNode(board.copy())
         self.in_flight_nodes = {}
@@ -465,29 +463,11 @@ cdef class MCTSEngine:
 
             # B. Sync Barrier (Wait for all GPUs to finish)
             self._wait_for_inference() 
-
+            
             # C. Score Update & Pruning
             if len(active_candidates) > 1 and phase < (num_phases - 1):
 
-                min_q = float('inf')
-                max_q = -float('inf')
-                
-                # 1. Find Min/Max
-                for cand in active_candidates:
-                    node_ptr = cand['node']
-                    if node_ptr.visits > 0:
-                        q = -node_ptr.value_sum / node_ptr.visits
-                        if q < min_q: min_q = q
-                        if q > max_q: max_q = q
-                
-                # Safety for first pass or equal values
-                if min_q > max_q: # Should not happen if visits > 0
-                    min_q = -1.0
-                    max_q = 1.0
-                
-                q_range = max(self.gumbel_min_norm, max_q - min_q)
-
-                # 2. Dynamic Sigma
+                # 1. Dynamic Sigma (Keep this)
                 max_visits = 0
                 for cand in active_candidates:
                     if cand['node'].visits > max_visits:
@@ -495,18 +475,16 @@ cdef class MCTSEngine:
                 
                 dynamic_sigma = self.gumbel_sigma + max_visits
 
-                # 3. Apply Score
+                # 2. Apply Score with Global Normalization [-1, 1]
                 for cand in active_candidates:
                     node_ptr = cand['node']
+                    
                     if node_ptr.visits > 0:
                         q = -node_ptr.value_sum / node_ptr.visits
-                        # Rel Norm: Maps min->0, max->1
-                        q_norm = (q - min_q) / q_range
+                        q_norm = (q + 1.0) / 2.0
+                        
                     else:
-                        # Unvisited nodes are usually treated as neutral or pessimistic
-                        # In Gumbel Top-K, if we are pruning, we generally want to keep unvisiteds 
-                        # alive or score them 0. Let's score 0.0 to be safe (worst case).
-                        q_norm = 0.0 
+                        q_norm = 0.0
 
                     cand['score'] = cand['logit'] + cand['noise'] + (dynamic_sigma * q_norm)
 

@@ -172,25 +172,8 @@ class TalbotAgent:
                     eligible_moves = {m: c for m, c in self.mcts.root.children.items() if c.visits > 0}
 
                 if eligible_moves:
-                    # This amplifies small differences (e.g., -0.01 vs -0.02) into a full 0-1 signal.
-                    
-                    # 1. Get raw Q-values
-                    values = []
-                    for child in eligible_moves.values():
-                        if child.visits > 0:
-                            values.append(-child.value_sum / child.visits)
-                        else:
-                            values.append(0.0) 
-
-                    min_q = min(values)
-                    max_q = max(values)
-                    
-                    if max_q - min_q < 1e-6:
-                        q_range = 1.0 
-                    else:
-                        q_range = max_q - min_q
-
-                    # 2. Dynamic Sigma
+                   
+                    # 1. Dynamic Sigma
                     max_visits = max(child.visits for child in eligible_moves.values())
                     sigma = self.talbot_config['gumbel_sigma'] + max_visits
 
@@ -205,12 +188,13 @@ class TalbotAgent:
                         
                         if child.visits > 0:
                             raw_q = -child.value_sum / child.visits
-                            effective_range = max(self.talbot_config['gumbel_min_norm'] , q_range)
-                            q_norm = (raw_q - min_q) / effective_range 
+                            q_norm = (raw_q + 1.0) / 2.0
                         else:
                             q_norm = 0.0
 
                         noise = getattr(child, 'gumbel_noise', 0.0)
+                        
+                        # Calculate Final Score
                         scores.append(logit + noise + (sigma * q_norm))
 
                     scores = np.array(scores)
