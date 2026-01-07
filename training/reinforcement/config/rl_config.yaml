@@ -28,7 +28,7 @@ data_generation:
   gumbel_k: 16
   gumbel_sigma: 50.0                                 # Sigma used for gumbel score calucation
   gumbel_noise: 1.0                                  # Gumbel noise value
-  gumbel_min_norm: 0.1                               # Minimum q range
+  gumbel_min_norm: 1.0                               # Minimum q range
   gumbel_move_cutoff: Null                           # Noise cutoff move. Null = always noise
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed

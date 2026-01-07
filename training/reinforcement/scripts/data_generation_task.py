@@ -57,7 +57,7 @@ class DataGenerationGameWorker:
         raw_training_data = []
         total_simulations = 0
 
-        search_depth = random.choices(self.data_generation_config['search_depth'], weights=self.data_generation_config['search_depth_weights'], k=1)[0]
+        search_depth = self.data_generation_config['search_depth']
         self.logger.info(f"Game {game_number} will use a search depth of {search_depth}")
 
         while not self.game_over:
