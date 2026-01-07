@@ -51,7 +51,7 @@ class TalbotAgent:
                 if ply_count < self.talbot_config['gumbel_move_cutoff']*2:
                     current_noise = self.talbot_config['gumbel_noise']
                 else:
-                    current_noise = 0.0
+                    current_noise = 1e-6
             else:
                 # Training Mode: Always full noise
                 current_noise = self.talbot_config['gumbel_noise']
@@ -66,9 +66,9 @@ class TalbotAgent:
                 cpuct=self.talbot_config['cpuct'],
                 virtual_loss=self.talbot_config['virtual_loss'],
                 draw_cutoff=self.talbot_config['draw_cutoff'],
-                k_candidates=self.talbot_config['gumbel_k'],
-                sigma_scale=self.talbot_config['gumbel_sigma'],
-                noise=current_noise,
+                gumbel_k=self.talbot_config['gumbel_k'],
+                gumbel_sigma=self.talbot_config['gumbel_sigma'],
+                gumbel_noise=current_noise,
                 board=board,
                 shared_input_buffer=self.shared_input_buffer,
                 shared_policy_buffer=self.shared_policy_buffer,
@@ -203,11 +203,10 @@ class TalbotAgent:
                         prior = max(child.prior_probability_from_parent, 1e-8)
                         logit = np.log(prior)
                         
-                        # Relative Normalized Q
                         if child.visits > 0:
                             raw_q = -child.value_sum / child.visits
-                            # Map min->0, max->1
-                            q_norm = (raw_q - min_q) / q_range 
+                            effective_range = max(self.talbot_config['gumbel_min_norm'] , q_range)
+                            q_norm = (raw_q - min_q) / effective_range 
                         else:
                             q_norm = 0.0
 

@@ -34,9 +34,10 @@ cdef class MCTSEngine:
     cdef public int simulation_count
     cdef public int inference_sent
     cdef public int inference_received
-    cdef public int k_candidates
-    cdef public double sigma_scale
-    cdef public double noise
+    cdef public int gumbel_k
+    cdef public double gumbel_sigma
+    cdef public double gumbel_noise
+    cdef public double gumbel_min_norm
     cdef public bint use_fp16
     cdef public bint training
 
@@ -63,7 +64,7 @@ cdef class MCTSEngine:
     cdef public object buffer_free_slots
 
     def __init__(self, logger: logging.Logger, training: bool, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, virtual_loss: float,
-             draw_cutoff: float, k_candidates: int, sigma_scale: float, noise: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+             draw_cutoff: float, gumbel_k: int, gumbel_sigma: float, gumbel_noise: float, gumbel_min_norm: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
 
         self.logger = logger
         self.training = training
@@ -79,9 +80,10 @@ cdef class MCTSEngine:
         self.virtual_loss = virtual_loss
         self.draw_cutoff = draw_cutoff
 
-        self.noise = noise
-        self.k_candidates = k_candidates
-        self.sigma_scale = sigma_scale
+        self.gumbel_noise = gumbel_noise
+        self.gumbel_k = gumbel_k
+        self.gumbel_sigma = gumbel_sigma
+        self.gumbel_min_norm = gumbel_min_norm
 
         self.root = MCTSNode_c.MCTSNode(board.copy())
         self.in_flight_nodes = {}
@@ -399,7 +401,7 @@ cdef class MCTSEngine:
         self._wait_for_inference()
 
         all_moves = list(self.root.children.keys())
-        actual_k = min(self.k_candidates, len(all_moves))
+        actual_k = min(self.gumbel_k, len(all_moves))
         
         # Calculate phases: e.g. log2(16) = 4 phases
         num_phases = int(math.ceil(math.log2(actual_k)))
@@ -417,7 +419,7 @@ cdef class MCTSEngine:
             # Recover logit: ln(P)
             logit = math.log(max(child.prior_probability_from_parent, 1e-8))
             
-            noise = np.random.gumbel(0, self.noise)
+            noise = np.random.gumbel(0, self.gumbel_noise)
 
 
             child.gumbel_noise = noise                
@@ -483,10 +485,7 @@ cdef class MCTSEngine:
                     min_q = -1.0
                     max_q = 1.0
                 
-                if max_q - min_q < 1e-5:
-                    max_q += 1e-5 # Prevent divide by zero
-                    
-                q_range = max_q - min_q
+                q_range = max(self.gumbel_min_norm, max_q - min_q)
 
                 # 2. Dynamic Sigma
                 max_visits = 0
@@ -494,7 +493,7 @@ cdef class MCTSEngine:
                     if cand['node'].visits > max_visits:
                         max_visits = cand['node'].visits
                 
-                dynamic_sigma = (self.sigma_scale + max_visits) * 1.0
+                dynamic_sigma = self.gumbel_sigma + max_visits
 
                 # 3. Apply Score
                 for cand in active_candidates:

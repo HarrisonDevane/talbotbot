@@ -23,13 +23,13 @@ data_generation:
   batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
   batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
   cpuct: 1.75                                        # PUCT Exploration constant (Standard AlphaZero: 1.0 - 2.5)
-  search_depth: [128]                                # MCTS Simulations per move
-  search_depth_weights: [1.0]                        # Probability of using the above depth (allows variable depth training)
+  search_depth: 128                                  # MCTS Simulations per move
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   gumbel_k: 16
-  gumbel_sigma: 50.0
-  gumbel_noise: 1.0
-  gumbel_move_cutoff: Null
+  gumbel_sigma: 50.0                                 # Sigma used for gumbel score calucation
+  gumbel_noise: 1.0                                  # Gumbel noise value
+  gumbel_min_norm: 0.1                               # Minimum q range
+  gumbel_move_cutoff: Null                           # Noise cutoff move. Null = always noise
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.95                          # Bot resigns to save compute time
