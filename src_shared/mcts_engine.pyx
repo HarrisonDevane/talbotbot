@@ -531,61 +531,79 @@ cdef class MCTSEngine:
 
     cpdef _expand(self, MCTSNode_c.MCTSNode node, policy_probs: torch.Tensor):
         cdef double time_expansion_start = time.perf_counter()
-        cdef object legal_moves
-        cdef list from_row_list = []
-        cdef list from_col_list = []
-        cdef list channel_list = []
-        cdef list child_nodes_in_order = []
+        
+        # 1. Generate moves
+        cdef list legal_moves = list(cython_chess.generate_legal_moves(node.board, chess.BB_ALL, chess.BB_ALL))
+        cdef int num_moves = len(legal_moves)
+        
+        # 2. Early exit for terminal nodes (prevents 0-size array errors)
+        if num_moves == 0:
+            node.expanded = True
+            self.time_expansion += (time.perf_counter() - time_expansion_start)
+            return
 
+        # 3. Pre-allocate NumPy arrays (int64 maps to torch.long)
+        cdef cnp.ndarray[cnp.int64_t, ndim=1] from_row_arr = np.empty(num_moves, dtype=np.int64)
+        cdef cnp.ndarray[cnp.int64_t, ndim=1] from_col_arr = np.empty(num_moves, dtype=np.int64)
+        cdef cnp.ndarray[cnp.int64_t, ndim=1] channel_arr = np.empty(num_moves, dtype=np.int64)
+        
+        cdef cnp.int64_t[:] from_row_view = from_row_arr
+        cdef cnp.int64_t[:] from_col_view = from_col_arr
+        cdef cnp.int64_t[:] channel_view = channel_arr
+
+        cdef list child_nodes_in_order = [None] * num_moves
+        cdef int i
         cdef int from_row_int, from_col_int, channel_int
         cdef object move
         cdef MCTSNode_c.MCTSNode child_node
 
-        legal_moves = cython_chess.generate_legal_moves(node.board, chess.BB_ALL, chess.BB_ALL)
-
-        for move in legal_moves:
+        # 5. Fast Loop
+        for i in range(num_moves):
+            move = legal_moves[i]
             from_row_int, from_col_int, channel_int = src_shared.utils.move_to_policy_components(move, node.board)
-
-            from_row_list.append(from_row_int)
-            from_col_list.append(from_col_int)
-            channel_list.append(channel_int)
+            
+            # Direct C-array assignment
+            from_row_view[i] = from_row_int
+            from_col_view[i] = from_col_int
+            channel_view[i] = channel_int
 
             child_node = MCTSNode_c.MCTSNode(board=None, parent=node, move=move)
             node.children[move] = child_node
-            child_nodes_in_order.append(child_node)
+            child_nodes_in_order[i] = child_node
 
-        cdef object normalized_legal_priors_pyobj = None
-        cdef cnp.ndarray[cnp.float32_t, ndim=1] prior_array = None
+        # 6. Tensor Creation (Zero-copy where possible)
+        from_row_tensor = torch.from_numpy(from_row_arr)
+        from_col_tensor = torch.from_numpy(from_col_arr)
+        channel_tensor = torch.from_numpy(channel_arr)
+
+        indices_tensor = src_shared.utils.policy_components_to_flat_index_torch(
+            from_row_tensor, from_col_tensor, channel_tensor
+        )
+
+        prior_values_for_legal_moves = policy_probs.flatten()[indices_tensor]
+        sum_of_legal_priors = prior_values_for_legal_moves.sum()
+
+        cdef object normalized_legal_priors_pyobj = torch.where(
+            sum_of_legal_priors > 0,
+            prior_values_for_legal_moves / sum_of_legal_priors,
+            prior_values_for_legal_moves
+        )
+
+        cdef cnp.ndarray[cnp.float32_t, ndim=1] prior_array
         cdef float [:] priors_view
-        cdef int i
 
-        if legal_moves:
-            from_row_tensor = torch.tensor(from_row_list, dtype=torch.long)
-            from_col_tensor = torch.tensor(from_col_list, dtype=torch.long)
-            channel_tensor = torch.tensor(channel_list, dtype=torch.long)
+        if normalized_legal_priors_pyobj.numel() > 0:
+    
+            prior_array = normalized_legal_priors_pyobj.cpu().float().numpy()
+            priors_view = prior_array
 
-            indices_tensor = src_shared.utils.policy_components_to_flat_index_torch(
-                from_row_tensor, from_col_tensor, channel_tensor
-            )
-
-            prior_values_for_legal_moves = policy_probs.flatten()[indices_tensor]
-            sum_of_legal_priors = prior_values_for_legal_moves.sum()
-
-            normalized_legal_priors_pyobj = torch.where(
-                sum_of_legal_priors > 0,
-                prior_values_for_legal_moves / sum_of_legal_priors,
-                prior_values_for_legal_moves
-            )
-
-            if normalized_legal_priors_pyobj.numel() > 0:
-                prior_array = normalized_legal_priors_pyobj.cpu().float().numpy()
-                priors_view = prior_array
-
-                for i, child_node in enumerate(child_nodes_in_order):
-                    child_node.prior_probability_from_parent = priors_view[i]
+            for i in range(num_moves):
+                child_nodes_in_order[i].prior_probability_from_parent = priors_view[i]
 
         node.expanded = True
         self.time_expansion += (time.perf_counter() - time_expansion_start)
+
+
 
 
     cdef _backpropagate_minimax(self, MCTSNode_c.MCTSNode node):
