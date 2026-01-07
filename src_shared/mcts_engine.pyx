@@ -378,6 +378,8 @@ cdef class MCTSEngine:
         cdef MCTSNode_c.MCTSNode child
         cdef int actual_k
         cdef int i
+        cdef object cand_node
+        cdef double score
         
         self.simulation_count = 0
         self.inference_sent = 0
@@ -496,29 +498,27 @@ cdef class MCTSEngine:
 
         self.simulation_count = total_simulations
 
-        # --- CHILD STATS (Sorted by Q) ---
-        self.logger.info(f"\n{'Move':<8} {'Visits':>8} {'Prior':>8} {'Q-Val':>8} {'Outcome':>8}")
-        self.logger.info("-" * 50)
+        self.logger.info(f"{'Move':<8} {'Visits':>8} {'Prior':>8} {'Noise':>8}  {'Q-Val':>8} {'Score':>8} {'Outcome':>8}")
+        self.logger.info("-" * 65)
 
-        cdef list stats = []
-        cdef double q_val
-        cdef object outcome
+        # Sort candidates by their final Gumbel Score (Logit + Noise + Q)
+        candidate_data.sort(key=operator.itemgetter('score'), reverse=True)
 
-        for move, child in self.root.children.items():
-            if child.visits > 0:
-                # Calculate Q from Parent Perspective (-child value)
-                q_val = -child.value_sum / child.visits
-                stats.append((child, q_val))
+        for cand in candidate_data:
+            cand_node = cand['node']
+            
+            if cand_node.visits > 0:
+                q_val = -cand_node.value_sum / cand_node.visits
+            else:
+                q_val = 0.0
 
-        # Sort by Q-Value Descending
-        stats.sort(key=operator.itemgetter(1), reverse=True)
+            outcome = str(cand_node.forced_outcome) if cand_node.forced_outcome is not None else ""
+            score = cand['score']
 
-        for child, q_val in stats:
-            outcome = str(child.forced_outcome) if child.forced_outcome is not None else ""
-            self.logger.info(f"{child.move.uci():<8} {child.visits:>8} {child.prior_probability_from_parent:>8.4f} {q_val:>8.4f} {outcome:>8}")
+            self.logger.info(f"{cand_node.move.uci():<8} {cand_node.visits:>8} {cand_node.prior_probability_from_parent:>8.4f} {cand_node.gumbel_noise:>8.4f} {q_val:>8.4f} {score:>8.4f} {outcome:>8}")
 
         # Logging
-        self.logger.info(f"\n--- Gumbel Search ({total_simulations} sims) Timings ---")
+        self.logger.info(f"--- Gumbel Search ({total_simulations} sims) Timings ---")
         self.logger.info(f"{'Selection time:':<25}{self.time_selection:.4f}")
         self.logger.info(f"{'Queueing time:':<25}{self.time_queueing:.4f}")
         self.logger.info(f"{'Retrieving time:':<25}{self.time_retrieval:.4f}")
