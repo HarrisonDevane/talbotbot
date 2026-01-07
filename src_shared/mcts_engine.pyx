@@ -417,10 +417,8 @@ cdef class MCTSEngine:
             # Recover logit: ln(P)
             logit = math.log(max(child.prior_probability_from_parent, 1e-8))
             
-            if self.training:
-                noise = np.random.gumbel(0, self.noise)
-            else:
-                noise = 0.0
+            noise = np.random.gumbel(0, self.noise)
+
 
             child.gumbel_noise = noise                
             
