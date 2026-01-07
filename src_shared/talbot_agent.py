@@ -201,7 +201,8 @@ class TalbotAgent:
                         else:
                             q_norm = 0.0
 
-                        scores.append(logit + (sigma * q_norm))
+                        noise = getattr(child, 'gumbel_noise', 0.0)
+                        scores.append(logit + noise + (sigma * q_norm))
 
                     scores = np.array(scores)
                     scores -= np.max(scores)

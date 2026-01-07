@@ -419,6 +419,8 @@ cdef class MCTSEngine:
                 noise = np.random.gumbel(0, 1)
             else:
                 noise = 0.0
+
+            child.gumbel_noise = noise                
             
             candidate_data.append({
                 'move': move,

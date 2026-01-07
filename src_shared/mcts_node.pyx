@@ -26,6 +26,7 @@ cdef class MCTSNode:
         self.visits = 0
         self.value_sum = 0.0
         self.prior_probability_from_parent = 0.0
+        self.gumbel_noise = 0.0
         
         # Initialize Python object variables to None
         self.distance_to_mate = None
