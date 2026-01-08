@@ -209,8 +209,7 @@ class TalbotAgent:
                         policy_vector[flat_index] = prob
                     
                     # Select Move
-                    best_move = moves[np.random.choice(len(moves), p=softmax_probs)]
-                    
+                    best_move = moves[np.argmax(scores)]                    
                     self.logger.info(f"Generated Q-based policy for {len(moves)} eligible moves.")
                     
                                

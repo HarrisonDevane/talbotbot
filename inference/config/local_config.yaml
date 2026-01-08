@@ -11,22 +11,22 @@ model:
   resblocks: 16
 
 evaluation:
-  training: False
-  inference_worker_cores: 
+  training: True                                     # Mode flag (True = add noise/exploration, False = deterministic eval)
+  inference_worker_cores:                            # Dedicated CPU cores for the Batching Process (feeding the GPU)
     - [12, 13, 14, 15]
-  batch_size_per_worker: 16
-  batch_size_factor: 2
-  batch_timeout: 0.001
-  cpuct: 2.5
-  search_depth: 5000
-  virtual_loss: 0.3
-  temperature_threshold_move: 5
-  temperature_high: 0.3
-  temperature_low: 0
-  dirichlet_alpha: 0.0
-  dirichlet_epsilon: 0.0
-  draw_cutoff: 0.0
-  resignation_probability: 0.0
-  resignation_cutoff: 0.0
-  worker_logging_level: 20
-  inference_logging_level: 20
+  batch_size_per_worker: 16                          # Max positions a single worker sends at once
+  batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
+  batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
+  cpuct: 1.75                                        # PUCT Exploration constant (Standard AlphaZero: 1.0 - 2.5)
+  search_depth: 128                                  # MCTS Simulations per move
+  virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
+  gumbel_k: 16                                       # Number of moves (top k moves) analyzed per move
+  gumbel_sigma: 50.0                                 # Sigma used for gumbel score calucation
+  gumbel_noise: 0.1                                  # Gumbel noise value
+  gumbel_move_cutoff: 5                           # Noise cutoff move. Null = always noise
+  draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
+  resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
+  resignation_cutoff: -0.95                          # Bot resigns to save compute time
+  main_logging_level: 20                             # INFO level
+  worker_logging_level: 20                           # CRITICAL only (only keeps PGN)
+  inference_logging_level: 20                        # INFO level

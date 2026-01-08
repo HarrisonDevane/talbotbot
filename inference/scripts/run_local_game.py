@@ -229,7 +229,7 @@ class GameController:
             
             current_board = self.board.copy()
             
-            move_info = player.get_move(current_board, ply_count, fixed_simulations, self.last_move)
+            move_info = player.get_move(current_board, ply_count, fixed_simulations)
             best_move, policy_vector, simulation_count = move_info 
             self.logger.info(f"Move {ply_count}: {best_move.uci()} ({simulation_count} sims)")
 
