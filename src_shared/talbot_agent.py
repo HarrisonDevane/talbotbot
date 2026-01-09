@@ -69,6 +69,8 @@ class TalbotAgent:
                 gumbel_k=self.talbot_config['gumbel_k'],
                 gumbel_sigma=self.talbot_config['gumbel_sigma'],
                 gumbel_noise=current_noise,
+                gumbel_norm_floor=self.talbot_config['gumbel_norm_floor'],
+                gumbel_visit_scaling=self.talbot_config['gumbel_visit_scaling'],
                 board=board,
                 shared_input_buffer=self.shared_input_buffer,
                 shared_policy_buffer=self.shared_policy_buffer,
@@ -175,22 +177,37 @@ class TalbotAgent:
                    
                     # 1. Dynamic Sigma
                     max_visits = max(child.visits for child in eligible_moves.values())
-                    sigma = self.talbot_config['gumbel_sigma'] + max_visits
+                    sigma = self.talbot_config['gumbel_sigma'] + (max_visits * self.talbot_config['gumbel_visit_scaling'])
 
                     scores = []
                     moves = list(eligible_moves.keys())
                     
+                    q_values = []
                     for move in moves:
+                        child = eligible_moves[move]
+                        if child.visits > 0:
+                            q = -child.value_sum / child.visits
+                        else:
+                            q = -1.0
+                        q_values.append(q)
+                    
+                    min_q = min(q_values)
+                    max_q = max(q_values)
+                    scale = max_q - min_q
+                    
+                    if scale < self.talbot_config['gumbel_norm_floor']:
+                        scale = self.talbot_config['gumbel_norm_floor']
+
+                    for i, move in enumerate(moves):
                         child = eligible_moves[move]
                         
                         prior = max(child.prior_probability_from_parent, 1e-8)
                         logit = np.log(prior)
                         
-                        if child.visits > 0:
-                            raw_q = -child.value_sum / child.visits
-                            q_norm = (raw_q + 1.0) / 2.0
-                        else:
-                            q_norm = 0.0
+                        q = q_values[i]
+                        
+                        # Relative Norm
+                        q_norm = (q - min_q) / scale
 
                         noise = getattr(child, 'gumbel_noise', 0.0)
                         

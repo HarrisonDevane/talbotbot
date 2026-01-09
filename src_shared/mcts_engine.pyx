@@ -37,6 +37,8 @@ cdef class MCTSEngine:
     cdef public int gumbel_k
     cdef public double gumbel_sigma
     cdef public double gumbel_noise
+    cdef public double gumbel_norm_floor
+    cdef public double gumbel_visit_scaling
     cdef public bint use_fp16
     cdef public bint training
 
@@ -63,7 +65,7 @@ cdef class MCTSEngine:
     cdef public object buffer_free_slots
 
     def __init__(self, logger: logging.Logger, training: bool, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, virtual_loss: float,
-             draw_cutoff: float, gumbel_k: int, gumbel_sigma: float, gumbel_noise: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+             draw_cutoff: float, gumbel_k: int, gumbel_sigma: float, gumbel_noise: float, gumbel_norm_floor: float, gumbel_visit_scaling: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
 
         self.logger = logger
         self.training = training
@@ -82,6 +84,8 @@ cdef class MCTSEngine:
         self.gumbel_noise = gumbel_noise
         self.gumbel_k = gumbel_k
         self.gumbel_sigma = gumbel_sigma
+        self.gumbel_norm_floor = gumbel_norm_floor
+        self.gumbel_visit_scaling = gumbel_visit_scaling
 
         self.root = MCTSNode_c.MCTSNode(board.copy())
         self.in_flight_nodes = {}
@@ -475,23 +479,35 @@ cdef class MCTSEngine:
                     if cand['node'].visits > max_visits:
                         max_visits = cand['node'].visits
                 
-                dynamic_sigma = self.gumbel_sigma + max_visits
+                dynamic_sigma = self.gumbel_sigma + (max_visits * self.gumbel_visit_scaling)
 
-                # 2. Apply Score with Global Normalization [-1, 1]
+                min_q = float('inf')
+                max_q = -float('inf')
+                
                 for cand in active_candidates:
                     node_ptr = cand['node']
-                    
                     if node_ptr.visits > 0:
                         q = -node_ptr.value_sum / node_ptr.visits
-                        q_norm = (q + 1.0) / 2.0
-                        
                     else:
-                        q_norm = 0.0
+                        q = -1.0 
+                    
+                    cand['q_val'] = q # Cache it to avoid recalculating
+                    if q < min_q: min_q = q
+                    if q > max_q: max_q = q
 
+                # Calculate scale with a floor to prevent exploding noise
+                # If the difference between best and worst move is < 0.01, we treat the scale as 1.0 (no stretching)
+                scale = max_q - min_q
+                if scale < self.gumbel_norm_floor:
+                    scale = self.gumbel_norm_floor
+
+                # Second pass: Normalize and Score
+                for cand in active_candidates:
+                    q_norm = (cand['q_val'] - min_q) / scale
+                    
                     cand['score'] = cand['logit'] + cand['noise'] + (dynamic_sigma * q_norm)
 
                 active_candidates.sort(key=operator.itemgetter('score'), reverse=True)
-                
                 cutoff = len(active_candidates) // 2
                 active_candidates = active_candidates[:cutoff]
 
