@@ -22,8 +22,10 @@ evaluation:
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   gumbel_k: 16                                       # Number of moves (top k moves) analyzed per move
   gumbel_sigma: 50.0                                 # Sigma used for gumbel score calucation
-  gumbel_noise: 0.1                                  # Gumbel noise value
-  gumbel_move_cutoff: 5                           # Noise cutoff move. Null = always noise
+  gumbel_norm_floor: 0.1                             # Floor for gumbell relative normalization
+  gumbel_visit_scaling: 1.0                          # Scale for sigma with visit count
+  gumbel_noise: 0.01                                 # Gumbel noise value
+  gumbel_move_cutoff: Null                           # Noise cutoff move. Null = always noise
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.95                          # Bot resigns to save compute time
