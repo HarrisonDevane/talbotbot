@@ -4,7 +4,7 @@ global:
   min_buffer_size: 409600                            # Minimum Replay Buffer Size
   max_buffer_size: 8192000                           # Max buffer size
   buffer_ramp_steps: 10000                           # Steps to reach max buffer size
-  data_generation_positions_per_cycle: 102400        # How many positions to generate before pausing to train
+  data_generation_positions_per_cycle: 20480         # How many positions to generate before pausing to train
   data_generation_save_interval: 10240               # Yield data to main process every 10k positions (ram cleanup)
   hdf5_chunk_size: 16                                # HDF5 storage chunking. Small is better for random access reading.
 
@@ -29,16 +29,12 @@ data_generation:
   gumbel_norm_floor: 0.1                             # Floor for gumbell relative normalization
   gumbel_visit_scaling: 1.0                          # Scale for sigma with visit count
   gumbel_noise: 1.0                                  # Gumbel noise value
-  gumbel_early_k: 4                                  # k top moves early game
-  gumbel_early_cutoff: 2                             # Early cutoff move
-  gumbel_mid_k: 8                                    # k top moves mid game
-  gumbel_mid_cutoff: 10                              # Mid cutoff move
-  gumbel_late_k: 16                                  # Rest of game k
+  gumbel_k: 16                                       # k top moves
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.95                          # Bot resigns to save compute time
   main_logging_level: 20                             # INFO level
-  worker_logging_level: 20                           # CRITICAL only (only keeps PGN)
+  worker_logging_level: 50                           # CRITICAL only (only keeps PGN)
   inference_logging_level: 20                        # INFO level
 
 training:

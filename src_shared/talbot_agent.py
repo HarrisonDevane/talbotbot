@@ -47,13 +47,6 @@ class TalbotAgent:
         
         self.logger.info(f"Current player: {self.name}")
 
-        if ply_count <= self.talbot_config['gumbel_early_cutoff'] * 2:
-            gumbel_k = self.talbot_config['gumbel_early_k'] 
-        elif ply_count <= self.talbot_config['gumbel_mid_cutoff'] * 2:
-            gumbel_k = self.talbot_config['gumbel_mid_k'] 
-        else:
-            gumbel_k = self.talbot_config['gumbel_late_k']
-
         self.mcts = MCTSEngine(
             logger=self.logger, 
             worker_id=self.worker_id,
@@ -64,7 +57,7 @@ class TalbotAgent:
             cpuct=self.talbot_config['cpuct'],
             virtual_loss=self.talbot_config['virtual_loss'],
             draw_cutoff=self.talbot_config['draw_cutoff'],
-            gumbel_k=gumbel_k,
+            gumbel_k=self.talbot_config['gumbel_k'],
             gumbel_sigma=self.talbot_config['gumbel_sigma'],
             gumbel_noise=self.talbot_config['gumbel_noise'],
             gumbel_norm_floor=self.talbot_config['gumbel_norm_floor'],

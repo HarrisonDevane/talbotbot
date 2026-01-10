@@ -1,6 +1,6 @@
 game:
-  white_player: 'human'
-  black_player: 'talbot'
+  white_player: 'talbot'
+  black_player: 'human'
   initial_fen: Null
   white_perspective: True
 
@@ -20,12 +20,15 @@ evaluation:
   cpuct: 1.75                                        # PUCT Exploration constant (Standard AlphaZero: 1.0 - 2.5)
   search_depth: 128                                  # MCTS Simulations per move
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
-  gumbel_k: 16                                       # Number of moves (top k moves) analyzed per move
   gumbel_sigma: 50.0                                 # Sigma used for gumbel score calucation
   gumbel_norm_floor: 0.1                             # Floor for gumbell relative normalization
   gumbel_visit_scaling: 1.0                          # Scale for sigma with visit count
-  gumbel_noise: 0.01                                 # Gumbel noise value
-  gumbel_move_cutoff: Null                           # Noise cutoff move. Null = always noise
+  gumbel_noise: 1.0                                  # Gumbel noise value
+  gumbel_early_k: 4                                  # k top moves early game
+  gumbel_early_cutoff: 2                             # Early cutoff move
+  gumbel_mid_k: 16                                   # k top moves mid game
+  gumbel_mid_cutoff: 10                              # Mid cutoff move
+  gumbel_late_k: 16                                  # Rest of game k
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.95                          # Bot resigns to save compute time
