@@ -12,6 +12,7 @@ cdef class MCTSNode:
     cdef public double prior_probability_from_parent
     cdef public double raw_value
     cdef public double gumbel_noise
+    cdef public double gumbel_score
     cdef public bint expanded
     cdef public bint selected
     
@@ -23,3 +24,4 @@ cdef class MCTSNode:
     # --- C-Typed Method signature accessed by MCTSEngine ---
     # This must match the signature in mcts_node.pyx
     cpdef double uct_score(self, double cpuct, double prior_probability_for_this_move, double sqrt_parent_visits_term)
+    cpdef double calculate_gumbel_score(self, double min_q, double scale, double gumbel_c_base, double gumbel_c_scale)

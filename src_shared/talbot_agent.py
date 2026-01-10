@@ -58,10 +58,10 @@ class TalbotAgent:
             virtual_loss=self.talbot_config['virtual_loss'],
             draw_cutoff=self.talbot_config['draw_cutoff'],
             gumbel_k=self.talbot_config['gumbel_k'],
-            gumbel_sigma=self.talbot_config['gumbel_sigma'],
+            gumbel_c_base=self.talbot_config['gumbel_c_base'],
+            gumbel_c_scale=self.talbot_config['gumbel_c_scale'],
             gumbel_noise=self.talbot_config['gumbel_noise'],
             gumbel_norm_floor=self.talbot_config['gumbel_norm_floor'],
-            gumbel_visit_scaling=self.talbot_config['gumbel_visit_scaling'],
             board=board,
             shared_input_buffer=self.shared_input_buffer,
             shared_policy_buffer=self.shared_policy_buffer,
@@ -166,46 +166,22 @@ class TalbotAgent:
 
             if eligible_moves:
                 
-                # 1. Dynamic Sigma
-                max_visits = max(child.visits for child in eligible_moves.values())
-                sigma = self.talbot_config['gumbel_sigma'] + (max_visits * self.talbot_config['gumbel_visit_scaling'])
-
-                scores = []
+                policy_scores = []
+                selection_scores = []
                 moves = list(eligible_moves.keys())
                 
-                q_values = []
-                for move in moves:
-                    child = eligible_moves[move]
-                    if child.visits > 0:
-                        q = -child.value_sum / child.visits
-                    else:
-                        q = -1.0
-                    q_values.append(q)
-                
-                min_q = min(q_values)
-                max_q = max(q_values)
-                scale = max_q - min_q
-                
-                if scale < self.talbot_config['gumbel_norm_floor']:
-                    scale = self.talbot_config['gumbel_norm_floor']
-
                 for i, move in enumerate(moves):
                     child = eligible_moves[move]
                     
-                    prior = max(child.prior_probability_from_parent, 1e-8)
-                    logit = np.log(prior)
+                    # 1. Score for Policy (Target): REMOVE Noise
+                    policy_scores.append(child.gumbel_score - child.gumbel_noise)
                     
-                    q = q_values[i]
+                    # 2. Score for Selection (Play): KEEP Noise
+                    selection_scores.append(child.gumbel_score)
                     
-                    # Relative Norm
-                    q_norm = (q - min_q) / scale
-                    
-                    # Calculate Final Score
-                    scores.append(logit + (sigma * q_norm))
-
-                scores = np.array(scores)
-                scores -= np.max(scores)
-                exps = np.exp(scores)
+                policy_scores = np.array(policy_scores)
+                policy_scores -= np.max(policy_scores)
+                exps = np.exp(policy_scores)
                 softmax_probs = exps / np.sum(exps)
 
                 # Assign Policy Vector
@@ -214,13 +190,10 @@ class TalbotAgent:
                     flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                     policy_vector[flat_index] = prob
                 
-                # Select Move
-                best_move = moves[np.argmax(scores)]                 
-
-                best_move = moves[np.random.choice(len(moves), p=softmax_probs)]
-
-                self.logger.info(f"Generated Q-based policy for {len(moves)} eligible moves.")
+                # We use the noisy scores for the argmax to ensure exploration matches the Gumbel search
+                best_move = moves[np.argmax(selection_scores)]                 
                 
+                self.logger.info(f"Generated Q-based policy for {len(moves)} eligible moves.")
                             
         move_end_time = time.time()
         total_move_time = move_end_time - move_start_time

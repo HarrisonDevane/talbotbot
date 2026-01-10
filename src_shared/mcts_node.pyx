@@ -26,7 +26,10 @@ cdef class MCTSNode:
         self.visits = 0
         self.value_sum = 0.0
         self.prior_probability_from_parent = 0.0
+
+        # Gumbel vars        
         self.gumbel_noise = 0.0
+        self.gumbel_score = 0.0
         
         # Initialize Python object variables to None
         self.distance_to_mate = None
@@ -64,3 +67,30 @@ cdef class MCTSNode:
         U = cpuct * prior_probability_for_this_move * sqrt_parent_visits_term / visits_plus_one
 
         return Q + U
+
+    cpdef double calculate_gumbel_score(self, double min_q, double scale, double gumbel_c_base, double gumbel_c_scale):
+        """
+        Calculates and updates the gumbel_score for this node.
+        Calculates logit and q_val on the fly.
+        """
+        cdef double q_val
+        cdef double q_norm
+        cdef double logit
+
+        if self.visits > 0:
+            q_val = -self.value_sum / self.visits
+        else:
+            q_val = min_q
+            
+        # 2. Normalize
+        q_norm = (q_val - min_q) / scale
+        
+        # 3. Logit
+        logit = math.log(max(self.prior_probability_from_parent, 1e-8))
+
+        sigma = gumbel_c_base + (gumbel_c_scale * self.visits)
+
+        # 4. Score
+        self.gumbel_score = logit + self.gumbel_noise + (sigma * q_norm)
+        
+        return self.gumbel_score
