@@ -23,7 +23,9 @@ evaluation:
   gumbel_c_base: 50.0                                # Sigma used for gumbel score calucation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_norm_floor: 0.4                             # Floor for gumbell relative normalization
-  gumbel_noise: 1.0                                  # Gumbel noise value
+  gumbel_noise_high: 3.0
+  gumbel_noise_low: 1.0                              # Gumbel noise value
+  gumbel_noise_cutoff: 10
   gumbel_k: 16                                       # k top moves
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
