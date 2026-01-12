@@ -48,8 +48,10 @@ class TalbotAgent:
         self.logger.info(f"Current player: {self.name}")
 
         if ply_count <= self.talbot_config['gumbel_noise_cutoff'] * 2:
+            gumbel_norm = self.talbot_config['gumbel_norm_high']
             gumbel_noise = self.talbot_config['gumbel_noise_high'] 
         else:
+            gumbel_norm = self.talbot_config['gumbel_norm_low']
             gumbel_noise = self.talbot_config['gumbel_noise_low']
 
         self.mcts = MCTSEngine(
@@ -66,7 +68,7 @@ class TalbotAgent:
             gumbel_c_base=self.talbot_config['gumbel_c_base'],
             gumbel_c_scale=self.talbot_config['gumbel_c_scale'],
             gumbel_noise=gumbel_noise,
-            gumbel_norm_floor=self.talbot_config['gumbel_norm_floor'],
+            gumbel_norm_floor=gumbel_norm,
             board=board,
             shared_input_buffer=self.shared_input_buffer,
             shared_policy_buffer=self.shared_policy_buffer,
