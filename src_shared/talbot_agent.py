@@ -47,11 +47,6 @@ class TalbotAgent:
         
         self.logger.info(f"Current player: {self.name}")
 
-        if ply_count <= self.talbot_config['gumbel_noise_cutoff'] * 2:
-            gumbel_noise = self.talbot_config['gumbel_noise_high'] 
-        else:
-            gumbel_noise = self.talbot_config['gumbel_noise_low']
-
         self.mcts = MCTSEngine(
             logger=self.logger, 
             worker_id=self.worker_id,
@@ -65,7 +60,7 @@ class TalbotAgent:
             gumbel_k=self.talbot_config['gumbel_k'],
             gumbel_c_base=self.talbot_config['gumbel_c_base'],
             gumbel_c_scale=self.talbot_config['gumbel_c_scale'],
-            gumbel_noise=gumbel_noise,
+            gumbel_noise=self.talbot_config['gumbel_noise'],
             gumbel_norm_floor=self.talbot_config['gumbel_norm_floor'],
             board=board,
             shared_input_buffer=self.shared_input_buffer,
@@ -160,7 +155,6 @@ class TalbotAgent:
 
         
         else:
-            # 1. Select Eligible Moves
             eligible_moves = {
                 move: child for move, child in self.mcts.root.children.items()
                 if child.forced_outcome not in [0, 1] and child.visits > 0
@@ -170,35 +164,47 @@ class TalbotAgent:
                 eligible_moves = {m: c for m, c in self.mcts.root.children.items() if c.visits > 0}
 
             if eligible_moves:
-                
-                policy_scores = []
-                selection_scores = []
                 moves = list(eligible_moves.keys())
                 
-                for i, move in enumerate(moves):
-                    child = eligible_moves[move]
-                    
-                    # 1. Score for Policy (Target): REMOVE Noise
-                    policy_scores.append(child.gumbel_score - child.gumbel_noise)
-                    
-                    # 2. Score for Selection (Play): KEEP Noise
-                    selection_scores.append(child.gumbel_score)
-                    
-                policy_scores = np.array(policy_scores)
-                policy_scores -= np.max(policy_scores)
-                exps = np.exp(policy_scores)
-                softmax_probs = exps / np.sum(exps)
+                clean_scores = []
+                noisy_scores = []
+                
+                for m in moves:
+                    child = eligible_moves[m]
+                    clean_scores.append(child.gumbel_score - child.gumbel_noise)
+                    noisy_scores.append(child.gumbel_score)
+                
+                clean_scores = np.array(clean_scores)
+                noisy_scores = np.array(noisy_scores)
 
-                # Assign Policy Vector
-                for move, prob in zip(moves, softmax_probs):
+                # Apply Temp
+                target_logits = clean_scores / self.talbot_config['temperature_targets']
+                # Softmax
+                target_logits -= np.max(target_logits)
+                target_probs = np.exp(target_logits) / np.sum(np.exp(target_logits))
+
+                # Map to Policy Vector
+                for move, prob in zip(moves, target_probs):
                     from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
                     flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                     policy_vector[flat_index] = prob
+
+
+                # Move selection
+                if ply_count <= self.talbot_config['temperature_opening_ply']:
+                    # OPENING: Sample with Temperature
+                    play_logits = noisy_scores / self.talbot_config['temperature_opening']
+                    play_logits -= np.max(play_logits)
+                    play_probs = np.exp(play_logits) / np.sum(np.exp(play_logits))
+                    
+                    best_move = np.random.choice(moves, p=play_probs)
+                    self.logger.info(f"Opening (Ply {ply_count}): Sampled with T={self.talbot_config['temperature_opening']} (Top Prob: {np.max(play_probs):.2f})")
+                else:
+                    # MIDGAME: Argmax
+                    best_move = moves[np.argmax(noisy_scores)]
+                    self.logger.info(f"Midgame (Ply {ply_count}): Argmax selection")
                 
-                # We use the noisy scores for the argmax to ensure exploration matches the Gumbel search
-                best_move = moves[np.argmax(selection_scores)]                 
-                
-                self.logger.info(f"Generated Q-based policy for {len(moves)} eligible moves.")
+                self.logger.info(f"Generated policy for {len(moves)} eligible moves.")
                             
         move_end_time = time.time()
         total_move_time = move_end_time - move_start_time

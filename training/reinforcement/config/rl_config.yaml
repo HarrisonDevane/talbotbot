@@ -28,9 +28,10 @@ data_generation:
   gumbel_c_base: 50.0                                # Sigma used for gumbel score calucation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_norm_floor: 0.4                             # Floor for gumbell relative normalization
-  gumbel_noise_high: 3.0
-  gumbel_noise_low: 1.0                              # Gumbel noise value
-  gumbel_noise_cutoff: 10
+  gumbel_noise: 1.0                                  # Gumbel noise value
+  temperature_targets: 10.0                          # Temperature for policy target smoothing
+  temperature_opening: 10.0                          # Temperature for opening sampling
+  temperature_opening_ply: 30                        # Cutoff ply for temperature. After is determenistic.
   gumbel_k: 16                                       # k top moves
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
@@ -48,9 +49,9 @@ training:
   log_interval: 1                                    # Log training stats
   weight_decay: 1e-4                                 # L2 Regularization
   lr_high: 1e-1                                      # SGD Learning Rate for different phases of training
-  lr_high_cutoff: 2000
+  lr_high_cutoff: 1000
   lr_mid: 1e-2
-  lr_mid_cutoff: 20000
+  lr_mid_cutoff: 10000
   lr_low: 1e-3
   momentum_rate: 0.9                                 # SGD Momentum
   data_loader_workers: 4                             # CPU threads loading data from HDF5
