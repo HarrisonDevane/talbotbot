@@ -340,7 +340,7 @@ class RLOrchestrator:
             self.logger.info(f"2. Model has trained successfully for {steps} steps.")
             self.current_steps += steps
             self.state_config['state']['lifetime']['training_steps'] = self.current_steps
-            self.state_config['state']['current_cycle']['training_avg_entropy'] = train_entropy
+            self.state_config['state']['current_cycle']['training_avg_entropy'] = round(train_entropy, 2)
                         
             # Override the best model with the new model
             self.logger.info(f"Saving new model from {test_model_path} to {self.best_model_path}...")
@@ -348,7 +348,7 @@ class RLOrchestrator:
             os.remove(test_model_path)
             
             # After the loop is complete, update the state for the next cycle
-            self.state_config['state']['lifetime']['cycle_idx'] = self.current_cycle+1
+            self.state_config['state']['lifetime']['cycle_idx'] = self.current_cycle
             
             self.logger.info("Saving state for the next cycle...")
             self._save_state()
