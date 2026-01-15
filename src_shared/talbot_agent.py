@@ -217,6 +217,8 @@ class TalbotAgent:
         simulation_speed = (simulation_count / total_move_time) if total_move_time > 0 else 0
 
         self.logger.info(f"Total move time: {total_move_time:.4f}, with {simulation_speed:.4f} simulations per second")
+        self.logger.info(f"Total entropy: {entropy}")
+
 
         return best_move, policy_vector, simulation_count, entropy
 

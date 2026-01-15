@@ -335,11 +335,13 @@ class DataGenerationTask:
         positions_in_current_chunk = 0
         collected_data = []
         games_in_chunk = 0
+        chunk_entropy = 0 
 
         try:
             while positions_collected_total < total_positions:
                 game_data, game_time, game_entropy = self.data_queue.get()              
                 games_in_chunk += 1
+                chunk_entropy += game_entropy
                 
                 collected_data.extend(game_data)
                 positions_in_current_chunk += len(game_data)
@@ -352,12 +354,13 @@ class DataGenerationTask:
                 if positions_in_current_chunk >= chunk_size:
 
                     self.main_logger.info(f"Yielding a chunk of {len(collected_data)} positions.")
-                    yield collected_data, games_in_chunk, game_entropy
+                    yield collected_data, games_in_chunk, chunk_entropy
                     
                     positions_collected_total += len(collected_data)
                     positions_in_current_chunk = 0
                     games_in_chunk = 0
                     collected_data = []
+                    chunk_entropy = 0
 
                     self.main_logger.info(f"Have processed {positions_collected_total} out of {total_positions} positions.")
 
