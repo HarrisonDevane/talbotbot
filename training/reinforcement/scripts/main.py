@@ -51,6 +51,10 @@ class RLOrchestrator:
                 # Ephemeral / Current Cycle Stats
                 current_cycle:
                     samples_collected: 0        # Positions generated in the current specific cycle
+                    games_played: 0             # Number of games played this cycle
+                    self_play_entropy: 0.0      # Entropy  from self play games
+                    training_avg_entropy: 0.0   # Entropy from training
+                                                 
                 """).strip()
             
             with open(CONFIG_RL_STATE_FILE, 'w') as f:
@@ -284,25 +288,27 @@ class RLOrchestrator:
                 )
 
                 start_data_gen_time = time.time()
-                for new_data_chunk, games_in_chunk in data_generation_task.run_for_n_positions(remaining_positions_current_cycle, save_interval):
-                    
+                for new_data_chunk, games_in_chunk, chunk_entropy in data_generation_task.run_for_n_positions(remaining_positions_current_cycle, save_interval):
+                             
                     # Process the new chunk of data
                     self._update_circular_buffer(new_data_chunk)
                     
-                    positions_generated_current_cycle += len(new_data_chunk)
-                    self.state_config['state']['current_cycle']['samples_collected'] = positions_generated_current_cycle
+                    self.state_config['state']['current_cycle']['samples_collected'] +=  len(new_data_chunk)
+                    self.state_config['state']['current_cycle']['games_played'] += games_in_chunk
+                    self.state_config['state']['current_cycle']['self_play_entropy'] += round(float(chunk_entropy), 2)
+                    
                     self.state_config['state']['lifetime']['samples_generated'] += len(new_data_chunk)
                     self.state_config['state']['lifetime']['games_played'] += games_in_chunk
 
                     total_data_gen_time = time.time() - start_data_gen_time
-                    self.state_config['state']['lifetime']['hours_generating'] += (total_data_gen_time / 3600)
+                    self.state_config['state']['lifetime']['hours_generating'] += round((total_data_gen_time / 3600), 2)
                     start_data_gen_time = time.time()
 
 
                     # Periodically save the state to the YAML file
                     self.logger.info(
                         f"Chunk saved. Total positions for cycle {self.current_cycle}: "
-                        f"{positions_generated_current_cycle}/{remaining_positions_current_cycle}. Saving state..."
+                        f"{ len(new_data_chunk)}/{remaining_positions_current_cycle}. Saving state..."
                     )
                     self._save_state()
 
@@ -325,15 +331,16 @@ class RLOrchestrator:
                 hdf5_path=self.buffer_file_path,
                 cycle_number=self.current_cycle,
             )
-            test_model_path, steps = train_task.run_training_loop()
+            test_model_path, steps, train_entropy = train_task.run_training_loop()
             total_train_time = time.time() - start_train_time
 
-            self.state_config['state']['lifetime']['hours_training'] += (total_train_time / 3600)
+            self.state_config['state']['lifetime']['hours_training'] += round((total_train_time / 3600), 2)
             train_task = None
 
             self.logger.info(f"2. Model has trained successfully for {steps} steps.")
             self.current_steps += steps
             self.state_config['state']['lifetime']['training_steps'] = self.current_steps
+            self.state_config['state']['current_cycle']['training_avg_entropy'] = train_entropy
                         
             # Override the best model with the new model
             self.logger.info(f"Saving new model from {test_model_path} to {self.best_model_path}...")
@@ -341,7 +348,6 @@ class RLOrchestrator:
             os.remove(test_model_path)
             
             # After the loop is complete, update the state for the next cycle
-            self.state_config['state']['current_cycle']['samples_collected'] = 0
             self.state_config['state']['lifetime']['cycle_idx'] = self.current_cycle+1
             
             self.logger.info("Saving state for the next cycle...")
@@ -353,6 +359,13 @@ class RLOrchestrator:
 
             self.logger.info(f"Saving current config as backup")
             shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(cycle_dir, f'iter_{self.current_cycle:04d}_step_{self.current_steps}_config.yaml'))
+
+            self.state_config['state']['current_cycle']['samples_collected'] = 0
+            self.state_config['state']['current_cycle']['games_played'] = 0
+            self.state_config['state']['current_cycle']['self_play_entropy'] = 0
+            self.state_config['state']['current_cycle']['training_avg_entropy'] = 0
+
+            self._save_state()
 
             # Save copy of best model and replay buffer every save interval
             if self.current_steps // self.save_interval > (self.current_steps - steps) // self.save_interval:

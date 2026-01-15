@@ -218,7 +218,6 @@ class GameController:
 
     def _game_loop_logic(self, fixed_simulations):
         """Internal method containing the main game loop logic for automated play."""
-        ply_count = 1
         
         while self.running and not self.game_over: 
             player = self.players[self.current_turn]
@@ -229,12 +228,11 @@ class GameController:
             
             current_board = self.board.copy()
             
-            move_info = player.get_move(current_board, ply_count, fixed_simulations)
-            best_move, policy_vector, simulation_count = move_info 
+            ply_count = current_board.ply() + 1
+            best_move, policy, simulation_count, entropy = player.get_move(current_board, ply_count, fixed_simulations) 
             self.logger.info(f"Move {ply_count}: {best_move.uci()} ({simulation_count} sims)")
 
             self.make_move(best_move)
-            ply_count += 1
 
             if self.game_over:
                 break

@@ -186,6 +186,7 @@ class TrainTask:
             # Training Phase: Single Pass
             model.train()
             running_total_loss = 0.0
+            running_entropy = 0.0
             
             for batch_idx, (board_tensors, policy_target, value_targets) in enumerate(train_loader):
                 current_step = global_step + batch_idx + 1
@@ -208,6 +209,11 @@ class TrainTask:
                     value_outputs = value_outputs.squeeze(1)
                     torch.cuda.synchronize()
                     forward_pass_end = time.perf_counter()
+
+                    with torch.no_grad():
+                        policy_probs = torch.exp(policy_log_softmax)
+                        batch_entropy = -torch.sum(policy_probs * policy_log_softmax, dim=1).mean()
+                        running_entropy += batch_entropy.item()
 
                     policy_loss = policy_criterion(policy_log_softmax, policy_target)
                     value_loss = value_criterion(value_outputs, value_targets)
@@ -241,6 +247,7 @@ class TrainTask:
                                      f"Batch Total: {(batch_end_time - batch_start_time)*1000:.2f}ms")
 
             avg_total_loss_train = running_total_loss / len(train_loader)
+            avg_entropy_train = running_entropy / len(train_loader)
             training_steps_completed = len(train_loader)
             
             self.logger.info(f"--- Training Run Summary ---")
@@ -265,4 +272,4 @@ class TrainTask:
                 self.logger.info("Closing HDF5 file handle(s) in ChessDataset.")
                 full_dataset.close()
             
-        return final_model_path, training_steps_completed
+        return final_model_path, training_steps_completed, avg_entropy_train

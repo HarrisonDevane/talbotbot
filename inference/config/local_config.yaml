@@ -1,6 +1,6 @@
 game:
-  white_player: 'talbot'
-  black_player: 'human'
+  white_player: 'human'
+  black_player: 'talbot'
   initial_fen: Null
   white_perspective: True
 
@@ -18,19 +18,19 @@ evaluation:
   batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
   batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
   cpuct: 1.75                                        # PUCT Exploration constant (Standard AlphaZero: 1.0 - 2.5)
-  search_depth: 128                                  # MCTS Simulations per move
+  search_depth: 4000                                 # MCTS Simulations per move
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   gumbel_c_base: 50.0                                # Sigma used for gumbel score calucation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_norm_floor: 0.4                             # Floor for gumbell relative normalization
-  gumbel_noise: 0.1                                  # Gumbel noise value
-  temperature_targets: 1.0                          # Temperature for policy target smoothing
-  temperature_opening: 10.0                          # Temperature for opening sampling
+  gumbel_noise: 0.001                                # Gumbel noise value
+  temperature_targets: 1.0                           # Temperature for policy target smoothing
+  temperature_opening: 1.0                           # Temperature for opening sampling
   temperature_opening_ply: 10                        # Cutoff ply for temperature. After is determenistic.
-  gumbel_k: 16                                       # k top moves
+  gumbel_k: 32                                       # k top moves
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
-  resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
-  resignation_cutoff: -0.95                          # Bot resigns to save compute time
+  resignation_probability: 0.0                       # Chance the bot checks for resignation allowed
+  resignation_cutoff: 0.0                            # Bot resigns to save compute time
   main_logging_level: 20                             # INFO level
   worker_logging_level: 20                           # CRITICAL only (only keeps PGN)
   inference_logging_level: 20                        # INFO level

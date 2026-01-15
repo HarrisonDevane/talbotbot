@@ -88,6 +88,8 @@ class TalbotAgent:
             
             best_move = np.random.choice(best_winning_moves)
             prob_per_move = 1.0 / len(best_winning_moves)
+            entropy = np.log(len(best_winning_moves))
+
             for move in best_winning_moves:
                 from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
                 flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
@@ -117,8 +119,9 @@ class TalbotAgent:
             ]
 
             best_move = np.random.choice(best_draw_moves)
-
             prob_per_move = 1.0 / len(best_draw_moves)
+            entropy = np.log(len(best_draw_moves))
+
             for move in best_draw_moves:
                 from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
                 flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
@@ -142,6 +145,8 @@ class TalbotAgent:
             ]
             
             prob_per_move = 1.0 / len(longest_mate_moves)
+            entropy = np.log(len(longest_mate_moves))
+
             for move in longest_mate_moves:
                 from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
                 flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
@@ -151,7 +156,7 @@ class TalbotAgent:
         
         # Resign if below threshold
         elif (self.use_resignation and self.mcts.root.value_sum / self.mcts.root.visits < self.talbot_config['resignation_cutoff']):
-            return None, policy_vector, simulation_count
+            return None, policy_vector, simulation_count, 0.0
 
         
         else:
@@ -182,6 +187,7 @@ class TalbotAgent:
                 # Softmax
                 target_logits -= np.max(target_logits)
                 target_probs = np.exp(target_logits) / np.sum(np.exp(target_logits))
+                entropy = -np.sum(target_probs * np.log(target_probs + 1e-10))
 
                 # Map to Policy Vector
                 for move, prob in zip(moves, target_probs):
@@ -212,7 +218,7 @@ class TalbotAgent:
 
         self.logger.info(f"Total move time: {total_move_time:.4f}, with {simulation_speed:.4f} simulations per second")
 
-        return best_move, policy_vector, simulation_count
+        return best_move, policy_vector, simulation_count, entropy
 
     def reset_for_new_game(self):
         """

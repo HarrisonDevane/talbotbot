@@ -56,6 +56,7 @@ class DataGenerationGameWorker:
         ply_count = 1
         raw_training_data = []
         total_simulations = 0
+        total_entropy = 0
 
         search_depth = self.data_generation_config['search_depth']
         self.logger.info(f"Game {game_number} will use a search depth of {search_depth}")
@@ -64,8 +65,9 @@ class DataGenerationGameWorker:
             player = self.players[self.current_turn]
             current_board = self.board.copy()
 
-            move, policy_vector, simulation_count = player.get_move(current_board, ply_count, search_depth)
+            move, policy_vector, simulation_count, move_entropy = player.get_move(current_board, ply_count, search_depth)
             total_simulations += simulation_count
+            total_entropy += move_entropy
 
             if move is None:
                 self.result = "1-0" if self.current_turn == chess.BLACK else "0-1"
@@ -106,7 +108,7 @@ class DataGenerationGameWorker:
                 'value_target': final_game_value if move_num['turn'] == chess.WHITE else -final_game_value
             })
             
-        return final_training_data, total_simulations
+        return final_training_data, total_simulations, total_entropy
 
 
     def _check_game_over(self, game_number):
@@ -182,10 +184,7 @@ class DataGenerationTask:
         )
 
         # Multi-processing components
-        # A list of queues, one for each inference batcher
-        # Max size prevents stale selection
         self.inference_queues = [mp.Queue() for _ in range(self.num_inference_batchers)]
-        # A single queue for each worker process
         self.result_queues = [mp.Queue() for _ in range(self.num_workers)]
         self.data_queue = mp.Queue()
         
@@ -267,7 +266,7 @@ class DataGenerationTask:
             
             game_start = time.time()
             # The run_training_loop method plays a full game and returns the data
-            training_data, simulation_count = game_manager.run_training_loop(current_game_number)
+            training_data, simulation_count, game_entropy = game_manager.run_training_loop(current_game_number)
             game_end = time.time()
 
             game_time = game_end - game_start
@@ -284,7 +283,7 @@ class DataGenerationTask:
                 f"({num_new_positions} positions). Sending data to main process."
             )
             
-            data_queue.put((training_data, game_time))
+            data_queue.put((training_data, game_time, game_entropy))
                 
 
     def run_for_n_positions(self, total_positions: int, chunk_size: int):
@@ -336,11 +335,13 @@ class DataGenerationTask:
         positions_in_current_chunk = 0
         collected_data = []
         games_in_chunk = 0
+        chunk_entropy_sum = 0.0
 
         try:
             while positions_collected_total < total_positions:
-                game_data, game_time = self.data_queue.get()              
+                game_data, game_time, game_entropy = self.data_queue.get()              
                 games_in_chunk += 1
+                chunk_entropy_sum += game_entropy
                 
                 collected_data.extend(game_data)
                 positions_in_current_chunk += len(game_data)
@@ -353,7 +354,7 @@ class DataGenerationTask:
                 if positions_in_current_chunk >= chunk_size:
 
                     self.main_logger.info(f"Yielding a chunk of {len(collected_data)} positions.")
-                    yield collected_data, games_in_chunk
+                    yield collected_data, games_in_chunk, chunk_entropy_sum
                     
                     positions_collected_total += len(collected_data)
                     positions_in_current_chunk = 0
