@@ -295,13 +295,13 @@ class RLOrchestrator:
                     
                     self.state_config['state']['current_cycle']['samples_collected'] +=  len(new_data_chunk)
                     self.state_config['state']['current_cycle']['games_played'] += games_in_chunk
-                    self.state_config['state']['current_cycle']['self_play_entropy'] += round(float(chunk_entropy), 2)
+                    self.state_config['state']['current_cycle']['self_play_entropy'] = round(float(self.state_config['state']['current_cycle']['self_play_entropy'] + chunk_entropy), 2)
                     
                     self.state_config['state']['lifetime']['samples_generated'] += len(new_data_chunk)
                     self.state_config['state']['lifetime']['games_played'] += games_in_chunk
 
                     total_data_gen_time = time.time() - start_data_gen_time
-                    self.state_config['state']['lifetime']['hours_generating'] += round((total_data_gen_time / 3600), 2)
+                    self.state_config['state']['lifetime']['hours_generating'] = round(self.state_config['state']['lifetime']['hours_generating']  + (total_data_gen_time / 3600), 2)
                     start_data_gen_time = time.time()
 
 
@@ -334,7 +334,7 @@ class RLOrchestrator:
             test_model_path, steps, train_entropy = train_task.run_training_loop()
             total_train_time = time.time() - start_train_time
 
-            self.state_config['state']['lifetime']['hours_training'] += round((total_train_time / 3600), 2)
+            self.state_config['state']['lifetime']['hours_training'] = round(self.state_config['state']['lifetime']['hours_training']  + (total_train_time / 3600), 2)
             train_task = None
 
             self.logger.info(f"2. Model has trained successfully for {steps} steps.")
