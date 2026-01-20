@@ -38,10 +38,6 @@ cdef class MCTSEngine:
     cdef public double gumbel_c_base
     cdef public double gumbel_c_scale
     cdef public double gumbel_noise
-    cdef public double gumbel_norm_floor
-    cdef public double min_q
-    cdef public double max_q
-    cdef public double scale
     cdef public bint use_fp16
     cdef public bint training
 
@@ -68,7 +64,7 @@ cdef class MCTSEngine:
     cdef public object buffer_free_slots
 
     def __init__(self, logger: logging.Logger, training: bool, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, virtual_loss: float,
-             draw_cutoff: float, gumbel_k: int, gumbel_c_base: float, gumbel_c_scale: float, gumbel_noise: float, gumbel_norm_floor: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+             draw_cutoff: float, gumbel_k: int, gumbel_c_base: float, gumbel_c_scale: float, gumbel_noise: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
 
         self.logger = logger
         self.training = training
@@ -88,11 +84,6 @@ cdef class MCTSEngine:
         self.gumbel_k = gumbel_k
         self.gumbel_c_base = gumbel_c_base
         self.gumbel_c_scale = gumbel_c_scale
-        self.gumbel_norm_floor = gumbel_norm_floor
-
-        self.min_q = 1.0
-        self.max_q = -1.0
-        self.scale = 1.0
 
         self.root = MCTSNode_c.MCTSNode(board.copy())
         self.in_flight_nodes = {}
@@ -376,9 +367,8 @@ cdef class MCTSEngine:
 
             return
 
-    cpdef _log_tournament_results(self, candidates, phase_name):
+    cpdef _log_tournament_results(self, candidates, phase_name, min_q, scale):
         # Added Global Stats to header for debugging context
-        self.logger.info(f"--- {phase_name} Results (MinQ: {self.min_q:.4f}, MaxQ: {self.max_q:.4f}, Scale: {self.scale:.4f}) ---")
         
         # Added Q-Norm column, increased width
         self.logger.info(f"{'Move':<8} {'Visits':>8} {'Prior':>8} {'Noise':>8} {'Q-Val':>8} {'Q-Norm':>8} {'Score':>8}")
@@ -392,10 +382,10 @@ cdef class MCTSEngine:
             if node.visits > 0:
                 q_display = -node.value_sum / node.visits
             else:
-                q_display = self.min_q
+                q_display = min_q
             
             # 2. Re-calculate Normalized Q (0 to 1)
-            q_norm = (q_display - self.min_q) / self.scale
+            q_norm = (q_display - min_q) / scale
 
             self.logger.info(f"{node.move.uci():<8} {node.visits:>8} {node.prior_probability_from_parent:>8.4f} {node.gumbel_noise:>8.4f} {q_display:>8.4f} {q_norm:>8.4f} {node.gumbel_score:>8.4f}")
         self.logger.info("-" * 85)
@@ -475,7 +465,11 @@ cdef class MCTSEngine:
 
         # 4. Sequential Halving Loop
         for phase in range(num_phases):
-            if len(active_candidates) == 0: break
+            if len(active_candidates) <= 1: break
+
+            min_q = 1.0
+            max_q = -1.0
+            scale = 2.0
 
             sims_per_candidate = sim_budget_per_phase // len(active_candidates)
             if sims_per_candidate < 1: sims_per_candidate = 1
@@ -491,25 +485,26 @@ cdef class MCTSEngine:
             self._wait_for_inference() 
             
             # C. Update Global Stats (Using ALL visited children)
-            for move, node in self.root.children.items():               
+            for node in active_candidates:            
                 if node.visits > 0:
                     q_val = -node.value_sum / node.visits
                     
-                    if q_val < self.min_q:
-                        self.min_q = q_val
+                    if q_val < min_q:
+                        min_q = q_val
 
-                    if q_val > self.max_q:
-                        self.max_q = q_val
+                    if q_val > max_q:
+                        max_q = q_val
                     
             
-            self.scale = max(self.gumbel_norm_floor, self.max_q - self.min_q)
+            scale = max_q - min_q
+            self.logger.info(f"{min_q}, {max_q}, {scale}")
 
             # D. Update Scores on Nodes
             for child in active_candidates:
-                child.calculate_gumbel_score(self.min_q, self.scale, self.gumbel_c_base, self.gumbel_c_scale)
+                child.calculate_gumbel_score(min_q, scale, self.gumbel_c_base, self.gumbel_c_scale)
 
             # E. Log Results
-            self._log_tournament_results(active_candidates, f"Phase {phase} End")
+            self._log_tournament_results(active_candidates, f"Phase {phase} End", min_q, scale)
 
             # F. Prune
             if len(active_candidates) > 1 and phase < (num_phases - 1):
@@ -518,25 +513,13 @@ cdef class MCTSEngine:
                 active_candidates = active_candidates[:cutoff]
 
         
-        # One Final Score Update
-        for move, node in self.root.children.items():               
-            if node.visits > 0:
-                q_val = -node.value_sum / node.visits
-                
-                if q_val < self.min_q:
-                    self.min_q = q_val
-
-                if q_val > self.max_q:
-                    self.max_q = q_val
-
-        self.scale = max(self.gumbel_norm_floor, self.max_q - self.min_q)
-        
+        # One Final Score Update\
         for move, node in self.root.children.items():
             if node.visits > 0:
-                node.calculate_gumbel_score(self.min_q, self.scale, self.gumbel_c_base, self.gumbel_c_scale)
+                node.calculate_gumbel_score(-1.0, 2.0, self.gumbel_c_base, self.gumbel_c_scale)
         
 
-        self._log_tournament_results(child_candidates, 'Final scores')
+        self._log_tournament_results(child_candidates, 'Final scores', -1.0, 2.0)
         self.simulation_count = self.simulation_count
 
 

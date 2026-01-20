@@ -61,7 +61,6 @@ class TalbotAgent:
             gumbel_c_base=self.talbot_config['gumbel_c_base'],
             gumbel_c_scale=self.talbot_config['gumbel_c_scale'],
             gumbel_noise=self.talbot_config['gumbel_noise'],
-            gumbel_norm_floor=self.talbot_config['gumbel_norm_floor'],
             board=board,
             shared_input_buffer=self.shared_input_buffer,
             shared_policy_buffer=self.shared_policy_buffer,
@@ -218,6 +217,7 @@ class TalbotAgent:
 
         self.logger.info(f"Total move time: {total_move_time:.4f}, with {simulation_speed:.4f} simulations per second")
         self.logger.info(f"Total entropy: {entropy}")
+        self.logger.info(f"Average root node value: {self.mcts.root.value_sum / self.mcts.root.visits}")
 
 
         return best_move, policy_vector, simulation_count, entropy

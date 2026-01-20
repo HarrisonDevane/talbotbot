@@ -27,12 +27,11 @@ data_generation:
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   gumbel_c_base: 50.0                                # Sigma used for gumbel score calucation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
-  gumbel_norm_floor: 0.4                             # Floor for gumbell relative normalization
   gumbel_noise: 1.0                                  # Gumbel noise value
-  temperature_targets: 10.0                          # Temperature for policy target smoothing
-  temperature_opening: 10.0                          # Temperature for opening sampling
+  temperature_targets: 5.0                           # Temperature for policy target smoothing
+  temperature_opening: 5.0                           # Temperature for opening sampling
   temperature_opening_ply: 30                        # Cutoff ply for temperature. After is determenistic.
-  gumbel_k: 16                                       # k top moves
+  gumbel_k: 64                                       # k top moves
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.95                          # Bot resigns to save compute time

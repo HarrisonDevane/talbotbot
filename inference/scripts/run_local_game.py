@@ -276,12 +276,21 @@ class GameController:
                     self.selected_square = None
                     self.legal_targets = []
             else:
+                # 1. Try a standard move (no promotion)
                 move = chess.Move(self.selected_square, square)
+                
                 if move in self.board.legal_moves:
                     self.make_move(move)
+                
+                # 2. If standard failed, try Auto-Promote to Queen
                 else:
-                    self.selected_square = None
-                    self.legal_targets = []
+                    move_queen = chess.Move(self.selected_square, square, promotion=chess.QUEEN)
+                    if move_queen in self.board.legal_moves:
+                        self.make_move(move_queen)
+                    else:
+                        # If neither worked, it's an illegal move; deselect.
+                        self.selected_square = None
+                        self.legal_targets = []
 
             self.update_gui()
 
