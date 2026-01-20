@@ -68,29 +68,32 @@ cdef class MCTSNode:
 
         return Q + U
 
-    cpdef double calculate_gumbel_score(self, double min_q, double scale, double gumbel_c_base, double gumbel_c_scale):
+
+    cpdef double calculate_gumbel_score(self, double gumbel_c_base, double gumbel_c_scale, double max_visits):
         """
         Calculates and updates the gumbel_score for this node.
-        Calculates logit and q_val on the fly.
         """
         cdef double q_val
         cdef double q_norm
         cdef double logit
+        cdef double sigma
 
         if self.visits > 0:
             q_val = -self.value_sum / self.visits
         else:
-            q_val = min_q
+            q_val = self.parent.value_sum / self.parent.visits
             
         # 2. Normalize
-        q_norm = (q_val - min_q) / scale
+        q_norm = (q_val + 1.0) / 2.0
         
         # 3. Logit
         logit = math.log(max(self.prior_probability_from_parent, 1e-8))
 
-        sigma = gumbel_c_base + (gumbel_c_scale * self.visits)
+        # 4. Sigma (Corrected Formula)
+        # DeepMind: (c_visit + N_max) * c_scale
+        sigma = (gumbel_c_base + max_visits) * gumbel_c_scale
 
-        # 4. Score
+        # 5. Score
         self.gumbel_score = logit + self.gumbel_noise + (sigma * q_norm)
         
         return self.gumbel_score

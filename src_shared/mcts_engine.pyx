@@ -367,7 +367,7 @@ cdef class MCTSEngine:
 
             return
 
-    cpdef _log_tournament_results(self, candidates, phase_name, min_q, scale):
+    cpdef _log_tournament_results(self, candidates, phase_name):
         # Added Global Stats to header for debugging context
         
         # Added Q-Norm column, increased width
@@ -382,15 +382,15 @@ cdef class MCTSEngine:
             if node.visits > 0:
                 q_display = -node.value_sum / node.visits
             else:
-                q_display = min_q
+                q_display = node.parent.value_sum / node.parent.visits
             
             # 2. Re-calculate Normalized Q (0 to 1)
-            q_norm = (q_display - min_q) / scale
+            q_norm = (q_display + 1.0) / 2.0
 
             self.logger.info(f"{node.move.uci():<8} {node.visits:>8} {node.prior_probability_from_parent:>8.4f} {node.gumbel_noise:>8.4f} {q_display:>8.4f} {q_norm:>8.4f} {node.gumbel_score:>8.4f}")
         self.logger.info("-" * 85)
 
-
+        
     cpdef run_simulations(self, int total_simulations):
         """
         Executes the Gumbel MuZero 'Sequential Halving' search.
@@ -400,11 +400,13 @@ cdef class MCTSEngine:
         cdef int sims_per_candidate
         cdef list all_moves
         cdef list active_candidates
+        cdef list child_candidates
         cdef MCTSNode_c.MCTSNode child
         cdef int actual_k
         cdef int i
-        cdef object cand_node
-        cdef double score
+        cdef int cutoff
+        cdef double min_q, max_q, scale, max_visits_phase
+        cdef double final_min_q, final_scale, final_max_visits
         
         self.simulation_count = 0
         self.inference_sent = 0
@@ -420,6 +422,7 @@ cdef class MCTSEngine:
         self.time_misc = 0.0
         self.time_wait_for_inference = 0.0
     
+        # 1. Expand Root
         self._queue_leaf_for_inference(self.root)
         self._submit_batch()
         self._wait_for_inference()
@@ -436,6 +439,7 @@ cdef class MCTSEngine:
 
         active_candidates = []
         
+        # 2. Initialize Gumbel Noise
         for move in all_moves:
             child = self.root.children[move]
             
@@ -443,17 +447,17 @@ cdef class MCTSEngine:
             child.gumbel_noise = np.random.gumbel(0, self.gumbel_noise)
             
             # Initial Score (Logit + Noise only, Q is not ready)
-            logit = math.log(max(child.prior_probability_from_parent, 1e-8))
-            child.gumbel_score = logit + child.gumbel_noise
+            # We protect against log(0)
+            child.gumbel_score = child.gumbel_noise + math.log(max(child.prior_probability_from_parent, 1e-8))
             
             active_candidates.append(child)
 
-        # 3. Init# 3. Initial Pruning
+        # 3. Initial Pruning (Top-k by prior + noise)
         active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
+        child_candidates = list(active_candidates)
         active_candidates = active_candidates[:actual_k]
-        child_candidates = active_candidates
-
-        # Initial Queueing
+        
+        # Initial Queueing for the chosen candidates
         for child in active_candidates:
             if child.board.is_game_over(claim_draw=True):
                 self._handle_terminal_node(child)
@@ -466,10 +470,6 @@ cdef class MCTSEngine:
         # 4. Sequential Halving Loop
         for phase in range(num_phases):
             if len(active_candidates) <= 1: break
-
-            min_q = 1.0
-            max_q = -1.0
-            scale = 2.0
 
             sims_per_candidate = sim_budget_per_phase // len(active_candidates)
             if sims_per_candidate < 1: sims_per_candidate = 1
@@ -484,27 +484,16 @@ cdef class MCTSEngine:
             # B. Sync Barrier
             self._wait_for_inference() 
             
-            # C. Update Global Stats (Using ALL visited children)
-            for node in active_candidates:            
-                if node.visits > 0:
-                    q_val = -node.value_sum / node.visits
-                    
-                    if q_val < min_q:
-                        min_q = q_val
-
-                    if q_val > max_q:
-                        max_q = q_val
-                    
-            
-            scale = max_q - min_q
-            self.logger.info(f"{min_q}, {max_q}, {scale}")
+            # C. Update Global Stats (Using Helper)
+            max_visits_phase = max([c.visits for c in active_candidates if c.visits > 0], default=1.0)
 
             # D. Update Scores on Nodes
+            # Pass max_visits_phase as the global scalar
             for child in active_candidates:
-                child.calculate_gumbel_score(min_q, scale, self.gumbel_c_base, self.gumbel_c_scale)
+                child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_phase)
 
             # E. Log Results
-            self._log_tournament_results(active_candidates, f"Phase {phase} End", min_q, scale)
+            self._log_tournament_results(active_candidates, f"Phase {phase} End")
 
             # F. Prune
             if len(active_candidates) > 1 and phase < (num_phases - 1):
@@ -513,17 +502,24 @@ cdef class MCTSEngine:
                 active_candidates = active_candidates[:cutoff]
 
         
-        # One Final Score Update\
-        for move, node in self.root.children.items():
-            if node.visits > 0:
-                node.calculate_gumbel_score(-1.0, 2.0, self.gumbel_c_base, self.gumbel_c_scale)
+        # 5. Final Score Update
+        # We perform one last update on ALL legal moves (or at least the top-k we tracked)
+        # to ensure the final policy is consistent with the learned values.
         
+        # Note: If you want to evaluate strictly the surviving candidates, use active_candidates.
+        # But usually we re-evaluate the full 'child_candidates' set to get the ranking right for logging.
+        max_visits_final = max([c.visits for c in child_candidates if c.visits > 0], default=1.0)
 
-        self._log_tournament_results(child_candidates, 'Final scores', -1.0, 2.0)
+        for child in child_candidates:
+            child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_final)
+
+        
+        # Log Final Standings
+        self._log_tournament_results(child_candidates, 'Final scores')
+
         self.simulation_count = self.simulation_count
 
-
-        # Logging
+        # Logging Timings
         self.logger.info(f"--- Gumbel Search ({total_simulations} sims) Timings ---")
         self.logger.info(f"{'Selection time:':<25}{self.time_selection:.4f}")
         self.logger.info(f"{'Queueing time:':<25}{self.time_queueing:.4f}")

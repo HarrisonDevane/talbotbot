@@ -159,58 +159,35 @@ class TalbotAgent:
 
         
         else:
-            eligible_moves = {
-                move: child for move, child in self.mcts.root.children.items()
-                if child.forced_outcome not in [0, 1] and child.visits > 0
-            }
+            # 1. Gather stats from VISITED nodes only
+            children = self.mcts.root.children
+            visited_nodes = [c for c in children.values() if c.visits > 0]
+
+            # 3. Construct Targets
+            target_logits = []
+            moves = []
             
-            if not eligible_moves:
-                eligible_moves = {m: c for m, c in self.mcts.root.children.items() if c.visits > 0}
-
-            if eligible_moves:
-                moves = list(eligible_moves.keys())
-                
-                clean_scores = []
-                noisy_scores = []
-                
-                for m in moves:
-                    child = eligible_moves[m]
-                    clean_scores.append(child.gumbel_score - child.gumbel_noise)
-                    noisy_scores.append(child.gumbel_score)
-                
-                clean_scores = np.array(clean_scores)
-                noisy_scores = np.array(noisy_scores)
-
-                # Apply Temp
-                target_logits = clean_scores / self.talbot_config['temperature_targets']
-                # Softmax
-                target_logits -= np.max(target_logits)
-                target_probs = np.exp(target_logits) / np.sum(np.exp(target_logits))
-                entropy = -np.sum(target_probs * np.log(target_probs + 1e-10))
-
-                # Map to Policy Vector
-                for move, prob in zip(moves, target_probs):
-                    from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
-                    flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                    policy_vector[flat_index] = prob
+            for move, child in children.items():
+                target_logits.append(child.gumbel_score - child.gumbel_noise)
+                moves.append(move)
 
 
-                # Move selection
-                if ply_count <= self.talbot_config['temperature_opening_ply']:
-                    # OPENING: Sample with Temperature
-                    play_logits = noisy_scores / self.talbot_config['temperature_opening']
-                    play_logits -= np.max(play_logits)
-                    play_probs = np.exp(play_logits) / np.sum(np.exp(play_logits))
-                    
-                    best_move = np.random.choice(moves, p=play_probs)
-                    self.logger.info(f"Opening (Ply {ply_count}): Sampled with T={self.talbot_config['temperature_opening']} (Top Prob: {np.max(play_probs):.2f})")
-                else:
-                    # MIDGAME: Argmax
-                    best_move = moves[np.argmax(noisy_scores)]
-                    self.logger.info(f"Midgame (Ply {ply_count}): Argmax selection")
-                
-                self.logger.info(f"Generated policy for {len(moves)} eligible moves.")
-                            
+            target_logits = np.array(target_logits)
+            target_logits -= np.max(target_logits)
+            target_probs = np.exp(target_logits) / np.sum(np.exp(target_logits))
+
+            entropy = -np.sum(target_probs * np.log(target_probs + 1e-10))
+
+            # 4. Map to Policy Vector
+            policy_vector = np.zeros(src_shared.utils.TOTAL_POLICY_MOVES, dtype=np.float32)
+            for i, move in enumerate(moves):
+                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, board)
+                flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
+                policy_vector[flat_index] = target_probs[i]
+
+            best_move = max(visited_nodes, key=lambda c: c.gumbel_score).move
+
+
         move_end_time = time.time()
         total_move_time = move_end_time - move_start_time
         simulation_speed = (simulation_count / total_move_time) if total_move_time > 0 else 0
@@ -218,6 +195,11 @@ class TalbotAgent:
         self.logger.info(f"Total move time: {total_move_time:.4f}, with {simulation_speed:.4f} simulations per second")
         self.logger.info(f"Total entropy: {entropy}")
         self.logger.info(f"Average root node value: {self.mcts.root.value_sum / self.mcts.root.visits}")
+
+        return best_move, policy_vector, simulation_count, entropy
+
+                            
+
 
 
         return best_move, policy_vector, simulation_count, entropy
