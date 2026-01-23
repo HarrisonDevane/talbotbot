@@ -1,5 +1,5 @@
 global:
-  total_training_steps: 3000                         # Total gradient updates to perform
+  total_training_steps: 2000                         # Total gradient updates to perform
   save_interval_steps: 1000                          # How often to backup the "best_model.pth" and replay buffer
   min_buffer_size: 409600                            # Minimum Replay Buffer Size
   max_buffer_size: 8192000                           # Max buffer size
@@ -22,7 +22,7 @@ data_generation:
   batch_size_per_worker: 16                          # Max positions a single worker sends at once
   batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
   batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
-  search_depth: 128                                  # MCTS Simulations per move
+  search_depth: 100                                  # MCTS Simulations per move
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   gumbel_c_base: 50.0                                # Sigma used for gumbel score calucation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
