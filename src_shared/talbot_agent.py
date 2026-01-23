@@ -184,7 +184,16 @@ class TalbotAgent:
                 flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                 policy_vector[flat_index] = target_probs[i]
 
-            best_move = max(visited_nodes, key=lambda c: c.gumbel_score).move
+            if ply_count <= self.talbot_config['temperature_ply_cutoff']:
+                scores = np.array([c.gumbel_score for c in visited_nodes])
+                scores = (scores - np.max(scores)) /  self.talbot_config['temperature_factor']
+                score_probs = np.exp(scores) / np.sum(np.exp(scores))
+                
+                # Sample from the score-based distribution
+                best_move = np.random.choice(visited_nodes, p=score_probs).move
+                
+            else:
+                 best_move = max(visited_nodes, key=lambda c: c.gumbel_score).move
 
 
         move_end_time = time.time()
