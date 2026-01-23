@@ -23,7 +23,7 @@ evaluation:
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_noise: 1.0                                  # Gumbel noise value
   gumbel_k: 16                                       # k top moves
-  temperature_factor: 2.0                            # Factor to divide score by for temperature
+  temperature_factor: 4.0                            # Factor to divide score by for temperature
   temperature_ply_cutoff: 8                          # Sample proportional to visit count for first moves
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
