@@ -172,7 +172,7 @@ class TalbotAgent:
 
 
             target_logits = np.array(target_logits)
-            target_logits -= np.max(target_logits)
+            target_logits = (target_logits - np.max(target_logits)) /  self.talbot_config['temperature_factor']
             target_probs = np.exp(target_logits) / np.sum(np.exp(target_logits))
 
             entropy = -np.sum(target_probs * np.log(target_probs + 1e-10))
