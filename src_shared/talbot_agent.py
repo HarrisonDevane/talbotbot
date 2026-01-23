@@ -54,7 +54,6 @@ class TalbotAgent:
             worker_batch_size=self.worker_batch_size,
             inference_queue=self.inference_queue,
             result_queue=self.result_queue,
-            cpuct=self.talbot_config['cpuct'],
             virtual_loss=self.talbot_config['virtual_loss'],
             draw_cutoff=self.talbot_config['draw_cutoff'],
             gumbel_k=self.talbot_config['gumbel_k'],

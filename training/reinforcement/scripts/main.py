@@ -275,6 +275,7 @@ class RLOrchestrator:
             # Get the starting point from the state config
             positions_generated_current_cycle = self.state_config['state']['current_cycle']['samples_collected']
             remaining_positions_current_cycle = total_positions_for_cycle - positions_generated_current_cycle
+            self.state_config['state']['lifetime']['cycle_idx'] = self.current_cycle
             
             # Instantiate the DataGenerationTask once for the cycle
             if remaining_positions_current_cycle > 0:
@@ -346,10 +347,7 @@ class RLOrchestrator:
             self.logger.info(f"Saving new model from {test_model_path} to {self.best_model_path}...")
             shutil.copy(test_model_path, self.best_model_path)
             os.remove(test_model_path)
-            
-            # After the loop is complete, update the state for the next cycle
-            self.state_config['state']['lifetime']['cycle_idx'] = self.current_cycle
-            
+                        
             self.logger.info("Saving state for the next cycle...")
             self._save_state()
 

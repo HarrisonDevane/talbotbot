@@ -23,5 +23,4 @@ cdef class MCTSNode:
     
     # --- C-Typed Method signature accessed by MCTSEngine ---
     # This must match the signature in mcts_node.pyx
-    cpdef double uct_score(self, double cpuct, double prior_probability_for_this_move, double sqrt_parent_visits_term)
     cpdef double calculate_gumbel_score(self, double gumbel_c_base, double gumbel_c_scale, double max_visits)

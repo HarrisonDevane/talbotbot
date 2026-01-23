@@ -28,7 +28,6 @@ cdef class MCTSEngine:
     """
     cdef public int worker_batch_size
     cdef public int worker_id
-    cdef public double cpuct
     cdef public double virtual_loss
     cdef public double draw_cutoff
     cdef public int simulation_count
@@ -63,7 +62,7 @@ cdef class MCTSEngine:
     cdef public object shared_value_buffer
     cdef public object buffer_free_slots
 
-    def __init__(self, logger: logging.Logger, training: bool, worker_batch_size: int, inference_queue, result_queue, worker_id: int, cpuct: float, virtual_loss: float,
+    def __init__(self, logger: logging.Logger, training: bool, worker_batch_size: int, inference_queue, result_queue, worker_id: int, virtual_loss: float,
              draw_cutoff: float, gumbel_k: int, gumbel_c_base: float, gumbel_c_scale: float, gumbel_noise: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
 
         self.logger = logger
@@ -76,7 +75,6 @@ cdef class MCTSEngine:
         self.shared_value_buffer = shared_value_buffer
         self.buffer_free_slots = buffer_free_slots
         self.worker_id = worker_id
-        self.cpuct = cpuct
         self.virtual_loss = virtual_loss
         self.draw_cutoff = draw_cutoff
 
@@ -159,55 +157,76 @@ cdef class MCTSEngine:
 
         self.time_wait_for_inference += (time.perf_counter() - time_wait_for_inference_start)
 
-    
+
     cpdef _select(self, MCTSNode_c.MCTSNode start_node):
         """
-        Traverses the MCTS tree from the root to a leaf node using the 
-        Upper Confidence Bound for Trees (UCT) selection rule.
-
-        Returns:
-            MCTSNode: The node chosen for the next step (expansion or evaluation).
+        Traverses using Deterministic Policy Matching.
+        Delegates score calculation to child.calculate_gumbel_score().
         """
-        # Timing remains a Python object operation, as requested.
         cdef double time_selection_start = time.perf_counter()
-
+        
         cdef MCTSNode_c.MCTSNode node = start_node
-        cdef MCTSNode_c.MCTSNode best_child = None
-        cdef double best_uct_score = -float('inf')
-        cdef double best_prior_for_tie_break = -1.0
-        cdef double sqrt_parent_visits_term
-        cdef double prior_prob_for_child
-        cdef double uct
+        cdef MCTSNode_c.MCTSNode best_child
         cdef MCTSNode_c.MCTSNode child
         
+        # Variables for selection
+        cdef double max_visits, sum_visits
+        cdef double max_score_logit, sum_score_exp
+        cdef double pi_prime, child_n_norm, deficit, best_deficit
+        cdef double score
+        
+        cdef list children_list
+        cdef int i, n_children
+        
         while node.children and node.expanded and not node.selected:
-            
             best_child = None
-            best_uct_score = -float('inf')
-            best_prior_for_tie_break = -1.0
-
-            eligible_children = [child_py for move, child_py in node.children.items() if not child_py.selected]
-            sqrt_parent_visits_term = sqrt(node.visits) if node.visits > 0 else 0.0
-
-            if not eligible_children:
-                break
+            best_deficit = -999999999.0
             
-            for child in eligible_children:
+            children_list = list(node.children.values())
+            n_children = len(children_list)
+            if n_children == 0: break
+
+            max_visits = 0.0
+            sum_visits = 0.0
+            for child in children_list:
+                if child.visits > max_visits: max_visits = child.visits
+                sum_visits += child.visits
+            
+            max_score_logit = -999999999.0
+
+            for i in range(n_children):
+                child = children_list[i]
+                score = child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits)
                 
-                prior_prob_for_child = child.prior_probability_from_parent 
-                uct = child.uct_score(self.cpuct, prior_prob_for_child, sqrt_parent_visits_term)
+                if score > max_score_logit:
+                    max_score_logit = score
+            
+            sum_score_exp = 0.0
+            for i in range(n_children):
+                child = children_list[i]
+                sum_score_exp += math.exp(child.gumbel_score - max_score_logit)
+            
 
-                if uct > best_uct_score or (uct == best_uct_score and prior_prob_for_child > best_prior_for_tie_break):
-                    best_uct_score = uct
-                    best_prior_for_tie_break = prior_prob_for_child
+            for i in range(n_children):
+                child = children_list[i]
+                
+                # Target Probability (Pi_prime)
+                pi_prime = math.exp(child.gumbel_score - max_score_logit) / sum_score_exp
+                
+                # Actual Visit Portion
+                child_n_norm = child.visits / (1.0 + sum_visits)
+                
+                deficit = pi_prime - child_n_norm
+                
+                if deficit > best_deficit:
+                    best_deficit = deficit
                     best_child = child
-
+            
             node = best_child
         
-        # Timing remains a Python object operation
         self.time_selection += (time.perf_counter() - time_selection_start)
         return node
-    
+
 
     def _mark_selected(self, MCTSNode_c.MCTSNode node):
 

@@ -52,23 +52,6 @@ cdef class MCTSNode:
         return self._board
 
 
-    cpdef double uct_score(self, double cpuct, double prior_probability_for_this_move, double sqrt_parent_visits_term):
-        """
-        Cython-optimized UCT score calculation (still fast).
-        """
-        # C-level local variables for the calculation
-        cdef double Q, U
-        cdef int visits_plus_one = self.visits + 1
-        
-        if self.visits == 0:
-            return float('inf')
-
-        Q = -self.value_sum / self.visits 
-        U = cpuct * prior_probability_for_this_move * sqrt_parent_visits_term / visits_plus_one
-
-        return Q + U
-
-
     cpdef double calculate_gumbel_score(self, double gumbel_c_base, double gumbel_c_scale, double max_visits):
         """
         Calculates and updates the gumbel_score for this node.
