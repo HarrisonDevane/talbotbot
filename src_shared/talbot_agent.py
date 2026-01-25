@@ -160,7 +160,10 @@ class TalbotAgent:
         else:
             # 1. Gather stats from VISITED nodes only
             children = self.mcts.root.children
-            visited_nodes = [c for c in children.values() if c.visits > 0]
+            visited_nodes = [c for c in children.values() if c.visits > 0 and c.forced_outcome not in [0, 1]]
+
+            if not visited_nodes:
+                visited_nodes = children.values()
 
             # 3. Construct Targets
             target_logits = []
