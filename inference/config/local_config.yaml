@@ -24,6 +24,7 @@ evaluation:
   gumbel_noise: 1.0                                  # Gumbel noise value
   gumbel_k: 32                                       # k top moves
   temperature_ply_cutoff: 8                          # Sample proportional to visit count for first moves
+  temperature_factor: 1.0                            # Temperature factor used
   epsilon_smoothing: 0.2                             # Epsilon for target smoothing
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed

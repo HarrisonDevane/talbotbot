@@ -193,7 +193,8 @@ class TalbotAgent:
 
             if ply_count <= self.talbot_config['temperature_ply_cutoff']:
                 visits = np.array([c.visits for c in visited_nodes], dtype=np.float32)
-                visit_probs = visits / np.sum(visits)
+                scaled_visits = np.power(visits, 1.0 / self.talbot_config['temperature_factor'])
+                visit_probs = scaled_visits / np.sum(scaled_visits)
                 
                 best_move = np.random.choice(visited_nodes, p=visit_probs).move
                 
