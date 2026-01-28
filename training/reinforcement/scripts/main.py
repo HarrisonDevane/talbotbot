@@ -248,7 +248,7 @@ class RLOrchestrator:
         """
         The main orchestration loop.
         """
-        while self.current_steps <= self.total_steps:
+        while self.current_steps < self.total_steps:
             # --- Setup cycle-specific directories and logger ---
             cycle_dir = os.path.join(
                 RL_CYCLES_DIR, 
@@ -275,7 +275,6 @@ class RLOrchestrator:
             # Get the starting point from the state config
             positions_generated_current_cycle = self.state_config['state']['current_cycle']['samples_collected']
             remaining_positions_current_cycle = total_positions_for_cycle - positions_generated_current_cycle
-            self.state_config['state']['lifetime']['cycle_idx'] = self.current_cycle
             
             # Instantiate the DataGenerationTask once for the cycle
             if remaining_positions_current_cycle > 0:
@@ -362,6 +361,7 @@ class RLOrchestrator:
             self.state_config['state']['current_cycle']['games_played'] = 0
             self.state_config['state']['current_cycle']['self_play_entropy'] = 0
             self.state_config['state']['current_cycle']['training_avg_entropy'] = 0
+            self.state_config['state']['lifetime']['cycle_idx'] = self.current_cycle + 1
 
             self._save_state()
 

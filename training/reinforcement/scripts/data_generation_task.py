@@ -6,7 +6,6 @@ import psutil
 import torch
 import chess
 import chess.pgn
-import random
 
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 rl_dir = os.path.abspath(os.path.join(current_script_dir, ".."))

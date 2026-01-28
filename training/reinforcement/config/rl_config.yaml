@@ -28,7 +28,6 @@ data_generation:
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_noise: 1.0                                  # Gumbel noise value
   gumbel_k: 32                                       # k top moves
-  temperature_factor: 4.0                            # Factor to divide score by for opening and policy temperature
   temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
@@ -41,6 +40,7 @@ training:
   batch_size: 4096                                   # Positions per Gradient Update
   sampling_ratio: 1.0                                # Train on 1.0x the amount of data generated (1:1 ratio)
   replacement: True                                  # Allow sampling the same position twice in one batch
+  epsilon: 0.2                                       # Epsilon for target smoothing
   policy_loss_weight: 1.0                            # Weight for Move Prediction loss
   value_loss_weight: 1.0                             # Weight for Win/Loss Prediction loss
   log_interval: 1                                    # Log training stats
