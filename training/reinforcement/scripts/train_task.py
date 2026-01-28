@@ -215,14 +215,7 @@ class TrainTask:
                         batch_entropy = -torch.sum(policy_probs * policy_log_softmax, dim=1).mean()
                         running_entropy += batch_entropy.item()
 
-                    epsilon = self.training_config['epsilon']
-                    valid_mask = (policy_target > 1e-10).float()
-                    num_valid_moves = valid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
-                    
-                    # Apply Smoothing
-                    smoothed_target = (policy_target * (1 - epsilon)) + (valid_mask * (epsilon / num_valid_moves))
-
-                    policy_loss = policy_criterion(policy_log_softmax, smoothed_target)
+                    policy_loss = policy_criterion(policy_log_softmax, policy_target)
                     value_loss = value_criterion(value_outputs, value_targets)
                     
                     total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \

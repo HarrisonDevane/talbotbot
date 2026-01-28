@@ -161,6 +161,7 @@ class TalbotAgent:
             # 1. Gather stats from VISITED nodes only
             children = self.mcts.root.children
             visited_nodes = [c for c in children.values() if c.visits > 0 and c.forced_outcome not in [0, 1]]
+            epsilon = self.talbot_config['epsilon_smoothing']
 
             if not visited_nodes:
                 visited_nodes = children.values()
@@ -178,14 +179,17 @@ class TalbotAgent:
             target_logits = target_logits - np.max(target_logits)
             target_probs = np.exp(target_logits) / np.sum(np.exp(target_logits))
 
-            entropy = -np.sum(target_probs * np.log(target_probs + 1e-10))
+            smoothing_floor = epsilon / len(moves)
+            smoothed_probs = (target_probs * (1.0 - epsilon)) + smoothing_floor
+
+            entropy = -np.sum(smoothed_probs * np.log(smoothed_probs + 1e-10))
 
             # 4. Map to Policy Vector
             policy_vector = np.zeros(src_shared.utils.TOTAL_POLICY_MOVES, dtype=np.float32)
             for i, move in enumerate(moves):
                 from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, board)
                 flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                policy_vector[flat_index] = target_probs[i]
+                policy_vector[flat_index] = smoothed_probs[i]
 
             if ply_count <= self.talbot_config['temperature_ply_cutoff']:
                 visits = np.array([c.visits for c in visited_nodes], dtype=np.float32)
@@ -207,11 +211,6 @@ class TalbotAgent:
 
         return best_move, policy_vector, simulation_count, entropy
 
-                            
-
-
-
-        return best_move, policy_vector, simulation_count, entropy
 
     def reset_for_new_game(self):
         """
