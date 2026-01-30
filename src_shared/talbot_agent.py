@@ -199,7 +199,9 @@ class TalbotAgent:
                 best_move = np.random.choice(visited_nodes, p=visit_probs).move
                 
             else:
-                 best_move = max(visited_nodes, key=lambda c: c.gumbel_score).move
+                 max_visit_count = max(c.visits for c in visited_nodes)
+                 most_visited_set = [c for c in visited_nodes if c.visits >= max_visit_count]
+                 best_move = max(most_visited_set, key=lambda c: c.gumbel_score).move
 
 
         move_end_time = time.time()

@@ -394,8 +394,7 @@ cdef class MCTSEngine:
         self.logger.info("-" * 85)
         
         # Sort for display (highest score first)
-        sorted_cands = sorted(candidates, key=operator.attrgetter('gumbel_score'), reverse=True)
-        
+        sorted_cands = sorted(candidates, key=operator.attrgetter('visits', 'gumbel_score'), reverse=True)        
         for node in sorted_cands:
             # 1. Re-calculate Raw Q (Matches calculate_gumbel_score logic)
             if node.visits > 0:
