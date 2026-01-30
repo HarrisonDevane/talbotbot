@@ -487,7 +487,7 @@ cdef class MCTSEngine:
 
         # 4. Sequential Halving Loop
         for phase in range(num_phases):
-            if len(active_candidates) == 0: break
+            if len(active_candidates) <= 1: break
 
             sims_per_candidate = sim_budget_per_phase // len(active_candidates)
             if sims_per_candidate < 1: sims_per_candidate = 1
