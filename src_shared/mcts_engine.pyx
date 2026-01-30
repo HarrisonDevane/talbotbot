@@ -38,7 +38,8 @@ cdef class MCTSEngine:
     cdef public double gumbel_c_scale
     cdef public double gumbel_noise
     cdef public bint use_fp16
-    cdef public bint training
+    cdef public bint gumbel_first_round
+    cdef public bint gumbel_final_round
 
     cdef public double time_selection
     cdef public double time_expansion
@@ -62,11 +63,10 @@ cdef class MCTSEngine:
     cdef public object shared_value_buffer
     cdef public object buffer_free_slots
 
-    def __init__(self, logger: logging.Logger, training: bool, worker_batch_size: int, inference_queue, result_queue, worker_id: int, virtual_loss: float,
-             draw_cutoff: float, gumbel_k: int, gumbel_c_base: float, gumbel_c_scale: float, gumbel_noise: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+    def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, virtual_loss: float,
+             draw_cutoff: float, gumbel_k: int, gumbel_c_base: float, gumbel_c_scale: float, gumbel_noise: float, gumbel_first_round: bool, gumbel_final_round: bool, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
 
         self.logger = logger
-        self.training = training
         self.worker_batch_size = worker_batch_size
         self.inference_queue = inference_queue
         self.result_queue = result_queue
@@ -82,6 +82,8 @@ cdef class MCTSEngine:
         self.gumbel_k = gumbel_k
         self.gumbel_c_base = gumbel_c_base
         self.gumbel_c_scale = gumbel_c_scale
+        self.gumbel_first_round = gumbel_first_round
+        self.gumbel_final_round = gumbel_final_round
 
         self.root = MCTSNode_c.MCTSNode(board.copy())
         self.in_flight_nodes = {}
@@ -450,22 +452,27 @@ cdef class MCTSEngine:
         
         # Calculate phases: e.g. log2(16) = 4 phases
         num_phases = int(math.ceil(math.log2(actual_k))) - 1
+        final_candidate_threshold = 1
+
+        # Add phases from config
+        if self.gumbel_final_round:
+            num_phases += 1
+            final_candidate_threshold = 0
+
+        if self.gumbel_first_round:
+            num_phases += 1
+
         if num_phases < 1: num_phases = 1
         
         sim_budget_per_phase = (total_simulations - actual_k) // num_phases
-        self.logger.info(f"Sims per move: {sim_budget_per_phase}")
+        self.logger.info(f"Phases: {num_phases}, Sims per move: {sim_budget_per_phase}")
 
         active_candidates = []
         
         # 2. Initialize Gumbel Noise
         for move in all_moves:
             child = self.root.children[move]
-            
-            # Generate Noise
             child.gumbel_noise = np.random.gumbel(0, self.gumbel_noise)
-            
-            # Initial Score (Logit + Noise only, Q is not ready)
-            # We protect against log(0)
             child.gumbel_score = child.gumbel_noise + math.log(max(child.prior_probability_from_parent, 1e-8))
             
             active_candidates.append(child)
@@ -487,13 +494,15 @@ cdef class MCTSEngine:
 
         self._log_tournament_results(active_candidates, f"Initial candidates:")
 
-        active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
-        cutoff = len(active_candidates) // 2
-        active_candidates = active_candidates[:cutoff]
+        # Include these again for first round of sequential halving if specified
+        if not self.gumbel_first_round:
+            active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
+            cutoff = (len(active_candidates) + 1) // 2
+            active_candidates = active_candidates[:cutoff]
 
         # 4. Sequential Halving Loop
         for phase in range(num_phases):
-            if len(active_candidates) <= 1: break
+            if len(active_candidates) <= final_candidate_threshold: break
 
             sims_per_candidate = sim_budget_per_phase // len(active_candidates)
             if sims_per_candidate < 1: sims_per_candidate = 1
@@ -522,7 +531,7 @@ cdef class MCTSEngine:
             # F. Prune
             if len(active_candidates) > 1 and phase < (num_phases - 1):
                 active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
-                cutoff = len(active_candidates) // 2
+                cutoff = (len(active_candidates) + 1) // 2
                 active_candidates = active_candidates[:cutoff]
 
         

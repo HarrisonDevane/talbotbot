@@ -27,8 +27,10 @@ data_generation:
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_noise: 1.0                                  # Gumbel noise value
   gumbel_k: 8                                        # k top moves
+  gumbel_first_round: False                          # Whether the first round has a single simulation per move or is included in the total sim partition
+  gumbel_final_round: False                          # Whether to include the final round of gumbel where 1 move is chosen
   temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
-  temperature_factor: 0.4                            # Temperature factor used
+  temperature_factor: 0.5                            # Temperature factor used
   epsilon_smoothing: 0.1                             # Epsilon for target smoothing
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed

@@ -50,7 +50,6 @@ class TalbotAgent:
         self.mcts = MCTSEngine(
             logger=self.logger, 
             worker_id=self.worker_id,
-            training=self.talbot_config['training'],
             worker_batch_size=self.worker_batch_size,
             inference_queue=self.inference_queue,
             result_queue=self.result_queue,
@@ -60,6 +59,8 @@ class TalbotAgent:
             gumbel_c_base=self.talbot_config['gumbel_c_base'],
             gumbel_c_scale=self.talbot_config['gumbel_c_scale'],
             gumbel_noise=self.talbot_config['gumbel_noise'],
+            gumbel_first_round=self.talbot_config['gumbel_first_round'],
+            gumbel_final_round=self.talbot_config['gumbel_final_round'],
             board=board,
             shared_input_buffer=self.shared_input_buffer,
             shared_policy_buffer=self.shared_policy_buffer,
