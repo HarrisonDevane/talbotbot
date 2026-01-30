@@ -449,11 +449,11 @@ cdef class MCTSEngine:
         actual_k = min(self.gumbel_k, len(all_moves))
         
         # Calculate phases: e.g. log2(16) = 4 phases
-        num_phases = int(math.ceil(math.log2(actual_k)))
+        num_phases = int(math.ceil(math.log2(actual_k))) - 1
         if num_phases < 1: num_phases = 1
         
-        sim_budget_per_phase = total_simulations // num_phases
-        if sim_budget_per_phase < 1: sim_budget_per_phase = 1
+        sim_budget_per_phase = (total_simulations - actual_k) // num_phases
+        self.logger.info(f"Sims per move: {sim_budget_per_phase}")
 
         active_candidates = []
         
@@ -484,6 +484,12 @@ cdef class MCTSEngine:
 
         self._submit_batch()
         self._wait_for_inference()
+
+        self._log_tournament_results(active_candidates, f"Initial candidates:")
+
+        active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
+        cutoff = len(active_candidates) // 2
+        active_candidates = active_candidates[:cutoff]
 
         # 4. Sequential Halving Loop
         for phase in range(num_phases):
