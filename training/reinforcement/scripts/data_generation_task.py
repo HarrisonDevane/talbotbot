@@ -327,11 +327,6 @@ class DataGenerationTask:
             p.start()
             self.main_logger.info(f"Worker process {i} started (PID: {p.pid}).")
             time.sleep(1)
-            self.worker_processes.append(p)
-            p.start()
-            self.main_logger.info(f"Worker process {i} started (PID: {p.pid}).")
-            time.sleep(1)
-
 
         positions_collected_total = 0
         positions_in_current_chunk = 0
