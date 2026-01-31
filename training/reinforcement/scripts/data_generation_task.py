@@ -311,12 +311,11 @@ class DataGenerationTask:
             self.inference_processes.append(p)
             p.start()
             self.main_logger.info(f"Inference batcher process {i} started (PID: {p.pid}, Cores: {self.data_generation_config['inference_worker_cores'][i]})")
-            time.sleep(2)
+            time.sleep(1)
 
         self.main_logger.info(f"Starting pipeline to generate a chunk of up to {total_positions} positions...")
-
-
-        # Create and start all the worker processes
+        
+         # Create and start all the worker processes
         for i in range(self.num_workers):
             p = mp.Process(
                 target=DataGenerationTask._worker_main,
@@ -327,7 +326,11 @@ class DataGenerationTask:
             self.worker_processes.append(p)
             p.start()
             self.main_logger.info(f"Worker process {i} started (PID: {p.pid}).")
-            time.sleep(2)
+            time.sleep(1)
+            self.worker_processes.append(p)
+            p.start()
+            self.main_logger.info(f"Worker process {i} started (PID: {p.pid}).")
+            time.sleep(1)
 
 
         positions_collected_total = 0
