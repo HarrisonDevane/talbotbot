@@ -17,14 +17,14 @@ evaluation:
   batch_size_per_worker: 16                          # Max positions a single worker sends at once
   batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
   batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
-  search_depth: 24                                 # MCTS Simulations per move
+  search_depth: 5000                                 # MCTS Simulations per move
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   gumbel_c_base: 50.0                                # Sigma used for gumbel score calucation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_noise: 0.0                                  # Gumbel noise value
-  gumbel_k: 8                                       # k top moves
-  gumbel_first_round: False                           # Whether the first round has a single simulation per move or is included in the total sim partition
-  gumbel_final_round: False                           # Whether to include the final round of gumbel where 1 move is chosen
+  gumbel_k: 32                                       # k top moves
+  gumbel_first_round: True                           # Whether the first round has a single simulation per move or is included in the total sim partition
+  gumbel_final_round: True                           # Whether to include the final round of gumbel where 1 move is chosen
   temperature_ply_cutoff: 10                         # Sample proportional to visit count for first moves
   temperature_factor: 0.5                            # Temperature factor used
   epsilon_smoothing: 0.1                             # Epsilon for target smoothing
