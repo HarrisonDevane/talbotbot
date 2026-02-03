@@ -155,7 +155,7 @@ class TalbotAgent:
             self.logger.info(f"Forced loss detected at the root. Selecting move that delays the loss the longest ({losing_child_for_parent.distance_to_mate} moves).")
         
         # Resign if below threshold
-        elif (self.use_resignation and self.mcts.root.value_sum / self.mcts.root.visits < self.talbot_config['resignation_cutoff']):
+        elif (self.use_resignation and self.mcts.root.calculate_v_mix() < self.talbot_config['resignation_cutoff']):
             return None, policy_vector, simulation_count, 0.0
 
         
