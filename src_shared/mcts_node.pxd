@@ -13,6 +13,8 @@ cdef class MCTSNode:
     cdef public double raw_value
     cdef public double gumbel_noise
     cdef public double gumbel_score
+    cdef public double q_val
+    cdef public double q_norm
     cdef public bint expanded
     cdef public bint selected
     
@@ -22,5 +24,5 @@ cdef class MCTSNode:
     cdef public object children
     
     # --- C-Typed Method signature accessed by MCTSEngine ---
-    # This must match the signature in mcts_node.pyx
-    cpdef double calculate_gumbel_score(self, double gumbel_c_base, double gumbel_c_scale, double max_visits)
+    cpdef double calculate_gumbel_score(self, double gumbel_c_base, double gumbel_c_scale, double max_visits, double min_q, double max_q, double gumbel_min_scale, double v_mix)
+    cpdef double calculate_v_mix(self)

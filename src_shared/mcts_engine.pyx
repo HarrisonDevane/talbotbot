@@ -37,6 +37,9 @@ cdef class MCTSEngine:
     cdef public double gumbel_c_base
     cdef public double gumbel_c_scale
     cdef public double gumbel_noise
+    cdef public double gumbel_min_scale
+    cdef public double search_min_q
+    cdef public double search_max_q
     cdef public bint use_fp16
     cdef public bint gumbel_first_round
     cdef public bint gumbel_final_round
@@ -64,7 +67,7 @@ cdef class MCTSEngine:
     cdef public object buffer_free_slots
 
     def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, virtual_loss: float,
-             draw_cutoff: float, gumbel_k: int, gumbel_c_base: float, gumbel_c_scale: float, gumbel_noise: float, gumbel_first_round: bool, gumbel_final_round: bool, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+             draw_cutoff: float, gumbel_k: int, gumbel_c_base: float, gumbel_c_scale: float, gumbel_noise: float, gumbel_first_round: bool, gumbel_final_round: bool, gumbel_min_scale: double, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
 
         self.logger = logger
         self.worker_batch_size = worker_batch_size
@@ -82,8 +85,11 @@ cdef class MCTSEngine:
         self.gumbel_k = gumbel_k
         self.gumbel_c_base = gumbel_c_base
         self.gumbel_c_scale = gumbel_c_scale
+        self.gumbel_min_scale = gumbel_min_scale
         self.gumbel_first_round = gumbel_first_round
         self.gumbel_final_round = gumbel_final_round
+        self.search_min_q = 1.0
+        self.search_max_q = -1.0
 
         self.root = MCTSNode_c.MCTSNode(board.copy())
         self.in_flight_nodes = {}
@@ -195,10 +201,11 @@ cdef class MCTSEngine:
                 sum_visits += child.visits
             
             max_score_logit = -999999999.0
+            v_mix = node.calculate_v_mix()
 
             for i in range(n_children):
                 child = children_list[i]
-                score = child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits)
+                score = child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits, self.search_min_q, self.search_max_q, self.gumbel_min_scale, v_mix)
                 
                 if score > max_score_logit:
                     max_score_logit = score
@@ -389,27 +396,29 @@ cdef class MCTSEngine:
             return
 
     cpdef _log_tournament_results(self, candidates, phase_name):
-        # Added Global Stats to header for debugging context
+        cdef double min_q = self.search_min_q
+        cdef double max_q = self.search_max_q
+        cdef double root_v_mix = self.root.calculate_v_mix()
         
-        # Added Q-Norm column, increased width
-        self.logger.info(f"{'Move':<8} {'Visits':>8} {'Prior':>8} {'Noise':>8} {'Q-Val':>8} {'Q-Norm':>8} {'Score':>8}")
-        self.logger.info("-" * 85)
+        # Calculate scale for display context only (logic matches node calc)
+        cdef double scale = max_q - min_q
+        if scale < self.gumbel_min_scale:
+            scale = self.gumbel_min_scale
         
-        # Sort for display (highest score first)
+        # Header with Search Context
+        self.logger.info(f"\n--- {phase_name} ---")
+        self.logger.info(f"Tree Stats: MinQ={min_q:.4f}, MaxQ={max_q:.4f}, Scale={scale:.4f}, Root v_mix={root_v_mix:.4f}")
+        self.logger.info(f"{'Move':<8} {'Visits':>8} {'Prior':>8} {'Noise':>8} {'Raw Q':>8} {'Norm Q':>8} {'Score':>8}")
+        self.logger.info("-" * 95)
+        
+        # Sort by visits (desc), then score (desc)
         sorted_cands = sorted(candidates, key=operator.attrgetter('visits', 'gumbel_score'), reverse=True)        
+        
         for node in sorted_cands:
-            # 1. Re-calculate Raw Q (Matches calculate_gumbel_score logic)
-            if node.visits > 0:
-                q_display = -node.value_sum / node.visits
-            else:
-                q_display = node.parent.value_sum / node.parent.visits
-            
-            # 2. Re-calculate Normalized Q (0 to 1)
-            q_norm = (q_display + 1.0) / 2.0
-
-            self.logger.info(f"{node.move.uci():<8} {node.visits:>8} {node.prior_probability_from_parent:>8.4f} {node.gumbel_noise:>8.4f} {q_display:>8.4f} {q_norm:>8.4f} {node.gumbel_score:>8.4f}")
-        self.logger.info("-" * 85)
-
+            # DIRECT ACCESS: No recalculation needed
+            self.logger.info(f"{node.move.uci():<8} {node.visits:>8} {node.prior_probability_from_parent:>8.4f} {node.gumbel_noise:>8.4f} {node.q_val:>8.4f} {node.q_norm:>8.4f} {node.gumbel_score:>8.4f}")
+        
+        self.logger.info("-" * 95)
         
     cpdef run_simulations(self, int total_simulations):
         """
@@ -521,9 +530,10 @@ cdef class MCTSEngine:
             max_visits_phase = max([c.visits for c in active_candidates if c.visits > 0], default=1.0)
 
             # D. Update Scores on Nodes
-            # Pass max_visits_phase as the global scalar
+            root_v_mix = self.root.calculate_v_mix()
+
             for child in active_candidates:
-                child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_phase)
+                child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_phase, self.search_min_q, self.search_max_q, self.gumbel_min_scale, root_v_mix)
 
             # E. Log Results
             self._log_tournament_results(active_candidates, f"Phase {phase} End")
@@ -536,24 +546,18 @@ cdef class MCTSEngine:
 
         
         # 5. Final Score Update
-        # We perform one last update on ALL legal moves (or at least the top-k we tracked)
-        # to ensure the final policy is consistent with the learned values.
-        
-        # Note: If you want to evaluate strictly the surviving candidates, use active_candidates.
-        # But usually we re-evaluate the full 'child_candidates' set to get the ranking right for logging.
         max_visits_final = max([c.visits for c in child_candidates if c.visits > 0], default=1.0)
+        root_v_mix = self.root.calculate_v_mix()
 
         for child in child_candidates:
-            child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_final)
+            child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_final, self.search_min_q, self.search_max_q, self.gumbel_min_scale, root_v_mix)
 
         
         # Log Final Standings
         self._log_tournament_results(child_candidates, 'Final scores')
 
-        self.simulation_count = self.simulation_count
-
         # Logging Timings
-        self.logger.info(f"--- Gumbel Search ({total_simulations} sims) Timings ---")
+        self.logger.info(f"--- Gumbel Search ({self.simulation_count} sims) Timings ---")
         self.logger.info(f"{'Selection time:':<25}{self.time_selection:.4f}")
         self.logger.info(f"{'Queueing time:':<25}{self.time_queueing:.4f}")
         self.logger.info(f"{'Retrieving time:':<25}{self.time_retrieval:.4f}")
@@ -705,6 +709,11 @@ cdef class MCTSEngine:
             
             current_node.visits += 1
             current_node.value_sum += value_for_backprop
+
+            if value_for_backprop < self.search_min_q: 
+                self.search_min_q = value_for_backprop
+            if value_for_backprop > self.search_max_q: 
+                self.search_max_q = value_for_backprop
             
             self._backpropagate_minimax(current_node)
 

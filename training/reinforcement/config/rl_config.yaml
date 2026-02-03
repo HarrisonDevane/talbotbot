@@ -1,7 +1,7 @@
 global:
-  total_training_steps: 5000                         # Total gradient updates to perform
-  save_interval_steps: 1000                          # How often to backup the "best_model.pth" and replay buffer
-  min_buffer_size: 409600                            # Minimum Replay Buffer Size
+  total_training_steps: 10000                        # Total gradient updates to perform
+  save_interval_steps: 2000                          # How often to backup the "best_model.pth" and replay buffer
+  min_buffer_size: 1024000                           # Minimum Replay Buffer Size
   max_buffer_size: 8192000                           # Max buffer size
   buffer_ramp_steps: 10000                           # Steps to reach max buffer size
   data_generation_positions_per_cycle: 102400        # How many positions to generate before pausing to train
@@ -29,9 +29,9 @@ data_generation:
   gumbel_k: 16                                       # k top moves
   gumbel_first_round: False                          # Whether the first round has a single simulation per move or is included in the total sim partition
   gumbel_final_round: False                          # Whether to include the final round of gumbel where 1 move is chosen
+  gumbel_min_scale : 0.01                            # The minimum difference between the min and max q in the search for score calculation
   temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
   temperature_factor: 0.5                            # Temperature factor used
-  epsilon_smoothing: 0.1                             # Epsilon for target smoothing
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.95                          # Bot resigns to save compute time
@@ -47,6 +47,7 @@ training:
   value_loss_weight: 1.0                             # Weight for Win/Loss Prediction loss
   log_interval: 1                                    # Log training stats
   weight_decay: 1e-4                                 # L2 Regularization
+  entropy_weight: 0.01                               # Weight for entropy regularization term
   lr_high: 1e-1                                      # SGD Learning Rate for different phases of training
   lr_high_cutoff: 1000
   lr_mid: 1e-2

@@ -203,6 +203,9 @@ class TrainTask:
                 optimizer.zero_grad()
                 
                 forward_pass_start = time.perf_counter()
+                optimizer.zero_grad()
+                
+                forward_pass_start = time.perf_counter()
                 with autocast('cuda'):
                     policy_logits, value_outputs = model(board_tensors)
                     policy_log_softmax = F.log_softmax(policy_logits, dim=1)
@@ -210,17 +213,18 @@ class TrainTask:
                     torch.cuda.synchronize()
                     forward_pass_end = time.perf_counter()
 
-                    with torch.no_grad():
-                        policy_probs = torch.exp(policy_log_softmax)
-                        batch_entropy = -torch.sum(policy_probs * policy_log_softmax, dim=1).mean()
-                        running_entropy += batch_entropy.item()
+                    policy_probs = torch.exp(policy_log_softmax)
+                    batch_entropy = -torch.sum(policy_probs * policy_log_softmax, dim=1).mean()
+                    running_entropy += batch_entropy.item()
 
                     policy_loss = policy_criterion(policy_log_softmax, policy_target)
                     value_loss = value_criterion(value_outputs, value_targets)
                     
-                    total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
-                                 (value_loss * self.training_config['value_loss_weight'])
 
+                    total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
+                                 (value_loss * self.training_config['value_loss_weight']) - \
+                                 (batch_entropy * self.training_config['entropy_weight'])
+                    
                 backward_pass_start = time.perf_counter()
                 scaler.scale(total_loss).backward()
                 if self.device.type == 'cuda':
