@@ -285,4 +285,4 @@ class TrainTask:
                 self.logger.info("Closing HDF5 file handle(s) in ChessDataset.")
                 full_dataset.close()
             
-        return final_model_path, training_steps_completed, (running_entropy_loss / len(train_loader))
+        return final_model_path, training_steps_completed, (running_entropy_loss / (len(train_loader) * self.training_config['entropy_loss_weight']))
