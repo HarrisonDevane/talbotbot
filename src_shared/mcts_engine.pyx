@@ -355,11 +355,7 @@ cdef class MCTSEngine:
         cdef MCTSNode_c.MCTSNode leaf
         cdef int current_batch_size
         cdef double time_misc_start
-
-        if start_node.board.is_game_over(claim_draw=True):
-            self._handle_terminal_node(start_node)
-            return
-
+        
         while True:
             self._retrieve_inference()
             current_batch_size = len(self.batch_buffer)
@@ -613,6 +609,8 @@ cdef class MCTSEngine:
             child_node = MCTSNode_c.MCTSNode(board=None, parent=node, move=move)
             node.children[move] = child_node
             child_nodes_in_order[i] = child_node
+
+    
 
         # 6. Tensor Creation (Zero-copy where possible)
         from_row_tensor = torch.from_numpy(from_row_arr)
