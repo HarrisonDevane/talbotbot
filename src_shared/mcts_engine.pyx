@@ -356,6 +356,10 @@ cdef class MCTSEngine:
         cdef int current_batch_size
         cdef double time_misc_start
 
+        if start_node.board.is_game_over(claim_draw=True):
+            self._handle_terminal_node(start_node)
+            return
+
         while True:
             self._retrieve_inference()
             current_batch_size = len(self.batch_buffer)
@@ -408,7 +412,7 @@ cdef class MCTSEngine:
         # Header with Search Context
         self.logger.info(f"\n--- {phase_name} ---")
         self.logger.info(f"Tree Stats: MinQ={min_q:.4f}, MaxQ={max_q:.4f}, Scale={scale:.4f}, Root v_mix={root_v_mix:.4f}")
-        self.logger.info(f"{'Move':<8} {'Visits':>8} {'Prior':>8} {'Noise':>8} {'Raw Q':>8} {'Norm Q':>8} {'Score':>8}")
+        self.logger.info(f"{'Move':<8} {'Visits':>8} {'Prior':>8} {'Noise':>8} {'Raw Q':>8} {'Norm Q':>8} {'Score':>8} {'Outcome':>8} {'DTM':>8}")
         self.logger.info("-" * 95)
         
         # Sort by visits (desc), then score (desc)
@@ -416,7 +420,7 @@ cdef class MCTSEngine:
         
         for node in sorted_cands:
             # DIRECT ACCESS: No recalculation needed
-            self.logger.info(f"{node.move.uci():<8} {node.visits:>8} {node.prior_probability_from_parent:>8.4f} {node.gumbel_noise:>8.4f} {node.q_val:>8.4f} {node.q_norm:>8.4f} {node.gumbel_score:>8.4f}")
+            self.logger.info(f"{node.move.uci():<8} {node.visits:>8} {node.prior_probability_from_parent:>8.4f} {node.gumbel_noise:>8.4f} {node.q_val:>8.4f} {node.q_norm:>8.4f} {node.gumbel_score:>8.4f} {str(node.forced_outcome):>8} {str(node.distance_to_mate):>8}")
         
         self.logger.info("-" * 95)
         
@@ -653,7 +657,7 @@ cdef class MCTSEngine:
         cdef object winning_children
         cdef object best_win
         cdef object losing_children
-        cdef object worst_loss
+        cdef object worst_los
         
         if node.children:
             # Check for a winning move (any child is a loss for opponent)
