@@ -44,7 +44,7 @@ training:
   replacement: True                                  # Allow sampling the same position twice in one batch
   policy_loss_weight: 1.0                            # Weight for Move Prediction loss
   value_loss_weight: 1.0                             # Weight for Win/Loss Prediction loss
-  entropy_loss_weight: 0.01                          # Weight for entropy regularization term
+  entropy_loss_weight: 0.05                          # Weight for entropy regularization term
   log_interval: 1                                    # Log training stats
   weight_decay: 1e-4                                 # L2 Regularization
   lr_high: 1e-1                                      # SGD Learning Rate for different phases of training
