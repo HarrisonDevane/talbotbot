@@ -55,7 +55,7 @@ cdef class MCTSNode:
         return self._board
 
 
-    cpdef double calculate_gumbel_score(self, double gumbel_c_base, double gumbel_c_scale, double max_visits, double min_q, double max_q,double gumbel_min_scale, double v_mix):
+    cpdef double calculate_gumbel_score(self, double gumbel_c_base, double gumbel_c_scale, double max_visits, double v_mix):
         """
         Calculates and updates the gumbel_score for this node.
         """
@@ -69,12 +69,8 @@ cdef class MCTSNode:
         else:
             self.q_val = v_mix
             
-        # 2. Normalize
-        scale = max_q - min_q
-        if scale < gumbel_min_scale:
-            scale = gumbel_min_scale
-            
-        self.q_norm = (self.q_val - min_q) / scale
+        # 2. Normalize    
+        self.q_norm = (self.q_val + 1) / 2
 
         # 3. Logit
         logit = math.log(max(self.prior_probability_from_parent, 1e-8))

@@ -37,9 +37,6 @@ cdef class MCTSEngine:
     cdef public double gumbel_c_base
     cdef public double gumbel_c_scale
     cdef public double gumbel_noise
-    cdef public double gumbel_min_scale
-    cdef public double search_min_q
-    cdef public double search_max_q
     cdef public bint use_fp16
     cdef public bint gumbel_first_round
     cdef public bint gumbel_final_round
@@ -67,7 +64,7 @@ cdef class MCTSEngine:
     cdef public object buffer_free_slots
 
     def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, virtual_loss: float,
-             draw_cutoff: float, gumbel_k: int, gumbel_c_base: float, gumbel_c_scale: float, gumbel_noise: float, gumbel_first_round: bool, gumbel_final_round: bool, gumbel_min_scale: double, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+             draw_cutoff: float, gumbel_k: int, gumbel_c_base: float, gumbel_c_scale: float, gumbel_noise: float, gumbel_first_round: bool, gumbel_final_round: bool, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
 
         self.logger = logger
         self.worker_batch_size = worker_batch_size
@@ -85,11 +82,8 @@ cdef class MCTSEngine:
         self.gumbel_k = gumbel_k
         self.gumbel_c_base = gumbel_c_base
         self.gumbel_c_scale = gumbel_c_scale
-        self.gumbel_min_scale = gumbel_min_scale
         self.gumbel_first_round = gumbel_first_round
         self.gumbel_final_round = gumbel_final_round
-        self.search_min_q = 1.0
-        self.search_max_q = -1.0
 
         self.root = MCTSNode_c.MCTSNode(board.copy())
         self.in_flight_nodes = {}
@@ -205,7 +199,7 @@ cdef class MCTSEngine:
 
             for i in range(n_children):
                 child = children_list[i]
-                score = child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits, self.search_min_q, self.search_max_q, self.gumbel_min_scale, v_mix)
+                score = child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits, v_mix)
                 
                 if score > max_score_logit:
                     max_score_logit = score
@@ -396,18 +390,11 @@ cdef class MCTSEngine:
             return
 
     cpdef _log_tournament_results(self, candidates, phase_name):
-        cdef double min_q = self.search_min_q
-        cdef double max_q = self.search_max_q
         cdef double root_v_mix = self.root.calculate_v_mix()
-        
-        # Calculate scale for display context only (logic matches node calc)
-        cdef double scale = max_q - min_q
-        if scale < self.gumbel_min_scale:
-            scale = self.gumbel_min_scale
         
         # Header with Search Context
         self.logger.info(f"\n--- {phase_name} ---")
-        self.logger.info(f"Tree Stats: MinQ={min_q:.4f}, MaxQ={max_q:.4f}, Scale={scale:.4f}, Root v_mix={root_v_mix:.4f}")
+        self.logger.info(f"Tree Stats: Root v_mix={root_v_mix:.4f}")
         self.logger.info(f"{'Move':<8} {'Visits':>8} {'Prior':>8} {'Noise':>8} {'Raw Q':>8} {'Norm Q':>8} {'Score':>8} {'Outcome':>8} {'DTM':>8}")
         self.logger.info("-" * 95)
         
@@ -533,7 +520,7 @@ cdef class MCTSEngine:
             root_v_mix = self.root.calculate_v_mix()
 
             for child in active_candidates:
-                child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_phase, self.search_min_q, self.search_max_q, self.gumbel_min_scale, root_v_mix)
+                child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_phase, root_v_mix)
 
             # E. Log Results
             self._log_tournament_results(active_candidates, f"Phase {phase} End")
@@ -550,7 +537,7 @@ cdef class MCTSEngine:
         root_v_mix = self.root.calculate_v_mix()
 
         for child in child_candidates:
-            child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_final, self.search_min_q, self.search_max_q, self.gumbel_min_scale, root_v_mix)
+            child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_final, root_v_mix)
 
         
         # Log Final Standings
@@ -711,11 +698,6 @@ cdef class MCTSEngine:
             
             current_node.visits += 1
             current_node.value_sum += value_for_backprop
-
-            if value_for_backprop < self.search_min_q: 
-                self.search_min_q = value_for_backprop
-            if value_for_backprop > self.search_max_q: 
-                self.search_max_q = value_for_backprop
             
             self._backpropagate_minimax(current_node)
 

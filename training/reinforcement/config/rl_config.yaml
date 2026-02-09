@@ -29,7 +29,6 @@ data_generation:
   gumbel_k: 16                                       # k top moves
   gumbel_first_round: True                           # Whether the first round has a single simulation per move or is included in the total sim partition
   gumbel_final_round: False                          # Whether to include the final round of gumbel where 1 move is chosen
-  gumbel_min_scale : 0.01                            # The minimum difference between the min and max q in the search for score calculation
   temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
   temperature_factor: 1.0                            # Temperature factor used
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
