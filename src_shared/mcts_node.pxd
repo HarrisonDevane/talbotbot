@@ -9,7 +9,7 @@ cdef class MCTSNode:
     # --- C-Typed Attributes accessed by MCTSEngine (Remain C-types) ---
     cdef public int visits
     cdef public double value_sum
-    cdef public double prior_probability_from_parent
+    cdef public double raw_logit
     cdef public double raw_value
     cdef public double gumbel_noise
     cdef public double gumbel_score

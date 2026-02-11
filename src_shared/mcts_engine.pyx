@@ -57,7 +57,7 @@ cdef class MCTSEngine:
     cdef public object in_flight_nodes
     cdef public object batch_buffer
     cdef public object device
-    cdef public object policy_probs_dtype
+    cdef public object policy_logits_dtype
     cdef public object shared_input_buffer
     cdef public object shared_policy_buffer
     cdef public object shared_value_buffer
@@ -109,7 +109,7 @@ cdef class MCTSEngine:
         # Determine the device here to inform data type handling
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.use_fp16 = self.device.type == 'cuda'
-        self.policy_probs_dtype = torch.float16 if self.use_fp16 else torch.float32
+        self.policy_logits_dtype = torch.float16 if self.use_fp16 else torch.float32
 
 
     cdef _wait_for_inference(self):
@@ -119,10 +119,10 @@ cdef class MCTSEngine:
         """             
         cdef double time_wait_for_inference_start = time.perf_counter()
         cdef int buffer_index
-        cdef object raw_policy_probs, raw_value_output
+        cdef object raw_policy_logits, raw_value_output
         cdef MCTSNode_c.MCTSNode node
         cdef double value_output
-        cdef object policy_probs
+        cdef object policy_logits
 
         cdef int batch_buffer_size = len(self.batch_buffer)
 
@@ -139,16 +139,16 @@ cdef class MCTSEngine:
                 node = self.in_flight_nodes.pop(buffer_index)
                 self.inference_received += 1
 
-                raw_policy_probs = self.shared_policy_buffer[buffer_index] 
+                raw_policy_logits = self.shared_policy_buffer[buffer_index] 
                 raw_value_output = self.shared_value_buffer[buffer_index]
 
-                policy_probs = raw_policy_probs.to(self.policy_probs_dtype)
+                policy_logits = raw_policy_logits.to(self.policy_logits_dtype)
                 value_output = raw_value_output.item()
 
                 self.buffer_free_slots.put(buffer_index) 
                 
                 if not node.expanded:
-                    self._expand(node, policy_probs)
+                    self._expand(node, policy_logits)
                 
                 self._backpropagate(node, value_output, is_terminal=False)                
                 self.logger.debug(f"[Backpropagation] Expanding and backpropagating on node during final wait.")
@@ -251,10 +251,10 @@ cdef class MCTSEngine:
     cdef _retrieve_inference(self):
         cdef double time_retrieval_start
         cdef int buffer_index
-        cdef object raw_policy_probs, raw_value_output
+        cdef object raw_policy_logits, raw_value_output
         cdef MCTSNode_c.MCTSNode node
         cdef double value_output
-        cdef object policy_probs
+        cdef object policy_logits
 
         while True:
             try:
@@ -264,17 +264,17 @@ cdef class MCTSEngine:
                 node = self.in_flight_nodes.pop(buffer_index)
                 self.inference_received += 1
 
-                raw_policy_probs = self.shared_policy_buffer[buffer_index] 
+                raw_policy_logits = self.shared_policy_buffer[buffer_index] 
                 raw_value_output = self.shared_value_buffer[buffer_index]
 
-                policy_probs = raw_policy_probs.to(self.policy_probs_dtype)
+                policy_logits = raw_policy_logits.to(self.policy_logits_dtype)
                 value_output = raw_value_output.item()
 
                 self.buffer_free_slots.put(buffer_index) 
                 self.time_retrieval += (time.perf_counter() - time_retrieval_start)
 
                 if not node.expanded:
-                    self._expand(node, policy_probs)
+                    self._expand(node, policy_logits)
                 self._backpropagate(node, value_output, is_terminal=False)
 
             except queue.Empty:
@@ -395,7 +395,7 @@ cdef class MCTSEngine:
         # Header with Search Context
         self.logger.info(f"\n--- {phase_name} ---")
         self.logger.info(f"Tree Stats: Root v_mix={root_v_mix:.4f}")
-        self.logger.info(f"{'Move':<8} {'Visits':>8} {'Prior':>8} {'Noise':>8} {'Raw Q':>8} {'Norm Q':>8} {'Score':>8} {'Outcome':>8} {'DTM':>8}")
+        self.logger.info(f"{'Move':<8} {'Visits':>8} {'Logit':>8} {'Noise':>8} {'Raw Q':>8} {'Norm Q':>8} {'Score':>8} {'Outcome':>8} {'DTM':>8}")
         self.logger.info("-" * 95)
         
         # Sort by visits (desc), then score (desc)
@@ -555,7 +555,7 @@ cdef class MCTSEngine:
         return self.simulation_count
 
 
-    cpdef _expand(self, MCTSNode_c.MCTSNode node, policy_probs: torch.Tensor):
+    cpdef _expand(self, MCTSNode_c.MCTSNode node, policy_logits: torch.Tensor):
         cdef double time_expansion_start = time.perf_counter()
         
         # 1. Generate moves
@@ -611,7 +611,7 @@ cdef class MCTSEngine:
         raw_logits_for_legal_moves = policy_logits.flatten()[indices_tensor]
 
         for i in range(len(legal_moves)):
-            child.raw_logit = raw_logits_for_legal_moves[i]
+            child_node.raw_logit = raw_logits_for_legal_moves[i]
 
         node.expanded = True
         self.time_expansion += (time.perf_counter() - time_expansion_start)
