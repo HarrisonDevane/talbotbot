@@ -610,8 +610,9 @@ cdef class MCTSEngine:
 
         raw_logits_for_legal_moves = policy_logits.flatten()[indices_tensor]
 
-        for i in range(len(legal_moves)):
-            child_node.raw_logit = raw_logits_for_legal_moves[i]
+        for i in range(num_moves):
+            current_child = <MCTSNode_c.MCTSNode>child_nodes_in_order[i]
+            current_child.raw_logit = float(raw_logits_for_legal_moves[i])
 
         node.expanded = True
         self.time_expansion += (time.perf_counter() - time_expansion_start)

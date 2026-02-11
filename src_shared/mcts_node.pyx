@@ -82,27 +82,11 @@ cdef class MCTSNode:
 
     cpdef double calculate_v_mix(self):
         cdef double sum_visits = 0.0
-        cdef double sum_visited_prob = 0.0
-        cdef double sum_visited_q_weighted = 0.0
-        cdef double child_q_parent_perspective
-
-        # 1. Gather stats from VISITED children only
+        cdef double sum_q_weighted = 0.0
+        
         for child in self.children.values():
             if child.visits > 0:
                 sum_visits += child.visits
-                sum_visited_prob += child.raw_logit
-                
-                # Invert child value for parent perspective
-                child_q_parent_perspective = -child.value_sum / child.visits
-                sum_visited_q_weighted += (child.raw_logit * child_q_parent_perspective)
+                sum_q_weighted += (child.visits * (-child.value_sum / child.visits))
 
-        if sum_visits == 0:
-            return self.raw_value
-
-        # 2. Eq 33 Implementation
-        cdef double scaling = 0.0
-        if sum_visited_prob > 1e-8:
-            scaling = sum_visits / sum_visited_prob
-            
-        cdef double term_2 = scaling * sum_visited_q_weighted
-        return (1.0 / (1.0 + sum_visits)) * (self.raw_value + term_2)
+        return (self.raw_value + sum_q_weighted) / (1.0 + sum_visits)
