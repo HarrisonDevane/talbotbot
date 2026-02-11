@@ -25,7 +25,7 @@ cdef class MCTSNode:
         # Initialize C-typed numeric values
         self.visits = 0
         self.value_sum = 0.0
-        self.prior_probability_from_parent = 0.0
+        self.raw_logit = 0.0
         self.raw_value = 0
         self.q_val = 0.0
         self.q_norm = 0.0
@@ -73,7 +73,7 @@ cdef class MCTSNode:
         self.q_norm = (self.q_val + 1) / 2
 
         # 3. Logit
-        logit = math.log(max(self.prior_probability_from_parent, 1e-8))
+        logit = math.log(max(self.raw_logit, 1e-8))
 
         # 4. Sigma (Corrected Formula)
         sigma = (gumbel_c_base + max_visits) * gumbel_c_scale
@@ -93,11 +93,11 @@ cdef class MCTSNode:
         for child in self.children.values():
             if child.visits > 0:
                 sum_visits += child.visits
-                sum_visited_prob += child.prior_probability_from_parent
+                sum_visited_prob += child.raw_logit
                 
                 # Invert child value for parent perspective
                 child_q_parent_perspective = -child.value_sum / child.visits
-                sum_visited_q_weighted += (child.prior_probability_from_parent * child_q_parent_perspective)
+                sum_visited_q_weighted += (child.raw_logit * child_q_parent_perspective)
 
         if sum_visits == 0:
             return self.raw_value

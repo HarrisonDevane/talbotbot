@@ -403,7 +403,7 @@ cdef class MCTSEngine:
         
         for node in sorted_cands:
             # DIRECT ACCESS: No recalculation needed
-            self.logger.info(f"{node.move.uci():<8} {node.visits:>8} {node.prior_probability_from_parent:>8.4f} {node.gumbel_noise:>8.4f} {node.q_val:>8.4f} {node.q_norm:>8.4f} {node.gumbel_score:>8.4f} {str(node.forced_outcome):>8} {str(node.distance_to_mate):>8}")
+            self.logger.info(f"{node.move.uci():<8} {node.visits:>8} {node.raw_logit:>8.4f} {node.gumbel_noise:>8.4f} {node.q_val:>8.4f} {node.q_norm:>8.4f} {node.gumbel_score:>8.4f} {str(node.forced_outcome):>8} {str(node.distance_to_mate):>8}")
         
         self.logger.info("-" * 95)
         
@@ -469,7 +469,7 @@ cdef class MCTSEngine:
         for move in all_moves:
             child = self.root.children[move]
             child.gumbel_noise = np.random.gumbel(0, self.gumbel_noise)
-            child.gumbel_score = child.gumbel_noise + math.log(max(child.prior_probability_from_parent, 1e-8))
+            child.gumbel_score = child.gumbel_noise + child.raw_logit
             
             active_candidates.append(child)
 
@@ -608,19 +608,10 @@ cdef class MCTSEngine:
             from_row_tensor, from_col_tensor, channel_tensor
         )
 
-        prior_values_for_legal_moves = policy_probs.flatten()[indices_tensor]
-        normalized_legal_priors_pyobj = torch.nn.functional.softmax(prior_values_for_legal_moves, dim=0)
+        raw_logits_for_legal_moves = policy_logits.flatten()[indices_tensor]
 
-        cdef cnp.ndarray[cnp.float32_t, ndim=1] prior_array
-        cdef float [:] priors_view
-
-        if normalized_legal_priors_pyobj.numel() > 0:
-    
-            prior_array = normalized_legal_priors_pyobj.cpu().float().numpy()
-            priors_view = prior_array
-
-            for i in range(num_moves):
-                child_nodes_in_order[i].prior_probability_from_parent = priors_view[i]
+        for i in range(len(legal_moves)):
+            child.raw_logit = raw_logits_for_legal_moves[i]
 
         node.expanded = True
         self.time_expansion += (time.perf_counter() - time_expansion_start)
