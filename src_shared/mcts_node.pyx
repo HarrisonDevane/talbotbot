@@ -72,14 +72,11 @@ cdef class MCTSNode:
         # 2. Normalize    
         self.q_norm = (self.q_val + 1) / 2
 
-        # 3. Logit
-        logit = math.log(max(self.raw_logit, 1e-8))
-
-        # 4. Sigma (Corrected Formula)
+        # 3. Sigma (Corrected Formula)
         sigma = (gumbel_c_base + max_visits) * gumbel_c_scale
 
-        # 5. Score
-        self.gumbel_score = logit + self.gumbel_noise + (sigma * self.q_norm)
+        # 4. Score
+        self.gumbel_score = self.raw_logit + self.gumbel_noise + (sigma * self.q_norm)
         
         return self.gumbel_score
 
