@@ -187,7 +187,6 @@ class TrainTask:
             model.train()
             running_policy_loss = 0.0
             running_value_loss = 0.0
-            running_entropy_loss = 0.0
             running_total_loss = 0.0
             
             for batch_idx, (board_tensors, policy_target, value_targets) in enumerate(train_loader):
@@ -215,20 +214,15 @@ class TrainTask:
                     torch.cuda.synchronize()
                     forward_pass_end = time.perf_counter()
 
-                    policy_probs = torch.exp(policy_log_softmax)
-                    batch_entropy = -torch.sum(policy_probs * policy_log_softmax, dim=1).mean()
-
                     policy_loss = policy_criterion(policy_log_softmax, policy_target)
                     value_loss = value_criterion(value_outputs, value_targets)
 
                     running_policy_loss += policy_loss.item() * self.training_config['policy_loss_weight']
                     running_value_loss += value_loss.item() * self.training_config['value_loss_weight']
-                    running_entropy_loss += batch_entropy.item() * self.training_config['entropy_loss_weight']
                     
 
                     total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
-                                 (value_loss * self.training_config['value_loss_weight']) - \
-                                 (batch_entropy * self.training_config['entropy_loss_weight'])
+                                 (value_loss * self.training_config['value_loss_weight'])
                     
                     running_total_loss += total_loss.item()
                     
@@ -248,7 +242,6 @@ class TrainTask:
                     self.logger.info(f"Training Step {current_step}/{total_training_steps_this_cycle + global_step}: "
                                      f"P_Loss={(policy_loss.item() * self.training_config['policy_loss_weight']):.4f}, "
                                      f"V_Loss={(value_loss.item() * self.training_config['value_loss_weight']):.4f}, "
-                                     f"E_Loss={(batch_entropy.item() * self.training_config['entropy_loss_weight']):.4f}, "
                                      f"T_Loss={total_loss.item():.4f}, "
                                      f"LR={optimizer.param_groups[0]['lr']:.6f}, "
                                      f"GPU Xfer: {(transfer_to_gpu_end - transfer_to_gpu_start)*1000:.2f}ms, "
@@ -262,7 +255,6 @@ class TrainTask:
             self.logger.info(f"Total Steps Completed This Cycle: {training_steps_completed} "
                             f"Average Policy Loss: {running_policy_loss / len(train_loader):.4f}, "
                             f"Average Value Loss: {running_value_loss / len(train_loader):.4f}, "
-                            f"Average Entropy Loss: {running_entropy_loss / len(train_loader):.4f}, "
                             f"Average Total Loss: {running_total_loss / len(train_loader):.4f}")
                             
             
@@ -285,4 +277,4 @@ class TrainTask:
                 self.logger.info("Closing HDF5 file handle(s) in ChessDataset.")
                 full_dataset.close()
             
-        return final_model_path, training_steps_completed, (running_entropy_loss / (len(train_loader) * self.training_config['entropy_loss_weight']))
+        return final_model_path, training_steps_completed
