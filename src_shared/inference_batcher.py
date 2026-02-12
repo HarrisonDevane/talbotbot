@@ -176,7 +176,6 @@ class InferenceBatcher:
                     with torch.no_grad():
                         start_inference = time.monotonic()
                         policy_gpu, value_gpu = self.model(states_gpu)
-                        policy_gpu = F.softmax(policy_gpu, dim=-1)
                         inference_duration = time.monotonic() - start_inference
                         self.logger.debug(f"Time to initiate inference: {inference_duration:.4f} seconds.")
 
