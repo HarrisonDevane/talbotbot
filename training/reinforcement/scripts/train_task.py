@@ -204,11 +204,14 @@ class TrainTask:
                 optimizer.zero_grad()
                 
                 forward_pass_start = time.perf_counter()
-                optimizer.zero_grad()
-                
-                forward_pass_start = time.perf_counter()
+
                 with autocast('cuda'):
                     policy_logits, value_outputs = model(board_tensors)
+
+                    # Mask illegal moves before softmax
+                    legal_mask = policy_target > 0.0
+                    policy_logits = policy_logits.masked_fill(~legal_mask, -1e9)
+
                     policy_log_softmax = F.log_softmax(policy_logits, dim=1)
                     value_outputs = value_outputs.squeeze(1)
                     torch.cuda.synchronize()
