@@ -210,7 +210,8 @@ class TrainTask:
 
                     # Mask illegal moves before softmax
                     legal_mask = policy_target > 0.0
-                    policy_logits = policy_logits.masked_fill(~legal_mask, -1e9)
+                    mask_value = torch.finfo(policy_logits.dtype).min
+                    policy_logits = policy_logits.masked_fill(~legal_mask, mask_value)
 
                     policy_log_softmax = F.log_softmax(policy_logits, dim=1)
                     value_outputs = value_outputs.squeeze(1)
