@@ -36,7 +36,7 @@ class TalbotAgent:
         self.mcts = None
         self.use_resignation = None
     
-    def get_move(self, board, ply_count, search_depth):
+    def get_move(self, board, ply_count, phase_budgets):
         """
         Runs MCTS simulations and selects a move based on a temperature schedule.
         """
@@ -55,12 +55,9 @@ class TalbotAgent:
             result_queue=self.result_queue,
             virtual_loss=self.talbot_config['virtual_loss'],
             draw_cutoff=self.talbot_config['draw_cutoff'],
-            gumbel_k=self.talbot_config['gumbel_k'],
             gumbel_c_base=self.talbot_config['gumbel_c_base'],
             gumbel_c_scale=self.talbot_config['gumbel_c_scale'],
             gumbel_noise=self.talbot_config['gumbel_noise'],
-            gumbel_first_round=self.talbot_config['gumbel_first_round'],
-            gumbel_final_round=self.talbot_config['gumbel_final_round'],
             board=board,
             shared_input_buffer=self.shared_input_buffer,
             shared_policy_buffer=self.shared_policy_buffer,
@@ -68,7 +65,7 @@ class TalbotAgent:
             buffer_free_slots=self.buffer_free_slots
         )
 
-        simulation_count = self.mcts.run_simulations(search_depth)
+        simulation_count = self.mcts.run_simulations(phase_budgets)
 
         best_move = None
         policy_vector = np.zeros(src_shared.utils.TOTAL_POLICY_MOVES, dtype=np.float32)
@@ -164,7 +161,7 @@ class TalbotAgent:
             visited_nodes = [c for c in children.values() if c.visits > 0 and c.forced_outcome not in [0, 1]]
 
             if not visited_nodes:
-                visited_nodes = children.values()
+                visited_nodes = list(children.values())
 
             # 3. Construct Targets
             target_logits = []
@@ -173,7 +170,6 @@ class TalbotAgent:
             for move, child in children.items():
                 target_logits.append(child.gumbel_score - child.gumbel_noise)
                 moves.append(move)
-
 
             target_logits = np.array(target_logits)
             target_logits = target_logits - np.max(target_logits)
@@ -189,11 +185,12 @@ class TalbotAgent:
                 policy_vector[flat_index] = target_probs[i]
 
             if ply_count <= self.talbot_config['temperature_ply_cutoff']:
-                visits = np.array([c.visits for c in visited_nodes], dtype=np.float32)
-                scaled_visits = np.power(visits, 1.0 / self.talbot_config['temperature_factor'])
-                visit_probs = scaled_visits / np.sum(scaled_visits)
-                
-                best_move = np.random.choice(visited_nodes, p=visit_probs).move
+                scores = np.array([c.gumbel_score for c in visited_nodes])
+                scaled_scores = scores / self.talbot_config['temperature_factor']
+                scaled_scores = scaled_scores - np.max(scaled_scores)
+                act_probs = np.exp(scaled_scores) / np.sum(np.exp(scaled_scores))
+
+                best_move = visited_nodes[np.random.choice(len(visited_nodes), p=act_probs)].move
                 
             else:
                  max_visit_count = max(c.visits for c in visited_nodes)

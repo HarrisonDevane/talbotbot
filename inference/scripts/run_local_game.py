@@ -203,20 +203,20 @@ class GameController:
         self.players[chess.WHITE].reset_for_new_game()
         self.players[chess.BLACK].reset_for_new_game()
         
-        fixed_simulations = self.evaluation_config['search_depth'] 
-        self.logger.info(f"Game will use a fixed search depth of {fixed_simulations} simulations.")
+        phase_budgets = self.evaluation_config['gumbel_search_budget'] 
+        self.logger.info(f"Game will use a fixed search depth of {sum(phase_budgets)} simulations.")
         
         self.update_gui()
         self.running = True
         self._game_thread = threading.Thread(
             target=self._game_loop_logic, 
-            args=(fixed_simulations,),
+            args=(phase_budgets,),
             daemon=True
         )
         self._game_thread.start()
 
 
-    def _game_loop_logic(self, fixed_simulations):
+    def _game_loop_logic(self, phase_budgets):
         """Internal method containing the main game loop logic for automated play."""
         
         while self.running and not self.game_over: 
@@ -229,7 +229,7 @@ class GameController:
             current_board = self.board.copy()
             
             ply_count = current_board.ply() + 1
-            best_move, policy, simulation_count, entropy = player.get_move(current_board, ply_count, fixed_simulations) 
+            best_move, policy, simulation_count, entropy = player.get_move(current_board, ply_count, phase_budgets) 
             self.logger.info(f"Move {ply_count}: {best_move.uci()} ({simulation_count} sims)")
 
             self.make_move(best_move)

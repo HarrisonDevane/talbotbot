@@ -33,13 +33,10 @@ cdef class MCTSEngine:
     cdef public int simulation_count
     cdef public int inference_sent
     cdef public int inference_received
-    cdef public int gumbel_k
     cdef public double gumbel_c_base
     cdef public double gumbel_c_scale
     cdef public double gumbel_noise
     cdef public bint use_fp16
-    cdef public bint gumbel_first_round
-    cdef public bint gumbel_final_round
 
     cdef public double time_selection
     cdef public double time_expansion
@@ -64,7 +61,7 @@ cdef class MCTSEngine:
     cdef public object buffer_free_slots
 
     def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, virtual_loss: float,
-             draw_cutoff: float, gumbel_k: int, gumbel_c_base: float, gumbel_c_scale: float, gumbel_noise: float, gumbel_first_round: bool, gumbel_final_round: bool, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+             draw_cutoff: float, gumbel_c_base: float, gumbel_c_scale: float, gumbel_noise: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
 
         self.logger = logger
         self.worker_batch_size = worker_batch_size
@@ -79,11 +76,8 @@ cdef class MCTSEngine:
         self.draw_cutoff = draw_cutoff
 
         self.gumbel_noise = gumbel_noise
-        self.gumbel_k = gumbel_k
         self.gumbel_c_base = gumbel_c_base
         self.gumbel_c_scale = gumbel_c_scale
-        self.gumbel_first_round = gumbel_first_round
-        self.gumbel_final_round = gumbel_final_round
 
         self.root = MCTSNode_c.MCTSNode(board.copy())
         self.in_flight_nodes = {}
@@ -406,23 +400,27 @@ cdef class MCTSEngine:
             self.logger.info(f"{node.move.uci():<8} {node.visits:>8} {node.raw_logit:>8.4f} {node.gumbel_noise:>8.4f} {node.q_val:>8.4f} {node.q_norm:>8.4f} {node.gumbel_score:>8.4f} {str(node.forced_outcome):>8} {str(node.distance_to_mate):>8}")
         
         self.logger.info("-" * 95)
-        
-    cpdef run_simulations(self, int total_simulations):
+            
+    cpdef run_simulations(self, list phase_budgets):
         """
-        Executes the Gumbel MuZero 'Sequential Halving' search.
+        Executes the Gumbel MuZero 'Sequential Halving' search using an explicit list of phase budgets.
+        Example: phase_budgets = [32, 32, 32, 32]
         """
-        cdef int num_phases
-        cdef int sim_budget_per_phase
+        cdef int phase_budget
         cdef int sims_per_candidate
         cdef list all_moves
         cdef list active_candidates
         cdef list child_candidates
         cdef MCTSNode_c.MCTSNode child
+        cdef int initial_k
         cdef int actual_k
         cdef int i
         cdef int cutoff
-        cdef double min_q, max_q, scale, max_visits_phase
-        cdef double final_min_q, final_scale, final_max_visits
+        cdef int phase_idx
+        cdef int remaining_budget
+        cdef double max_visits_phase
+        cdef double max_visits_final
+        cdef double root_v_mix
         
         self.simulation_count = 0
         self.inference_sent = 0
@@ -444,28 +442,13 @@ cdef class MCTSEngine:
         self._wait_for_inference()
 
         all_moves = list(self.root.children.keys())
-        actual_k = min(self.gumbel_k, len(all_moves))
-        
-        # Calculate phases: e.g. log2(16) = 4 phases
-        num_phases = int(math.ceil(math.log2(actual_k))) - 1
-        final_candidate_threshold = 1
-
-        # Add phases from config
-        if self.gumbel_final_round:
-            num_phases += 1
-            final_candidate_threshold = 0
-
-        if self.gumbel_first_round:
-            num_phases += 1
-
-        if num_phases < 1: num_phases = 1
-        
-        sim_budget_per_phase = (total_simulations - actual_k) // num_phases
-        self.logger.info(f"Phases: {num_phases}, Sims per move: {sim_budget_per_phase}")
-
+                
+        # Cap k at the actual number of legal moves available on the board
+        actual_k = min(1 << len(phase_budgets), len(all_moves))
+        self.logger.info(1 << len(phase_budgets))
         active_candidates = []
         
-        # 2. Initialize Gumbel Noise
+        # 3. Initialize Gumbel Noise
         for move in all_moves:
             child = self.root.children[move]
             child.gumbel_noise = np.random.gumbel(0, self.gumbel_noise)
@@ -473,37 +456,38 @@ cdef class MCTSEngine:
             
             active_candidates.append(child)
 
-        # 3. Initial Pruning (Top-k by prior + noise)
+        self._log_tournament_results(active_candidates, "Initial candidates:")
+
+        # 4. Initial Pruning (Top-k by prior + noise)
         active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
         child_candidates = list(active_candidates)
         active_candidates = active_candidates[:actual_k]
-        
-        # Initial Queueing for the chosen candidates
-        for child in active_candidates:
-            if child.board.is_game_over(claim_draw=True):
-                self._handle_terminal_node(child)
-            else:
-                self._queue_leaf_for_inference(child)
 
-        self._submit_batch()
-        self._wait_for_inference()
-
-        self._log_tournament_results(active_candidates, f"Initial candidates:")
-
-        # Include these again for first round of sequential halving if specified
-        if not self.gumbel_first_round:
-            active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
-            cutoff = (len(active_candidates) + 1) // 2
-            active_candidates = active_candidates[:cutoff]
-
-        # 4. Sequential Halving Loop
-        for phase in range(num_phases):
-            if len(active_candidates) <= final_candidate_threshold: break
-
-            sims_per_candidate = sim_budget_per_phase // len(active_candidates)
-            if sims_per_candidate < 1: sims_per_candidate = 1
+        # 5. Explicit Halving Loop
+        for phase_idx, phase_budget in enumerate(phase_budgets):
             
-            self.logger.info(f"Phase {phase}: Running {sims_per_candidate} sims for {len(active_candidates)} candidates.")
+            # Stop if we've drilled down to the final survivor early
+            if len(active_candidates) <= 1: 
+                break
+
+            self.logger.info(f"Phase {phase_idx}: Budget {phase_budget} -> {phase_budget // len(active_candidates)} sims for {len(active_candidates)} candidates.")
+            
+            remaining_budget = phase_budget
+
+            if phase_idx == 0:
+                for child in active_candidates:
+                    remaining_budget -= 1
+                    if child.board.is_game_over(claim_draw=True):
+                        self._handle_terminal_node(child)
+                    else:
+                        self._queue_leaf_for_inference(child)
+
+                self._submit_batch()
+                self._wait_for_inference()
+
+
+            # Explicit budget consumption
+            sims_per_candidate = remaining_budget // len(active_candidates)
 
             # A. Run Batch Simulations
             for i in range(sims_per_candidate):
@@ -513,7 +497,7 @@ cdef class MCTSEngine:
             # B. Sync Barrier
             self._wait_for_inference() 
             
-            # C. Update Global Stats (Using Helper)
+            # C. Update Global Stats 
             max_visits_phase = max([c.visits for c in active_candidates if c.visits > 0], default=1.0)
 
             # D. Update Scores on Nodes
@@ -523,16 +507,16 @@ cdef class MCTSEngine:
                 child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_phase, root_v_mix)
 
             # E. Log Results
-            self._log_tournament_results(active_candidates, f"Phase {phase} End")
+            self._log_tournament_results(active_candidates, f"Phase {phase_idx} End")
 
-            # F. Prune
-            if len(active_candidates) > 1 and phase < (num_phases - 1):
+            # F. Prune (Halve the candidates, unless we are on the final phase)
+            if len(active_candidates) > 1 and phase_idx < (len(phase_budgets) - 1):
                 active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
                 cutoff = (len(active_candidates) + 1) // 2
                 active_candidates = active_candidates[:cutoff]
 
         
-        # 5. Final Score Update
+        # 6. Final Score Update
         max_visits_final = max([c.visits for c in child_candidates if c.visits > 0], default=1.0)
         root_v_mix = self.root.calculate_v_mix()
 
@@ -562,13 +546,7 @@ cdef class MCTSEngine:
         cdef list legal_moves = list(cython_chess.generate_legal_moves(node.board, chess.BB_ALL, chess.BB_ALL))
         cdef int num_moves = len(legal_moves)
         
-        # 2. Early exit for terminal nodes (prevents 0-size array errors)
-        if num_moves == 0:
-            node.expanded = True
-            self.time_expansion += (time.perf_counter() - time_expansion_start)
-            return
-
-        # 3. Pre-allocate NumPy arrays (int64 maps to torch.long)
+        # 2. Pre-allocate NumPy arrays (int64 maps to torch.long)
         cdef cnp.ndarray[cnp.int64_t, ndim=1] from_row_arr = np.empty(num_moves, dtype=np.int64)
         cdef cnp.ndarray[cnp.int64_t, ndim=1] from_col_arr = np.empty(num_moves, dtype=np.int64)
         cdef cnp.ndarray[cnp.int64_t, ndim=1] channel_arr = np.empty(num_moves, dtype=np.int64)
@@ -583,7 +561,7 @@ cdef class MCTSEngine:
         cdef object move
         cdef MCTSNode_c.MCTSNode child_node
 
-        # 5. Fast Loop
+        # 3. Fast Loop
         for i in range(num_moves):
             move = legal_moves[i]
             from_row_int, from_col_int, channel_int = src_shared.utils.move_to_policy_components(move, node.board)
@@ -599,7 +577,7 @@ cdef class MCTSEngine:
 
     
 
-        # 6. Tensor Creation (Zero-copy where possible)
+        # 4. Tensor Creation (Zero-copy where possible)
         from_row_tensor = torch.from_numpy(from_row_arr)
         from_col_tensor = torch.from_numpy(from_col_arr)
         channel_tensor = torch.from_numpy(channel_arr)
