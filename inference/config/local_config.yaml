@@ -14,7 +14,7 @@ evaluation:
   training: False                                    # Mode flag (True = add noise/exploration, False = deterministic eval)
   inference_worker_cores:                            # Dedicated CPU cores for the Batching Process (feeding the GPU)
     - [12, 13, 14, 15]
-  batch_size_per_worker: 8                           # Max positions a single worker sends at once
+  batch_size_per_worker: 4                           # Max positions a single worker sends at once
   batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
   batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
