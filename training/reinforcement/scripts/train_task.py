@@ -67,14 +67,13 @@ class TrainTask:
         
         # Train for dynamic number of steps based on a fixed sampling ratio
         fixed_steps = int(sampling_ratio * (self.global_config['data_generation_positions_per_cycle'] / batch_size))
-        total_positions_to_sample = min(fixed_steps * batch_size, total_positions_source)
         
-        self.logger.info(f"Target samples to sample: {total_positions_to_sample}")
+        self.logger.info(f"Target samples to sample: {fixed_steps}")
         self.logger.info("Using uniform sampling from all available HDF5 samples.")
         
         final_indices = np.random.choice(
             all_sample_indices, 
-            size=total_positions_to_sample, 
+            size=fixed_steps, 
             replace=self.training_config['replacement']
         ).tolist()
 
