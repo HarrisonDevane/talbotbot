@@ -453,6 +453,10 @@ cdef class MCTSEngine:
             child = self.root.children[move]
             child.gumbel_noise = np.random.gumbel(0, self.gumbel_noise)
             child.gumbel_score = child.gumbel_noise + child.raw_logit
+
+            # Check for terminal nodes in all children
+            if child.board.is_game_over(claim_draw=True):
+                self._handle_terminal_node(child)
             
             active_candidates.append(child)
 
@@ -477,9 +481,7 @@ cdef class MCTSEngine:
             if phase_idx == 0:
                 for child in active_candidates:
                     remaining_budget -= 1
-                    if child.board.is_game_over(claim_draw=True):
-                        self._handle_terminal_node(child)
-                    else:
+                    if not child.board.is_game_over(claim_draw=True):
                         self._queue_leaf_for_inference(child)
 
                 self._submit_batch()

@@ -187,6 +187,7 @@ class TrainTask:
             model.train()
             running_policy_loss = 0.0
             running_value_loss = 0.0
+            running_entropy_loss = 0.0
             running_total_loss = 0.0
             
             for batch_idx, (board_tensors, policy_target, value_targets) in enumerate(train_loader):
@@ -214,9 +215,13 @@ class TrainTask:
                     policy_logits = policy_logits.masked_fill(~legal_mask, mask_value)
 
                     policy_log_softmax = F.log_softmax(policy_logits, dim=1)
+                    policy_probs = torch.exp(policy_log_softmax)
                     value_outputs = value_outputs.squeeze(1)
                     torch.cuda.synchronize()
                     forward_pass_end = time.perf_counter()
+
+                    batch_entropy = -torch.sum(policy_probs * policy_log_softmax, dim=1).mean()
+                    running_entropy_loss += batch_entropy.item()
 
                     policy_loss = policy_criterion(policy_log_softmax, policy_target)
                     value_loss = value_criterion(value_outputs, value_targets)
@@ -226,10 +231,10 @@ class TrainTask:
                     
 
                     total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
-                                 (value_loss * self.training_config['value_loss_weight'])
-                    
-                    running_total_loss += total_loss.item()
-                    
+                                 (value_loss * self.training_config['value_loss_weight']) - \
+                                 (batch_entropy * self.training_config['entropy_loss_weight'])
+
+                                        
                 backward_pass_start = time.perf_counter()
                 scaler.scale(total_loss).backward()
                 if self.device.type == 'cuda':
@@ -238,6 +243,8 @@ class TrainTask:
 
                 scaler.step(optimizer)
                 scaler.update()
+
+                running_total_loss += total_loss.item()
                                                                 
                 batch_end_time = time.perf_counter()
                 
@@ -246,19 +253,22 @@ class TrainTask:
                     self.logger.info(f"Training Step {current_step}/{total_training_steps_this_cycle + global_step}: "
                                      f"P_Loss={(policy_loss.item() * self.training_config['policy_loss_weight']):.4f}, "
                                      f"V_Loss={(value_loss.item() * self.training_config['value_loss_weight']):.4f}, "
+                                     f"E_Loss={(batch_entropy.item() * self.training_config['entropy_loss_weight']):.4f}, "
                                      f"T_Loss={total_loss.item():.4f}, "
                                      f"LR={optimizer.param_groups[0]['lr']:.6f}, "
                                      f"GPU Xfer: {(transfer_to_gpu_end - transfer_to_gpu_start)*1000:.2f}ms, "
                                      f"FW: {(forward_pass_end - forward_pass_start)*1000:.2f}ms, "
                                      f"BW: {(backward_pass_end - backward_pass_start)*1000:.2f}ms, "
                                      f"Batch Total: {(batch_end_time - batch_start_time)*1000:.2f}ms")
-
+                    
+            avg_entropy_train = running_entropy_loss / len(train_loader)
             training_steps_completed = len(train_loader)
             
             self.logger.info(f"--- Training Run Summary ---")
             self.logger.info(f"Total Steps Completed This Cycle: {training_steps_completed} "
                             f"Average Policy Loss: {running_policy_loss / len(train_loader):.4f}, "
                             f"Average Value Loss: {running_value_loss / len(train_loader):.4f}, "
+                            f"Average entropy Loss: {avg_entropy_train}, "
                             f"Average Total Loss: {running_total_loss / len(train_loader):.4f}")
                             
             
@@ -281,4 +291,4 @@ class TrainTask:
                 self.logger.info("Closing HDF5 file handle(s) in ChessDataset.")
                 full_dataset.close()
             
-        return final_model_path, training_steps_completed
+        return final_model_path, training_steps_completed, avg_entropy_train

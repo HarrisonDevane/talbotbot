@@ -1,6 +1,6 @@
 game:
-  white_player: 'human'
-  black_player: 'talbot'
+  white_player: 'talbot'
+  black_player: 'human'
   initial_fen: Null
   white_perspective: True
 
@@ -20,10 +20,8 @@ evaluation:
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   gumbel_c_base: 50.0                                # Sigma used for gumbel score calucation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
-  gumbel_noise: 0.0                                  # Gumbel noise value
-  gumbel_search_budget: [400, 400, 400, 400, 400]    # Search depth distribution (k = 4^2, search depth = sum)
-  temperature_ply_cutoff: 0                          # Sample proportional to visit count for first moves
-  temperature_factor: 0.5                            # Temperature factor used
+  gumbel_noise: 1.0                                  # Gumbel noise value
+  gumbel_search_budget: [32, 32, 32, 32]    # Search depth distribution (k = 4^2, search depth = sum)
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.95                          # Bot resigns to save compute time
