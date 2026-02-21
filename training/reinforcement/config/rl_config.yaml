@@ -1,5 +1,5 @@
 global:
-  total_training_steps: 10000                        # Total gradient updates to perform
+  total_training_steps: 5000                         # Total gradient updates to perform
   save_interval_steps: 1000                          # How often to backup the "best_model.pth" and replay buffer
   min_buffer_size: 1024000                           # Minimum Replay Buffer Size
   max_buffer_size: 8192000                           # Max buffer size
