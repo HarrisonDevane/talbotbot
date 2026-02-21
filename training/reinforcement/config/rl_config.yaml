@@ -42,7 +42,7 @@ training:
   value_loss_weight: 1.0                             # Weight for Win/Loss Prediction loss
   log_interval: 1                                    # Log training stats
   weight_decay: 1e-4                                 # L2 Regularization
-  entropy_loss_weight: 0.01                          # Weight for entropy regularization term
+  entropy_loss_weight: 0.05                          # Weight for entropy regularization term
   lr_high: 1e-1                                      # SGD Learning Rate for different phases of training
   lr_high_cutoff: 1000
   lr_mid: 1e-2
