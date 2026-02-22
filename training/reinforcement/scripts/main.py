@@ -53,7 +53,6 @@ class RLOrchestrator:
                     samples_collected: 0        # Positions generated in the current specific cycle
                     games_played: 0             # Number of games played this cycle
                     self_play_entropy: 0.0      # Entropy  from self play games
-                    training_avg_entropy: 0.0   # Entropy from training
                                                  
                 """).strip()
             
@@ -331,7 +330,7 @@ class RLOrchestrator:
                 hdf5_path=self.buffer_file_path,
                 cycle_number=self.current_cycle,
             )
-            test_model_path, steps, train_entropy = train_task.run_training_loop()
+            test_model_path, steps = train_task.run_training_loop()
             total_train_time = time.time() - start_train_time
 
             self.state_config['state']['lifetime']['hours_training'] = round(self.state_config['state']['lifetime']['hours_training']  + (total_train_time / 3600), 2)
@@ -340,7 +339,6 @@ class RLOrchestrator:
             self.logger.info(f"2. Model has trained successfully for {steps} steps.")
             self.current_steps += steps
             self.state_config['state']['lifetime']['training_steps'] = self.current_steps
-            self.state_config['state']['current_cycle']['training_avg_entropy'] = round(train_entropy, 2)
                         
             # Override the best model with the new model
             self.logger.info(f"Saving new model from {test_model_path} to {self.best_model_path}...")
@@ -360,7 +358,6 @@ class RLOrchestrator:
             self.state_config['state']['current_cycle']['samples_collected'] = 0
             self.state_config['state']['current_cycle']['games_played'] = 0
             self.state_config['state']['current_cycle']['self_play_entropy'] = 0
-            self.state_config['state']['current_cycle']['training_avg_entropy'] = 0
             self.state_config['state']['lifetime']['cycle_idx'] = self.current_cycle + 1
 
             self._save_state()
