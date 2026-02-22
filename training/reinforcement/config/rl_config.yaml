@@ -23,8 +23,8 @@ data_generation:
   batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
   batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
-  gumbel_c_base: 50.0                                # Sigma used for gumbel score calucation
-  gumbel_c_scale: 1.0                                # Scale for sigma with visit count
+  gumbel_c_visit: 50.0                               # Sigma used for gumbel score calucation
+  gumbel_c_scale: 0.2                                # Scale for sigma with visit count
   gumbel_noise: 1.0                                  # Gumbel noise value
   gumbel_search_budget: [32, 32, 32, 32]             # Search depth distribution (k = 2^number, search depth = sum)
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
@@ -40,9 +40,9 @@ training:
   replacement: True                                  # Allow sampling the same position twice in one batch
   policy_loss_weight: 1.0                            # Weight for Move Prediction loss
   value_loss_weight: 1.0                             # Weight for Win/Loss Prediction loss
+  entropy_loss_weight: 0.01                          # Weight for entropy regularization term
   log_interval: 1                                    # Log training stats
   weight_decay: 1e-4                                 # L2 Regularization
-  entropy_loss_weight: 0.05                          # Weight for entropy regularization term
   lr_high: 1e-1                                      # SGD Learning Rate for different phases of training
   lr_high_cutoff: 1000
   lr_mid: 1e-2

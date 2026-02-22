@@ -24,5 +24,5 @@ cdef class MCTSNode:
     cdef public object children
     
     # --- C-Typed Method signature accessed by MCTSEngine ---
-    cpdef double calculate_gumbel_score(self, double gumbel_c_base, double gumbel_c_scale, double max_visits, double v_mix)
+    cpdef double calculate_gumbel_score(self, double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix)
     cpdef double calculate_v_mix(self)

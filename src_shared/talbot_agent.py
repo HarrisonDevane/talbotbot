@@ -55,7 +55,7 @@ class TalbotAgent:
             result_queue=self.result_queue,
             virtual_loss=self.talbot_config['virtual_loss'],
             draw_cutoff=self.talbot_config['draw_cutoff'],
-            gumbel_c_base=self.talbot_config['gumbel_c_base'],
+            gumbel_c_visit=self.talbot_config['gumbel_c_visit'],
             gumbel_c_scale=self.talbot_config['gumbel_c_scale'],
             gumbel_noise=self.talbot_config['gumbel_noise'],
             board=board,

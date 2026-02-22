@@ -33,7 +33,7 @@ cdef class MCTSEngine:
     cdef public int simulation_count
     cdef public int inference_sent
     cdef public int inference_received
-    cdef public double gumbel_c_base
+    cdef public double gumbel_c_visit
     cdef public double gumbel_c_scale
     cdef public double gumbel_noise
     cdef public bint use_fp16
@@ -61,7 +61,7 @@ cdef class MCTSEngine:
     cdef public object buffer_free_slots
 
     def __init__(self, logger: logging.Logger, worker_batch_size: int, inference_queue, result_queue, worker_id: int, virtual_loss: float,
-             draw_cutoff: float, gumbel_c_base: float, gumbel_c_scale: float, gumbel_noise: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+             draw_cutoff: float, gumbel_c_visit: float, gumbel_c_scale: float, gumbel_noise: float, board: chess.Board, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
 
         self.logger = logger
         self.worker_batch_size = worker_batch_size
@@ -76,7 +76,7 @@ cdef class MCTSEngine:
         self.draw_cutoff = draw_cutoff
 
         self.gumbel_noise = gumbel_noise
-        self.gumbel_c_base = gumbel_c_base
+        self.gumbel_c_visit = gumbel_c_visit
         self.gumbel_c_scale = gumbel_c_scale
 
         self.root = MCTSNode_c.MCTSNode(board.copy())
@@ -193,7 +193,7 @@ cdef class MCTSEngine:
 
             for i in range(n_children):
                 child = children_list[i]
-                score = child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits, v_mix)
+                score = child.calculate_gumbel_score(self.gumbel_c_visit, self.gumbel_c_scale, max_visits, v_mix)
                 
                 if score > max_score_logit:
                     max_score_logit = score
@@ -506,7 +506,7 @@ cdef class MCTSEngine:
             root_v_mix = self.root.calculate_v_mix()
 
             for child in active_candidates:
-                child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_phase, root_v_mix)
+                child.calculate_gumbel_score(self.gumbel_c_visit, self.gumbel_c_scale, max_visits_phase, root_v_mix)
 
             # E. Log Results
             self._log_tournament_results(active_candidates, f"Phase {phase_idx} End")
@@ -523,7 +523,7 @@ cdef class MCTSEngine:
         root_v_mix = self.root.calculate_v_mix()
 
         for child in child_candidates:
-            child.calculate_gumbel_score(self.gumbel_c_base, self.gumbel_c_scale, max_visits_final, root_v_mix)
+            child.calculate_gumbel_score(self.gumbel_c_visit, self.gumbel_c_scale, max_visits_final, root_v_mix)
 
         
         # Log Final Standings

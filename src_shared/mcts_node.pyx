@@ -55,7 +55,7 @@ cdef class MCTSNode:
         return self._board
 
 
-    cpdef double calculate_gumbel_score(self, double gumbel_c_base, double gumbel_c_scale, double max_visits, double v_mix):
+    cpdef double calculate_gumbel_score(self, double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix):
         """
         Calculates and updates the gumbel_score for this node.
         """
@@ -73,7 +73,7 @@ cdef class MCTSNode:
         self.q_norm = (self.q_val + 1) / 2
 
         # 3. Sigma (Corrected Formula)
-        sigma = (gumbel_c_base + max_visits) * gumbel_c_scale
+        sigma = (gumbel_c_visit + max_visits) * gumbel_c_scale
 
         # 4. Score
         self.gumbel_score = self.raw_logit + self.gumbel_noise + (sigma * self.q_norm)

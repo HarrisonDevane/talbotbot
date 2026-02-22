@@ -18,8 +18,8 @@ evaluation:
   batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
   batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
-  gumbel_c_base: 50.0                                # Sigma used for gumbel score calucation
-  gumbel_c_scale: 1.0                                # Scale for sigma with visit count
+  gumbel_c_visit: 50.0                               # Sigma used for gumbel score calucation
+  gumbel_c_scale: 0.2                                # Scale for sigma with visit count
   gumbel_noise: 1.0                                  # Gumbel noise value
   gumbel_search_budget: [32, 32, 32, 32]    # Search depth distribution (k = 4^2, search depth = sum)
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
