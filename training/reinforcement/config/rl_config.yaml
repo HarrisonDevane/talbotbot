@@ -36,7 +36,7 @@ data_generation:
 
 training:
   batch_size: 4096                                   # Positions per Gradient Update
-  sampling_ratio: 2.0                                # Train on x the amount of data generated
+  sampling_ratio: 1.0                                # Train on x the amount of data generated
   replacement: True                                  # Allow sampling the same position twice in one batch
   policy_loss_weight: 1.0                            # Weight for Move Prediction loss
   value_loss_weight: 1.0                             # Weight for Win/Loss Prediction loss
