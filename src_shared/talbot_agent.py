@@ -94,7 +94,7 @@ class TalbotAgent:
             self.logger.info(f"{len(best_winning_moves)} forced win/s in {min_dtm} moves were found.")
 
         # If a position is losing (defined by the average root node value) but has a forced draw available, take the draw based on the cutoff
-        elif (self.mcts.root.forced_outcome == 0) and any(c.forced_outcome == 0 for c in self.mcts.root.children.values()) and (self.mcts.root.value_sum / self.mcts.root.visits <= self.talbot_config['draw_cutoff']):
+        elif (self.mcts.root.forced_outcome == 0) and any(c.forced_outcome == 0 for c in self.mcts.root.children.values()) and (self.mcts.root.calculate_v_mix() <= self.talbot_config['draw_cutoff']):
             draw_moves = [
                 move for move, child in self.mcts.root.children.items()
                 if child.forced_outcome == 0
@@ -104,7 +104,7 @@ class TalbotAgent:
             draw_move_values = {}
             for move in draw_moves:
                 child = self.mcts.root.children[move]
-                average_value = child.value_sum / child.visits
+                average_value = child.calculate_v_mix()
                 draw_move_values[move] = average_value
 
             # Find the maximum average value
@@ -185,9 +185,55 @@ class TalbotAgent:
                 policy_vector[flat_index] = target_probs[i]
 
 
-            max_visit_count = max(c.visits for c in visited_nodes)
-            most_visited_set = [c for c in visited_nodes if c.visits >= max_visit_count]
-            best_move = max(most_visited_set, key=lambda c: c.gumbel_score).move
+            if ply_count <= self.talbot_config['temperature_ply_cutoff']:
+                visits = np.array([c.visits for c in visited_nodes], dtype=np.float32)
+                
+                # Identify absolute best move (Max visits -> Max Gumbel Score tiebreak)
+                max_visit_count = np.max(visits)
+                max_visit_indices = np.where(visits == max_visit_count)[0]
+                best_idx = max_visit_indices[np.argmax([visited_nodes[i].gumbel_score for i in max_visit_indices])]
+                best_node = visited_nodes[best_idx]
+                best_q_val = best_node.calculate_v_mix()
+                
+                valid_indices = []
+                for i, node in enumerate(visited_nodes):
+                    node_q_val = node.calculate_v_mix()
+                    if (best_q_val - node_q_val) <= self.talbot_config['temperature_blunder_threshold']:
+                        valid_indices.append(i)
+                
+                # Hardcode the top move to the target percentage (e.g., 0.7)
+                act_probs = np.zeros(len(moves), dtype=np.float32)
+                top_prob = self.talbot_config['temperature_top_move']
+                act_probs[best_idx] = top_prob
+                
+                # Distribute the remaining probability linearly to the rest based on their visits
+                remaining_prob = 1.0 - top_prob
+                other_indices = [i for i in valid_indices if i != best_idx]
+                
+                if remaining_prob > 0 and len(other_indices) > 0:
+                    other_visits = visits[other_indices]
+                    sum_other_visits = np.sum(other_visits)
+                    
+                    if sum_other_visits > 0:
+                        act_probs[other_indices] = (other_visits / sum_other_visits) * remaining_prob
+                    else:
+                        act_probs[best_idx] = 1.0
+                else:
+                    act_probs[best_idx] = 1.0
+                
+                act_probs /= np.sum(act_probs)
+
+                move_probs = [(moves[i], act_probs[i]) for i in range(len(moves)) if act_probs[i] > 0]
+                move_probs.sort(key=lambda x: x[1], reverse=True)
+                dist_str = " | ".join([f"{m}: {p:.3f}" for m, p in move_probs])
+                self.logger.info(f"Action Probabilities: {dist_str}")
+                
+                best_move = moves[np.random.choice(len(moves), p=act_probs)]
+                
+            else:
+                 max_visit_count = max(c.visits for c in visited_nodes)
+                 most_visited_set = [c for c in visited_nodes if c.visits >= max_visit_count]
+                 best_move = max(most_visited_set, key=lambda c: c.gumbel_score).move
 
 
         move_end_time = time.time()
@@ -196,7 +242,7 @@ class TalbotAgent:
 
         self.logger.info(f"Total move time: {total_move_time:.4f}, with {simulation_speed:.4f} simulations per second")
         self.logger.info(f"Total entropy: {entropy}")
-        self.logger.info(f"Average root node value: {self.mcts.root.value_sum / self.mcts.root.visits}")
+        self.logger.info(f"Average root node value: {self.mcts.root.calculate_v_mix()}")
 
         return best_move, policy_vector, simulation_count, entropy
 
@@ -207,4 +253,4 @@ class TalbotAgent:
         """
         self.logger.debug(f"Resetting state for a new game.")
         self.mcts = None
-        self.use_resignation = self.talbot_config['training'] and random.random() < self.talbot_config['resignation_probability']
+        self.use_resignation = random.random() < self.talbot_config['resignation_probability']
