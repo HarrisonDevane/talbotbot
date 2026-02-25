@@ -104,7 +104,7 @@ class TalbotAgent:
             draw_move_values = {}
             for move in draw_moves:
                 child = self.mcts.root.children[move]
-                average_value = child.calculate_v_mix()
+                average_value = -child.calculate_v_mix()
                 draw_move_values[move] = average_value
 
             # Find the maximum average value
@@ -193,16 +193,16 @@ class TalbotAgent:
                 max_visit_indices = np.where(visits == max_visit_count)[0]
                 best_idx = max_visit_indices[np.argmax([visited_nodes[i].gumbel_score for i in max_visit_indices])]
                 best_node = visited_nodes[best_idx]
-                best_q_val = best_node.calculate_v_mix()
+                best_q_val = -best_node.calculate_v_mix()
                 
                 valid_indices = []
                 for i, node in enumerate(visited_nodes):
-                    node_q_val = node.calculate_v_mix()
+                    node_q_val = -node.calculate_v_mix()
                     if (best_q_val - node_q_val) <= self.talbot_config['temperature_blunder_threshold']:
                         valid_indices.append(i)
                 
                 # Hardcode the top move to the target percentage (e.g., 0.7)
-                act_probs = np.zeros(len(moves), dtype=np.float32)
+                act_probs = np.zeros(len(visited_nodes), dtype=np.float32)
                 top_prob = self.talbot_config['temperature_top_move']
                 act_probs[best_idx] = top_prob
                 

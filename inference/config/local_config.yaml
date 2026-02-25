@@ -1,6 +1,6 @@
 game:
-  white_player: 'talbot'
-  black_player: 'human'
+  white_player: 'human'
+  black_player: 'talbot'
   initial_fen: Null
   white_perspective: True
 

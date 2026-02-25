@@ -28,7 +28,7 @@ data_generation:
   gumbel_search_budget: [32, 32, 32, 32]             # Search depth distribution (k = 2^number, search depth = sum)
   temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
   temperature_top_move: 0.6                          # Probability the top move is played
-  temperature_blunder_threshold: 1.0                 # Threshold for ignoring blunders
+  temperature_blunder_threshold: 0.2                 # Threshold for ignoring blunders
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.90                          # Bot resigns to save compute time
@@ -42,7 +42,6 @@ training:
   replacement: True                                  # Allow sampling the same position twice in one batch
   policy_loss_weight: 1.0                            # Weight for Move Prediction loss
   value_loss_weight: 1.0                             # Weight for Win/Loss Prediction loss
-  entropy_loss_weight: 0.01                          # Weight for entropy regularization term
   log_interval: 1                                    # Log training stats
   weight_decay: 1e-4                                 # L2 Regularization
   lr_high: 1e-1                                      # SGD Learning Rate for different phases of training
