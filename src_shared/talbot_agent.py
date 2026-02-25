@@ -223,12 +223,13 @@ class TalbotAgent:
                 
                 act_probs /= np.sum(act_probs)
 
-                move_probs = [(moves[i], act_probs[i]) for i in range(len(moves)) if act_probs[i] > 0]
+                move_probs = [(visited_nodes[i].move, act_probs[i]) for i in range(len(visited_nodes)) if act_probs[i] > 0]
                 move_probs.sort(key=lambda x: x[1], reverse=True)
                 dist_str = " | ".join([f"{m}: {p:.3f}" for m, p in move_probs])
                 self.logger.info(f"Action Probabilities: {dist_str}")
                 
-                best_move = moves[np.random.choice(len(moves), p=act_probs)]
+                chosen_idx = np.random.choice(len(visited_nodes), p=act_probs)
+                best_move = visited_nodes[chosen_idx].move
                 
             else:
                  max_visit_count = max(c.visits for c in visited_nodes)
