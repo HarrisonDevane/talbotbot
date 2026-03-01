@@ -408,7 +408,7 @@ cdef class MCTSEngine:
         """
         cdef int phase_budget
         cdef int sims_per_candidate
-        cdef list all_moves
+        cdef list all_nodes
         cdef list active_candidates
         cdef list child_candidates
         cdef MCTSNode_c.MCTSNode child
@@ -441,30 +441,31 @@ cdef class MCTSEngine:
         self._submit_batch()
         self._wait_for_inference()
 
-        all_moves = list(self.root.children.keys())
-                
-        # Cap k at the actual number of legal moves available on the board
-        actual_k = min(1 << len(phase_budgets), len(all_moves))
-        self.logger.info(1 << len(phase_budgets))
+        all_nodes = list(self.root.children.values())
         active_candidates = []
         
         # 3. Initialize Gumbel Noise
-        for move in all_moves:
-            child = self.root.children[move]
+        for child in all_nodes:
             child.gumbel_noise = np.random.gumbel(0, self.gumbel_noise)
             child.gumbel_score = child.gumbel_noise + child.raw_logit
 
             # Check for terminal nodes in all children
             if child.board.is_game_over(claim_draw=True):
                 self._handle_terminal_node(child)
-            
-            active_candidates.append(child)
+            else:
+                active_candidates.append(child)
 
-        self._log_tournament_results(active_candidates, "Initial candidates:")
+        # Cap k at the actual number of legal moves (minus terminal states) available on the board
+        actual_k = min(1 << len(phase_budgets), len(active_candidates))
+        self.logger.info(1 << len(phase_budgets))
+
+        if len(active_candidates) == 0:
+            return self.simulation_count
+
+        self._log_tournament_results(all_nodes, "Initial candidates:")
 
         # 4. Initial Pruning (Top-k by prior + noise)
         active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
-        child_candidates = list(active_candidates)
         active_candidates = active_candidates[:actual_k]
 
         # 5. Explicit Halving Loop
@@ -519,15 +520,15 @@ cdef class MCTSEngine:
 
         
         # 6. Final Score Update
-        max_visits_final = max([c.visits for c in child_candidates if c.visits > 0], default=1.0)
+        max_visits_final = max([c.visits for c in all_nodes if c.visits > 0], default=1.0)
         root_v_mix = self.root.calculate_v_mix()
 
-        for child in child_candidates:
+        for child in all_nodes:
             child.calculate_gumbel_score(self.gumbel_c_visit, self.gumbel_c_scale, max_visits_final, root_v_mix)
 
         
         # Log Final Standings
-        self._log_tournament_results(child_candidates, 'Final scores')
+        self._log_tournament_results(all_nodes, 'Final scores')
 
         # Logging Timings
         self.logger.info(f"--- Gumbel Search ({self.simulation_count} sims) Timings ---")
