@@ -12,7 +12,7 @@ class InferenceBatcher:
     A dedicated class to handle batched model inference in a separate process,
     writing results directly to shared memory buffers.
     """
-    def __init__(self, name, model_path, model_config, batch_size, batch_timeout, log_dir, logging_level):
+    def __init__(self, name, model_path, model_config, batch_size, batch_timeout, log_dir, logging_level, training):
         self.name = name
         self.model_path = model_path
         self.model_config = model_config
@@ -22,6 +22,7 @@ class InferenceBatcher:
         self.logging_level = logging_level
         self.model = None
         self.logger = None
+        self.training = training
 
         # These attributes will be set in the run method
         self.inference_queue = None
@@ -29,8 +30,8 @@ class InferenceBatcher:
         self.shared_input_buffer = None
         self.shared_value_buffer = None
         self.shared_policy_buffer = None
-        self.weight_update_event = None
         self.stop_event = None
+        self.local_model_step = None
 
         # Set the number of threads for internal PyTorch CPU operations.
         torch.set_num_threads(1)
@@ -57,6 +58,7 @@ class InferenceBatcher:
         logger.addHandler(file_handler)
         self.logger = logger
         return logger
+    
 
 
     def load_model(self):
@@ -105,7 +107,7 @@ class InferenceBatcher:
         psutil.Process().cpu_affinity(core_id)
 
 
-    def run(self, output_dir, inference_queue, result_queues, core_id, shared_input_buffer, shared_policy_buffer, shared_value_buffer, weight_update_event, stop_event, current_steps, rotation_interval):
+    def run(self, output_dir, inference_queue, result_queues, core_id, shared_input_buffer, shared_policy_buffer, shared_value_buffer, stop_event, current_steps, rotation_interval):
         """
         The main entry point for the batcher process.
         It sets up the process environment and then starts the main loop.
@@ -117,7 +119,6 @@ class InferenceBatcher:
         self.shared_input_buffer = shared_input_buffer
         self.shared_policy_buffer = shared_policy_buffer
         self.shared_value_buffer = shared_value_buffer
-        self.weight_update_event = weight_update_event
         self.stop_event = stop_event
         self.current_steps = current_steps
         self.rotation_interval = rotation_interval
@@ -128,12 +129,15 @@ class InferenceBatcher:
 
     def _run_loop(self):
         """The main loop for the batcher process."""
-        if self.current_steps:
+        if self.training:
             target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
             self.log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:06d}")
             os.makedirs(self.log_dir, exist_ok=True)
             self._setup_logger()
+            self.local_model_step = self.current_steps.value
         else:
+            self.log_dir = os.path.join(self.output_dir, f"inference")
+            os.makedirs(self.log_dir, exist_ok=True)
             self._setup_logger()
 
         self.load_model()
@@ -153,14 +157,13 @@ class InferenceBatcher:
         interval_total_inferences = 0
         
         while not self.stop_event.is_set():
-            if self.weight_update_event.is_set():
-                self.logger.debug("Weight update event detected. Reloading model from disk...")
+            if self.training and self.local_model_step < self.current_steps.value:
+                self.logger.info(f"Weight update event detected. Reloading model from step {self.current_steps.value}")
                 self.model = None
                 torch.cuda.empty_cache()
                 
                 self.load_model()
-                self.weight_update_event.clear()
-                self.logger.debug("Model weights synchronized successfully.")
+                self.local_model_step = self.current_steps.value
 
             # Collect requests from the inference queue.
             while len(requests) < self.batch_size:
@@ -283,7 +286,7 @@ class InferenceBatcher:
                 interval_total_processing_duration = 0.0
                 interval_total_inferences = 0
                 
-                if self.current_steps:
+                if self.training:
                     target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
                     new_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:06d}")
 

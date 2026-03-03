@@ -146,7 +146,7 @@ class DataGenerationTask:
     It manages the creation of inference and worker processes, and handles inter-process
     communication via queues.
     """
-    def __init__(self, output_dir, current_steps, rotation_interval, best_model_path, model_config, data_generation_config, state_config, weight_update_event):
+    def __init__(self, output_dir, current_steps, rotation_interval, best_model_path, model_config, data_generation_config, state_config):
         self.output_dir = output_dir
         self.best_model_path = best_model_path
         self.model_config = model_config
@@ -156,7 +156,6 @@ class DataGenerationTask:
         self.rotation_interval = rotation_interval
         self.num_workers = len(data_generation_config['game_worker_cores'])
         self.num_inference_batchers = len(data_generation_config['inference_worker_cores'])
-        self.weight_update_event = weight_update_event
 
         self.max_batch_size = self.num_workers * self.data_generation_config['batch_size_per_worker'] * self.data_generation_config['batch_size_factor']
 
@@ -313,7 +312,8 @@ class DataGenerationTask:
                     self.data_generation_config['batch_size_per_worker'] * self.num_workers,
                     self.data_generation_config['batch_timeout'],
                     self.output_dir,
-                    self.data_generation_config['inference_logging_level']
+                    self.data_generation_config['inference_logging_level'],
+                    True
                 )
 
                 p = mp.Process(
@@ -321,7 +321,7 @@ class DataGenerationTask:
                     args=(self.output_dir, self.inference_queues[i], self.result_queues, 
                         self.data_generation_config['inference_worker_cores'][i], 
                         self.shared_input_buffer, self.shared_policy_buffer, 
-                        self.shared_value_buffer, self.weight_update_event,
+                        self.shared_value_buffer,
                         self.stop_event, self.current_steps,self.rotation_interval),
                     daemon=True
                 )

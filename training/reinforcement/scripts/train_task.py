@@ -193,7 +193,7 @@ class TrainTask:
             total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
                          (value_loss * self.training_config['value_loss_weight'])
             
-            self.logger.info(f"Training Step {global_step}: "
+            self.logger.info(f"Training Step {global_step+1}: "
                     f"P_Loss={(policy_loss.item() * self.training_config['policy_loss_weight']):.4f}, "
                     f"V_Loss={(value_loss.item() * self.training_config['value_loss_weight']):.4f}, "
                     f"T_Loss={total_loss.item():.4f}, "

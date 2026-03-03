@@ -75,8 +75,6 @@ class RLOrchestrator:
         
         # Logger now points to the correct versioned folder immediately
         self.logger = self._setup_persistent_logger(initial_log_dir)
-
-        self.weight_update_event = mp.Event()
         self.best_model_path = os.path.abspath(os.path.join(RL_DIR, "best_models", "best_model.pth"))
 
         if not os.path.exists(self.best_model_path):
@@ -260,7 +258,6 @@ class RLOrchestrator:
             model_config=self.params_config['model'],
             data_generation_config=self.params_config['data_generation'],
             state_config=self.state_config,
-            weight_update_event=self.weight_update_event
         )
 
         self.train_task = TrainTask(
@@ -303,9 +300,6 @@ class RLOrchestrator:
 
             shutil.copy(test_model_path, self.best_model_path)
             os.remove(test_model_path)
-            
-            # Signal InferenceBatchers to reload from disk
-            self.weight_update_event.set()
 
             # --- Step 5: Update State ---
             with self.current_steps.get_lock():

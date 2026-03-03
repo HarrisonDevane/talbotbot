@@ -398,8 +398,6 @@ def main():
     # Inference Queues
     inference_queue = mp.Queue()
     result_queue = mp.Queue() 
-
-    weight_update_event = mp.Event()
     stop_event = mp.Event()
 
     model_path = os.path.abspath(os.path.join(project_root, model_config['model_path']))
@@ -412,7 +410,8 @@ def main():
         batch_size=max_batch_size, 
         batch_timeout=evaluation_config['batch_timeout'],
         log_dir=log_dir, 
-        logging_level=evaluation_config['inference_logging_level']
+        logging_level=evaluation_config['inference_logging_level'],
+        training=False
     )
     
     # Batcher expects a list of result queues even if it's just one
@@ -424,7 +423,6 @@ def main():
         shared_input_buffer, 
         shared_policy_buffer, 
         shared_value_buffer,
-        weight_update_event,
         stop_event,
         None,
         None)

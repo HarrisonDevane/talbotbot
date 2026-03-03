@@ -48,7 +48,7 @@ training:
   lr_mid_cutoff: 10000
   lr_low: 1e-3
   momentum_rate: 0.9                                 # SGD Momentum
-  data_loader_workers: 4                             # CPU threads loading data from HDF5
+  data_loader_workers: 1                             # CPU threads loading data from HDF5
   dropout_rate_conv: 0.0                             # Dropout in convolutional layers
   dropout_rate_fc: 0.0                               # Dropout in fully connected head
   dropout_conv_start_block: 10                       # If using dropout, start at block 10
