@@ -63,7 +63,7 @@ class RLOrchestrator:
         # Calculate the correct initial folder based on loaded state
         rotation_interval = self.params_config['global']['logging_rotation_steps']
         target_folder_step = (self.current_steps.value // rotation_interval) * rotation_interval
-        initial_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:05d}")
+        initial_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:06d}")
         
         os.makedirs(initial_log_dir, exist_ok=True)
         
@@ -273,7 +273,7 @@ class RLOrchestrator:
         while self.current_steps.value < self.total_steps:
             rotation_interval = self.params_config['global']['logging_rotation_steps']
             target_folder_step = ((self.current_steps.value // rotation_interval) * rotation_interval)
-            new_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:05d}")
+            new_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:06d}")
             
             if new_log_dir != current_log_dir:
                 os.makedirs(new_log_dir, exist_ok=True)
@@ -319,21 +319,21 @@ class RLOrchestrator:
                 # Save current best model with step metadata
                 model_backup_path = os.path.join(
                     backup_dir, 
-                    f'step_{self.current_steps.value:05d}_model.pth'
+                    f'step_{self.current_steps.value:06d}_model.pth'
                 )
                 shutil.copy(self.best_model_path, model_backup_path)
 
                 buffer_backup_path = os.path.join(
                     backup_dir, 
-                    f'step_{self.current_steps.value:05d}_replay_memory.hdf5'
+                    f'step_{self.current_steps.value:06d}_replay_memory.hdf5'
                 )
                 
                 self.logger.info(f"Creating periodic backup at step {self.current_steps.value}...")
                 shutil.copy(self.buffer_file_path, buffer_backup_path)
 
                 # Backup the state and config files as well
-                shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(current_log_dir, f'step_{self.current_steps.value:05d}_state.yaml'))
-                shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_steps.value:05d}_config.yaml'))
+                shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(current_log_dir, f'step_{self.current_steps.value:06d}_state.yaml'))
+                shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_steps.value:06d}_config.yaml'))
 
         # Training loop is finished
         self.logger.info("Total training steps reached. Shutting down workers...")

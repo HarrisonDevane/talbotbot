@@ -234,7 +234,7 @@ class DataGenerationTask:
                 local_step_val = current_steps.value
             
             target_folder_step = (local_step_val // rotation_interval) * rotation_interval
-            current_run_dir = os.path.join(output_dir, f"run_step_{target_folder_step:05d}")
+            current_run_dir = os.path.join(output_dir, f"run_step_{target_folder_step:06d}")
 
             # 2. Update logger if we crossed a step threshold
             if current_run_dir != last_log_dir:

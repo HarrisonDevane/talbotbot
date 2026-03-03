@@ -130,7 +130,7 @@ class InferenceBatcher:
     def _run_loop(self):
         """The main loop for the batcher process."""
         target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
-        last_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:05d}")
+        last_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:06d}")
         os.makedirs(last_log_dir, exist_ok=True)
 
         self._setup_logger(self.name, self.logging_level, os.path.join(last_log_dir, f"{self.name}.log"))
@@ -282,7 +282,7 @@ class InferenceBatcher:
                 interval_total_inferences = 0
                 
                 target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
-                new_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:05d}")
+                new_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:06d}")
 
                 if new_log_dir != last_log_dir:
                     os.makedirs(new_log_dir, exist_ok=True)
