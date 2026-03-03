@@ -154,13 +154,13 @@ class InferenceBatcher:
         
         while not self.stop_event.is_set():
             if self.weight_update_event.is_set():
-                self.logger.info("Weight update event detected. Reloading model from disk...")
+                self.logger.debug("Weight update event detected. Reloading model from disk...")
                 self.model = None
                 torch.cuda.empty_cache()
                 
                 self.load_model()
                 self.weight_update_event.clear()
-                self.logger.info("Model weights synchronized successfully.")
+                self.logger.debug("Model weights synchronized successfully.")
 
             # Collect requests from the inference queue.
             while len(requests) < self.batch_size:
