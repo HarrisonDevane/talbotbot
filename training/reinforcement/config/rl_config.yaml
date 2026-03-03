@@ -27,7 +27,7 @@ data_generation:
   gumbel_search_budget: [64,64,64,64]                # Search depth distribution (k = 2^number, search depth = sum)
   temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
   temperature_top_move: 0.6                          # Probability the top move is played
-  temperature_blunder_threshold: 1.0                 # Threshold for ignoring blunders
+  temperature_blunder_threshold: 2.0                 # Threshold for ignoring blunders
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.90                          # Bot resigns to save compute time
