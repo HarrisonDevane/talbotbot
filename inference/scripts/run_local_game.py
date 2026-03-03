@@ -399,6 +399,9 @@ def main():
     inference_queue = mp.Queue()
     result_queue = mp.Queue() 
 
+    weight_update_event = mp.Event()
+    stop_event = mp.Event()
+
     model_path = os.path.abspath(os.path.join(project_root, model_config['model_path']))
     inference_core_id = evaluation_config['inference_worker_cores'][0]
     
@@ -414,12 +417,17 @@ def main():
     
     # Batcher expects a list of result queues even if it's just one
     inference_process = mp.Process(target=inference_batcher.run, daemon=True, args=(
+        log_dir,
         inference_queue, 
         [result_queue], 
         inference_core_id,
         shared_input_buffer, 
         shared_policy_buffer, 
-        shared_value_buffer)
+        shared_value_buffer,
+        weight_update_event,
+        stop_event,
+        None,
+        None)
     )
     inference_process.start()
     logger.info(f"Inference Batcher started on core {inference_core_id} (PID: {inference_process.pid})")
@@ -468,13 +476,17 @@ def main():
 
     gui.set_controller(controller)
     
-    # Ensure the Inference Batcher is terminated when the script exits
     def shutdown_processes():
+        logger.info("Signaling Inference Batcher to stop...")
+        stop_event.set() # Let the batcher break its while loop safely
+        
         if inference_process and inference_process.is_alive():
-            logger.info("Terminating Inference Batcher process...")
-            inference_process.terminate()
-            inference_process.join()
-            logger.info("Inference Batcher terminated.")
+            inference_process.join(timeout=1.0)
+            if inference_process.is_alive():
+                logger.info("Force terminating Inference Batcher process...")
+                inference_process.terminate()
+                inference_process.join()
+        logger.info("Inference Batcher terminated.")
     
     atexit.register(shutdown_processes)
 

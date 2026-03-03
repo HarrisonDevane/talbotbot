@@ -5,7 +5,7 @@ game:
   white_perspective: True
 
 model:
-  model_path: 'training/reinforcement/rl_cycles/best_models/best_model.pth'
+  model_path: 'training/reinforcement/rl_dir/best_models/best_model.pth'
   input_planes: 69
   filters: 128
   resblocks: 16

@@ -39,14 +39,13 @@ class InferenceBatcher:
         self.use_fp16 = self.device.type == 'cuda'
 
 
-    def _setup_logger(self, name=None, level=None, log_file=None):
+    def _setup_logger(self):
         """Sets up the logger for this specific process."""
         # Use provided arguments or fall back to init defaults
-        level = level or self.logging_level
-        log_file = log_file or os.path.join(self.log_dir, f"inference_batcher_{self.name}.log")
+        log_file = os.path.join(self.log_dir, f"inference_batcher_{self.name}.log")
 
         logger = logging.getLogger(f"InferenceBatcher_{self.name}") # Unique name per batcher
-        logger.setLevel(level)
+        logger.setLevel(self.logging_level)
         
         # Clear existing handlers to prevent duplicate logs after rotation
         if logger.hasHandlers():
@@ -129,11 +128,14 @@ class InferenceBatcher:
 
     def _run_loop(self):
         """The main loop for the batcher process."""
-        target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
-        last_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:06d}")
-        os.makedirs(last_log_dir, exist_ok=True)
+        if self.current_steps:
+            target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
+            last_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:06d}")
+            os.makedirs(last_log_dir, exist_ok=True)
+            self._setup_logger()
+        else:
+            self._setup_logger()
 
-        self._setup_logger(self.name, self.logging_level, os.path.join(last_log_dir, f"{self.name}.log"))
         self.load_model()
         
         stream = None
@@ -281,16 +283,17 @@ class InferenceBatcher:
                 interval_total_processing_duration = 0.0
                 interval_total_inferences = 0
                 
-                target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
-                new_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:06d}")
+                if self.current_steps:
+                    target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
+                    new_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:06d}")
 
-                if new_log_dir != last_log_dir:
-                    os.makedirs(new_log_dir, exist_ok=True)
-                    last_log_dir = new_log_dir
-                    # Rotate the logger to the new directory
-                    self._setup_logger(
-                        self.name, 
-                        self.logging_level, 
-                        os.path.join(new_log_dir, f"{self.name}.log")
-                    )
-                    self.logger.info(f"Inference Batcher rotated to new log directory: {new_log_dir}")
+                    if new_log_dir != last_log_dir:
+                        os.makedirs(new_log_dir, exist_ok=True)
+                        last_log_dir = new_log_dir
+                        # Rotate the logger to the new directory
+                        self._setup_logger(
+                            self.name, 
+                            self.logging_level, 
+                            os.path.join(new_log_dir, f"{self.name}.log")
+                        )
+                        self.logger.info(f"Inference Batcher rotated to new log directory: {new_log_dir}")
