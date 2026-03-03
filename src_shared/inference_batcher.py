@@ -130,8 +130,8 @@ class InferenceBatcher:
         """The main loop for the batcher process."""
         if self.current_steps:
             target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
-            last_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:06d}")
-            os.makedirs(last_log_dir, exist_ok=True)
+            self.log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:06d}")
+            os.makedirs(self.log_dir, exist_ok=True)
             self._setup_logger()
         else:
             self._setup_logger()
@@ -287,13 +287,9 @@ class InferenceBatcher:
                     target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
                     new_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:06d}")
 
-                    if new_log_dir != last_log_dir:
+                    if new_log_dir != self.log_dir:
                         os.makedirs(new_log_dir, exist_ok=True)
-                        last_log_dir = new_log_dir
+                        self.log_dir = new_log_dir
                         # Rotate the logger to the new directory
-                        self._setup_logger(
-                            self.name, 
-                            self.logging_level, 
-                            os.path.join(new_log_dir, f"{self.name}.log")
-                        )
+                        self._setup_logger()
                         self.logger.info(f"Inference Batcher rotated to new log directory: {new_log_dir}")
