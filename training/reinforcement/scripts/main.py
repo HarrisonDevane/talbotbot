@@ -47,7 +47,13 @@ class RLOrchestrator:
                     samples_generated: 0        # Total positions generated (including overwritten ones)
                     hours_generating: 0         # Total hours spent in self-play
                     hours_training: 0           # Total hours spent updating weights
-                    self_play_entropy: 0.0 
+                    self_play_entropy: 0.0
+                
+                # Statistics from current save interval                                  
+                current_interval:
+                    samples_generated: 0        # Positions generated in the current specific cycle
+                    games_played: 0             # Number of games played this cycle
+                    self_play_entropy: 0.0      # Entropy  from self play games
                 """).strip()
             
             with open(CONFIG_RL_STATE_FILE, 'w') as f:
@@ -309,6 +315,10 @@ class RLOrchestrator:
             self.state_config['state']['lifetime']['samples_generated'] += int(len(new_data_chunk))
             self.state_config['state']['lifetime']['games_played'] += int(games_in_chunk)
             self.state_config['state']['lifetime']['self_play_entropy'] += int(round(chunk_entropy, 4))
+
+            self.state_config['state']['current_interval']['samples_generated'] += int(len(new_data_chunk))
+            self.state_config['state']['current_interval']['games_played'] += int(games_in_chunk)
+            self.state_config['state']['current_interval']['self_play_entropy'] += int(round(chunk_entropy, 4))
             
             self._save_state()
 
@@ -334,6 +344,10 @@ class RLOrchestrator:
                 # Backup the state and config files as well
                 shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(current_log_dir, f'step_{self.current_steps.value:06d}_state.yaml'))
                 shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_steps.value:06d}_config.yaml'))
+
+                self.state_config['state']['current_interval']['samples_generated'] = 0
+                self.state_config['state']['current_interval']['games_played'] = 0
+                self.state_config['state']['current_interval']['self_play_entropy'] = 0
 
         # Training loop is finished
         self.logger.info("Total training steps reached. Shutting down workers...")
