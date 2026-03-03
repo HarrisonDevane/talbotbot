@@ -327,6 +327,7 @@ class DataGenerationTask:
                 )
                 self.inference_processes.append(p)
                 p.start()
+                time.sleep(1.0)
 
             # 2. Start Game Workers
             for i in range(self.num_workers):
