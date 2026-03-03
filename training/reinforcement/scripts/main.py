@@ -285,7 +285,7 @@ class RLOrchestrator:
             start_data_gen_time = time.time()
             new_data_chunk, games_in_chunk, chunk_entropy = next(data_iterator)
             total_data_gen_time = time.time() - start_data_gen_time
-            self.state_config['state']['lifetime']['hours_generating'] = round(self.state_config['state']['lifetime']['hours_generating']  + (total_data_gen_time / 3600), 2)
+            self.state_config['state']['lifetime']['hours_generating'] = round(self.state_config['state']['lifetime']['hours_generating']  + (total_data_gen_time / 3600), 4)
 
             # --- Step 2: Update Buffer (SWMR) ---
             self._update_circular_buffer(new_data_chunk)
@@ -293,7 +293,7 @@ class RLOrchestrator:
             start_train_time = time.time()
             test_model_path = self.train_task.run_single_step(current_log_dir, self.state_config)
             total_train_time = time.time() - start_train_time
-            self.state_config['state']['lifetime']['hours_training'] = round(self.state_config['state']['lifetime']['hours_training']  + (total_train_time / 3600), 2)
+            self.state_config['state']['lifetime']['hours_training'] = round(self.state_config['state']['lifetime']['hours_training']  + (total_train_time / 3600), 4)
 
             shutil.copy(test_model_path, self.best_model_path)
             os.remove(test_model_path)
@@ -308,7 +308,7 @@ class RLOrchestrator:
             self.state_config['state']['lifetime']['training_steps'] = int(self.current_steps.value)
             self.state_config['state']['lifetime']['samples_generated'] += int(len(new_data_chunk))
             self.state_config['state']['lifetime']['games_played'] += int(games_in_chunk)
-            self.state_config['state']['lifetime']['self_play_entropy'] += int(round(chunk_entropy, 2))
+            self.state_config['state']['lifetime']['self_play_entropy'] += int(round(chunk_entropy, 4))
             
             self._save_state()
 
