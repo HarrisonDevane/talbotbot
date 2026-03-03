@@ -6,6 +6,7 @@ import psutil
 import torch
 import chess
 import chess.pgn
+import queue
 
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 rl_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
@@ -145,20 +146,21 @@ class DataGenerationTask:
     It manages the creation of inference and worker processes, and handles inter-process
     communication via queues.
     """
-    def __init__(self, output_dir, current_steps, best_model_path, model_config, data_generation_config, state_config):
+    def __init__(self, output_dir, current_steps, rotation_interval, best_model_path, model_config, data_generation_config, state_config, weight_update_event):
         self.output_dir = output_dir
         self.best_model_path = best_model_path
         self.model_config = model_config
         self.data_generation_config = data_generation_config
         self.state_config = state_config
         self.current_steps = current_steps
+        self.rotation_interval = rotation_interval
         self.num_workers = len(data_generation_config['game_worker_cores'])
         self.num_inference_batchers = len(data_generation_config['inference_worker_cores'])
+        self.weight_update_event = weight_update_event
 
         self.max_batch_size = self.num_workers * self.data_generation_config['batch_size_per_worker'] * self.data_generation_config['batch_size_factor']
 
         # Create Global Shared Buffers (Single Instance)
-        # Policy (float16)
         self.shared_input_buffer = torch.zeros(
             self.max_batch_size, src_shared.utils.INPUT_CHANNELS, src_shared.utils.BOARD_DIM, src_shared.utils.BOARD_DIM, dtype=torch.float32
         ).share_memory_()
@@ -175,12 +177,6 @@ class DataGenerationTask:
         self.buffer_free_slots = mp.Queue()
         for i in range(self.max_batch_size):
             self.buffer_free_slots.put(i)
-
-        self.main_logger = self._setup_logger(
-            "SelfPlayManager", 
-            self.data_generation_config['main_logging_level'],
-            os.path.join(self.output_dir, f"data_generation_manager.log")
-        )
 
         # Multi-processing components
         self.inference_queues = [mp.Queue() for _ in range(self.num_inference_batchers)]
@@ -208,7 +204,7 @@ class DataGenerationTask:
 
 
     @staticmethod
-    def _worker_main(worker_id, core_id, output_dir, inference_queues, result_queue, data_queue, data_generation_config, current_steps, game_number_counter, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots):
+    def _worker_main(worker_id, core_id, output_dir, inference_queues, result_queue, data_queue, data_generation_config, current_steps, rotation_interval, game_number_counter, shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots, stop_event):
         """Target function for a single self-play worker process."""
 
         os.environ["OMP_NUM_THREADS"] = "1"
@@ -225,55 +221,63 @@ class DataGenerationTask:
         process.cpu_affinity([core_id])
         process.nice(psutil.HIGH_PRIORITY_CLASS)
 
-        # Create a new logger specific to this worker process
-        worker_logger = DataGenerationTask._setup_logger(
-            f"SelfPlayWorker_{worker_id}", 
-            data_generation_config['worker_logging_level'],
-            os.path.join(output_dir, f"data_generation_worker_{worker_id}.log")
-        )
-
-        worker_logger.info(f"Setting core to {core_id}")
-
         # Distribute workers evenly among inference queues
         inference_queue_for_worker = inference_queues[worker_id % len(inference_queues)]
         
-        # Instantiate the MCTS player, configured to use the queues
-        mcts_player = TalbotAgent(
-            name=f'talbot_{current_steps}',
-            logger=worker_logger,
-            talbot_config=data_generation_config,
-            worker_id=worker_id,
-            inference_queue=inference_queue_for_worker,
-            result_queue=result_queue,
-            shared_input_buffer=shared_input_buffer,
-            shared_policy_buffer=shared_policy_buffer,
-            shared_value_buffer=shared_value_buffer,
-            buffer_free_slots=buffer_free_slots
-        )
-        
-        game_manager = DataGenerationGameWorker(
-            logger=worker_logger,
-            player_1=mcts_player,
-            player_2=mcts_player,
-            data_generation_config=data_generation_config
-        )
-        
-        while True:  # Run games indefinitely until the main process terminates us
+        # Track the last used log directory to avoid redundant logger setups
+        last_log_dir = None
+        worker_logger = None
+
+        while not stop_event.is_set():
+            # 1. Dynamic Path Calculation based on current global steps
+            with current_steps.get_lock():
+                local_step_val = current_steps.value
+            
+            target_folder_step = (local_step_val // rotation_interval) * rotation_interval
+            current_run_dir = os.path.join(output_dir, f"run_step_{target_folder_step:05d}")
+
+            # 2. Update logger if we crossed a step threshold
+            if current_run_dir != last_log_dir:
+                os.makedirs(current_run_dir, exist_ok=True)
+                last_log_dir = current_run_dir
+                worker_logger = DataGenerationTask._setup_logger(
+                    f"Worker_{worker_id}", 
+                    data_generation_config['worker_logging_level'],
+                    os.path.join(current_run_dir, f"data_generation_worker_{worker_id}.log")
+                )
+                worker_logger.info(f"Worker {worker_id} pinned to core {core_id}. Logging to {current_run_dir}")
+
             with game_number_counter.get_lock():
                 current_game_number = game_number_counter.value
                 game_number_counter.value += 1
             
+            # 3. Instantiate Agent and Manager for the current game
+            mcts_player = TalbotAgent(
+                name=f'talbot_step_{local_step_val}',
+                logger=worker_logger,
+                talbot_config=data_generation_config,
+                worker_id=worker_id,
+                inference_queue=inference_queue_for_worker,
+                result_queue=result_queue,
+                shared_input_buffer=shared_input_buffer,
+                shared_policy_buffer=shared_policy_buffer,
+                shared_value_buffer=shared_value_buffer,
+                buffer_free_slots=buffer_free_slots
+            )
+            
+            game_manager = DataGenerationGameWorker(
+                logger=worker_logger,
+                player_1=mcts_player,
+                player_2=mcts_player,
+                data_generation_config=data_generation_config
+            )
+            
             game_start = time.time()
-            # The run_training_loop method plays a full game and returns the data
             training_data, simulation_count, game_entropy = game_manager.run_training_loop(current_game_number)
             game_end = time.time()
 
             game_time = game_end - game_start
             num_new_positions = len(training_data)
-
-            if training_data is None or num_new_positions == 0:
-                continue
-
             simulations_per_second = simulation_count / game_time
             
             worker_logger.critical(
@@ -282,101 +286,114 @@ class DataGenerationTask:
                 f"({num_new_positions} positions). Sending data to main process."
             )
             
-            data_queue.put((training_data, game_time, game_entropy))
+            # Use a non-blocking put or check stop_event to ensure we don't hang on shutdown
+            try:
+                data_queue.put((training_data, game_time, game_entropy), timeout=1.0)
+            except:
+                worker_logger.warning("Data queue full or shutdown initiated. Dropping game data.")
+
+        if worker_logger:
+            worker_logger.info(f"Worker {worker_id} received stop signal. Exiting.")
                 
 
-    def run_for_n_positions(self, total_positions: int, chunk_size: int):
-        """
-        Starts the multi-process pipeline, yields data in chunks,
-        and then terminates the processes gracefully.
-        """
+    def run_persistently(self, chunk_size: int):
+            """
+            Starts the multi-process pipeline and stays alive.
+            Yields data in chunks of 'chunk_size' indefinitely.
+            """
+            # Create a stop event for graceful shutdown
+            self.stop_event = mp.Event()
 
-        # Start inference batchers
-        for i in range(self.num_inference_batchers):
-            batcher = InferenceBatcher(
-                f'data_generation_{i}',
-                self.best_model_path,
-                self.model_config,
-                self.data_generation_config['batch_size_per_worker'] * self.num_workers,
-                self.data_generation_config['batch_timeout'],
-                self.output_dir,
-                self.data_generation_config['inference_logging_level']
-            )
-
-            p = mp.Process(
-                target=batcher.run,
-                args=(self.inference_queues[i], self.result_queues, self.data_generation_config['inference_worker_cores'][i], self.shared_input_buffer, self.shared_policy_buffer, self.shared_value_buffer),
-                daemon=True
-            )
-            self.inference_processes.append(p)
-            p.start()
-            self.main_logger.info(f"Inference batcher process {i} started (PID: {p.pid}, Cores: {self.data_generation_config['inference_worker_cores'][i]})")
-            time.sleep(1)
-
-        self.main_logger.info(f"Starting pipeline to generate a chunk of up to {total_positions} positions...")
-        
-         # Create and start all the worker processes
-        for i in range(self.num_workers):
-            p = mp.Process(
-                target=DataGenerationTask._worker_main,
-                args=(i, self.data_generation_config['game_worker_cores'][i], self.output_dir, self.inference_queues, self.result_queues[i], self.data_queue,
-                      self.data_generation_config, self.current_steps, self.game_number_counter, self.shared_input_buffer, self.shared_policy_buffer, self.shared_value_buffer, self.buffer_free_slots),
-                daemon=True
-            )
-            self.worker_processes.append(p)
-            p.start()
-            self.main_logger.info(f"Worker process {i} started (PID: {p.pid}).")
-            time.sleep(1)
-
-        positions_collected_total = 0
-        positions_in_current_chunk = 0
-        collected_data = []
-        games_in_chunk = 0
-        chunk_entropy = 0 
-
-        try:
-            while positions_collected_total < total_positions:
-                game_data, game_time, game_entropy = self.data_queue.get()              
-                games_in_chunk += 1
-                chunk_entropy += game_entropy
-                
-                collected_data.extend(game_data)
-                positions_in_current_chunk += len(game_data)
-                
-                self.main_logger.info(
-                    f"Collected a new game with {len(game_data)} positions in {game_time:.4f} seconds. "
-                    f"Positions in current chunk: {positions_in_current_chunk}/{chunk_size} positions. "
+            # 1. Start Inference Batchers
+            for i in range(self.num_inference_batchers):
+                batcher = InferenceBatcher(
+                    f'batcher_{i}',
+                    self.best_model_path,
+                    self.model_config,
+                    self.data_generation_config['batch_size_per_worker'] * self.num_workers,
+                    self.data_generation_config['batch_timeout'],
+                    self.output_dir,
+                    self.data_generation_config['inference_logging_level']
                 )
 
-                if positions_in_current_chunk >= chunk_size:
+                p = mp.Process(
+                    target=batcher.run,
+                    args=(self.output_dir, self.inference_queues[i], self.result_queues, 
+                        self.data_generation_config['inference_worker_cores'][i], 
+                        self.shared_input_buffer, self.shared_policy_buffer, 
+                        self.shared_value_buffer, self.weight_update_event,
+                        self.stop_event, self.current_steps,self.rotation_interval),
+                    daemon=True
+                )
+                self.inference_processes.append(p)
+                p.start()
 
-                    self.main_logger.info(f"Yielding a chunk of {len(collected_data)} positions.")
-                    yield collected_data, games_in_chunk, chunk_entropy
+            # 2. Start Game Workers
+            for i in range(self.num_workers):
+                p = mp.Process(
+                    target=DataGenerationTask._worker_main,
+                    args=(i, self.data_generation_config['game_worker_cores'][i], self.output_dir, 
+                        self.inference_queues, self.result_queues[i], self.data_queue,
+                        self.data_generation_config, self.current_steps, self.rotation_interval, self.game_number_counter, 
+                        self.shared_input_buffer, self.shared_policy_buffer, 
+                        self.shared_value_buffer, self.buffer_free_slots,
+                        self.stop_event),
+                    daemon=True
+                )
+                self.worker_processes.append(p)
+                p.start()
+                time.sleep(1.0)
+
+            collected_data = []
+            games_in_chunk = 0
+            chunk_entropy = 0 
+
+            # 3. Persistent Collection Loop
+            while not self.stop_event.is_set():
+                try:
+                    # Block until a game is finished by any worker
+                    game_data, game_time, game_entropy = self.data_queue.get(timeout=1.0)              
                     
-                    positions_collected_total += len(collected_data)
-                    positions_in_current_chunk = 0
-                    games_in_chunk = 0
-                    collected_data = []
-                    chunk_entropy = 0
+                    games_in_chunk += 1
+                    chunk_entropy += game_entropy
+                    collected_data.extend(game_data)
+                    
+                    # Check if we have reached the threshold requested by main.py
+                    if len(collected_data) >= chunk_size:
+                        yield collected_data, games_in_chunk, chunk_entropy
+                        
+                        # Reset chunk-specific stats but keep processes running
+                        collected_data = []
+                        games_in_chunk = 0
+                        chunk_entropy = 0
+                except queue.Empty:
+                    continue
 
-                    self.main_logger.info(f"Have processed {positions_collected_total} out of {total_positions} positions.")
 
-
-            if collected_data:
-                self.main_logger.info(f"Yielding final partial chunk of {len(collected_data)} positions.")
-                yield collected_data, games_in_chunk
-            
-            self.main_logger.info(f"Finished collecting {positions_collected_total} positions. Terminating processes...")
-
-        finally:
-            for p in self.inference_processes:
+    def terminate_all(self):
+        """
+        Gracefully shuts down all persistent worker and batcher processes.
+        """
+        # 1. Signal all processes to stop via the shared Event
+        if hasattr(self, 'stop_event'):
+            self.stop_event.set()
+        
+        # 2. Join and clean up Game Workers
+        for i, p in enumerate(self.worker_processes):
+            p.join(timeout=2)
+            if p.is_alive():
+                # Force kill if they don't exit within the timeout
                 p.terminate()
-            for p in self.worker_processes:
+                p.join()
+        
+        # 3. Join and clean up Inference Batchers
+        for i, p in enumerate(self.inference_processes):
+            p.join(timeout=2)
+            if p.is_alive():
+                # Force kill to ensure GPU memory is released
                 p.terminate()
-
-            for p in self.inference_processes:
                 p.join()
-            for p in self.worker_processes:
-                p.join()
-                
-            self.main_logger.info("All processes terminated. Data generation task complete.")
+        
+        # 4. Clear the process lists for safety
+        self.worker_processes.clear()
+        self.inference_processes.clear()

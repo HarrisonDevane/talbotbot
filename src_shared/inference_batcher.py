@@ -29,6 +29,8 @@ class InferenceBatcher:
         self.shared_input_buffer = None
         self.shared_value_buffer = None
         self.shared_policy_buffer = None
+        self.weight_update_event = None
+        self.stop_event = None
 
         # Set the number of threads for internal PyTorch CPU operations.
         torch.set_num_threads(1)
@@ -37,19 +39,25 @@ class InferenceBatcher:
         self.use_fp16 = self.device.type == 'cuda'
 
 
-    def _setup_logger(self):
+    def _setup_logger(self, name=None, level=None, log_file=None):
         """Sets up the logger for this specific process."""
-        log_file = os.path.join(self.log_dir, f"inference_batcher_{self.name}.log")
+        # Use provided arguments or fall back to init defaults
+        level = level or self.logging_level
+        log_file = log_file or os.path.join(self.log_dir, f"inference_batcher_{self.name}.log")
 
-        logger = logging.getLogger("InferenceBatcher")
-        logger.setLevel(self.logging_level)
-        if not logger.handlers:
-            formatter = logging.Formatter("[%(asctime)s][%(name)s] [%(levelname)s] %(message)s")
-            file_handler = logging.FileHandler(log_file, mode='a')
-            file_handler.setFormatter(formatter)
-            logger.addHandler(file_handler)
+        logger = logging.getLogger(f"InferenceBatcher_{self.name}") # Unique name per batcher
+        logger.setLevel(level)
+        
+        # Clear existing handlers to prevent duplicate logs after rotation
+        if logger.hasHandlers():
+            logger.handlers.clear()
+            
+        formatter = logging.Formatter("[%(asctime)s][%(name)s] [%(levelname)s] %(message)s")
+        file_handler = logging.FileHandler(log_file, mode='a')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
         self.logger = logger
-        self.logger.info("Inference batcher logger initialized.")
+        return logger
 
 
     def load_model(self):
@@ -64,15 +72,15 @@ class InferenceBatcher:
         )
 
         self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.logger.info(f"Model loaded successfully from {self.model_path}")
+        self.logger.debug(f"Model loaded successfully from {self.model_path}")
 
         self.model.to(self.device)
         # Convert model to half-precision if CUDA is available
         if self.use_fp16:
             self.model.half()
-            self.logger.info("Model converted to FP16 (half-precision).")
+            self.logger.debug("Model converted to FP16 (half-precision).")
         else:
-            self.logger.info("Running model in FP32 (full-precision) on CPU or non-FP16 compatible GPU.")
+            self.logger.debug("Running model in FP32 (full-precision) on CPU or non-FP16 compatible GPU.")
 
         self.model.eval()
 
@@ -98,17 +106,22 @@ class InferenceBatcher:
         psutil.Process().cpu_affinity(core_id)
 
 
-    def run(self, inference_queue, result_queues, core_id, shared_input_buffer, shared_policy_buffer, shared_value_buffer):
+    def run(self, output_dir, inference_queue, result_queues, core_id, shared_input_buffer, shared_policy_buffer, shared_value_buffer, weight_update_event, stop_event, current_steps, rotation_interval):
         """
         The main entry point for the batcher process.
         It sets up the process environment and then starts the main loop.
         """
         # Store queues and shared buffers as instance attributes
+        self.output_dir = output_dir
         self.inference_queue = inference_queue
         self.result_queues = result_queues
         self.shared_input_buffer = shared_input_buffer
         self.shared_policy_buffer = shared_policy_buffer
         self.shared_value_buffer = shared_value_buffer
+        self.weight_update_event = weight_update_event
+        self.stop_event = stop_event
+        self.current_steps = current_steps
+        self.rotation_interval = rotation_interval
 
         self._apply_process_settings(core_id)
         self._run_loop()
@@ -116,7 +129,11 @@ class InferenceBatcher:
 
     def _run_loop(self):
         """The main loop for the batcher process."""
-        self._setup_logger()
+        target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
+        last_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:05d}")
+        os.makedirs(last_log_dir, exist_ok=True)
+
+        self._setup_logger(self.name, self.logging_level, os.path.join(last_log_dir, f"{self.name}.log"))
         self.load_model()
         
         stream = None
@@ -133,7 +150,16 @@ class InferenceBatcher:
         interval_total_processing_duration = 0.0
         interval_total_inferences = 0
         
-        while True:
+        while not self.stop_event.is_set():
+            if self.weight_update_event.is_set():
+                self.logger.info("Weight update event detected. Reloading model from disk...")
+                self.model = None
+                torch.cuda.empty_cache()
+                
+                self.load_model()
+                self.weight_update_event.clear()
+                self.logger.info("Model weights synchronized successfully.")
+
             # Collect requests from the inference queue.
             while len(requests) < self.batch_size:
                 try:
@@ -254,3 +280,17 @@ class InferenceBatcher:
                 interval_batches_processed = 0
                 interval_total_processing_duration = 0.0
                 interval_total_inferences = 0
+                
+                target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
+                new_log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:05d}")
+
+                if new_log_dir != last_log_dir:
+                    os.makedirs(new_log_dir, exist_ok=True)
+                    last_log_dir = new_log_dir
+                    # Rotate the logger to the new directory
+                    self._setup_logger(
+                        self.name, 
+                        self.logging_level, 
+                        os.path.join(new_log_dir, f"{self.name}.log")
+                    )
+                    self.logger.info(f"Inference Batcher rotated to new log directory: {new_log_dir}")

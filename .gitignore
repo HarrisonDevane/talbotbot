@@ -82,12 +82,13 @@ training/supervised/v5_historic_input_channels/data/
 inference/logs
 
 # Reinforcement logs + data
-training/reinforcement/rl_cycles/**/*.hdf5
-training/reinforcement/rl_cycles/**/*.pth
-!training/reinforcement/rl_cycles/**/best_model.pth
-training/reinforcement/rl_cycles/iter_*/
-training/reinforcement/rl_cycles/circular_buffer.hdf5
-training/reinforcement/rl_cycles/backup/*
+training/reinforcement/rl_dir/**/*.hdf5
+training/reinforcement/rl_dir/**/*.pth
+!training/reinforcement/rl_dir/**/best_model.pth
+training/reinforcement/rl_dir/run_step_*/
+training/reinforcement/rl_dir/*.log
+training/reinforcement/rl_dir/circular_buffer.hdf5
+training/reinforcement/rl_dir/backup/*
 
 # Autorun script
 autorun.bat

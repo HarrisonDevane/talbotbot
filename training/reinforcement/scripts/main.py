@@ -8,6 +8,7 @@ import shutil
 import random
 import torch
 import textwrap
+import multiprocessing as mp
 
 from data_generation_task import DataGenerationTask
 from train_task import TrainTask
@@ -17,7 +18,7 @@ rl_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 
 from src_shared.model import ChessAIModel
 
-RL_CYCLES_DIR = os.path.abspath(os.path.join(rl_dir, "rl_cycles"))
+RL_DIR = os.path.abspath(os.path.join(rl_dir, "rl_dir"))
 CONFIG_RL_STATE_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_state.yaml"))
 CONFIG_RL_PARAMS_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_config.yaml"))
 
@@ -41,19 +42,12 @@ class RLOrchestrator:
 
                 # Lifetime Statistics (Global accumulators)
                 lifetime:
-                    cycle_idx: 1                # Tracks the macro loop (Generate -> Train -> Eval)
                     training_steps: 0           # Tracks global gradient updates (batches trained)
                     games_played: 0             # Total games played since inception
                     samples_generated: 0        # Total positions generated (including overwritten ones)
                     hours_generating: 0         # Total hours spent in self-play
                     hours_training: 0           # Total hours spent updating weights
-
-                # Ephemeral / Current Cycle Stats
-                current_cycle:
-                    samples_collected: 0        # Positions generated in the current specific cycle
-                    games_played: 0             # Number of games played this cycle
-                    self_play_entropy: 0.0      # Entropy  from self play games
-                                                 
+                    self_play_entropy: 0.0 
                 """).strip()
             
             with open(CONFIG_RL_STATE_FILE, 'w') as f:
@@ -62,22 +56,30 @@ class RLOrchestrator:
         with open(CONFIG_RL_STATE_FILE, 'r') as f:
             self.state_config = yaml.safe_load(f)
 
-        self.current_steps = self.state_config['state']['lifetime']['training_steps']
-        self.current_cycle = self.state_config['state']['lifetime']['cycle_idx']
-
+        self.current_steps = mp.Value('i', self.state_config['state']['lifetime']['training_steps'])
         self.total_steps = self.params_config['global']['total_training_steps']
         self.save_interval = self.params_config['global']['save_interval_steps']
 
+        # Calculate the correct initial folder based on loaded state
+        rotation_interval = self.params_config['global']['logging_rotation_steps']
+        target_folder_step = (self.current_steps.value // rotation_interval) * rotation_interval
+        initial_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:05d}")
+        
+        os.makedirs(initial_log_dir, exist_ok=True)
+        
+        # Logger now points to the correct versioned folder immediately
+        self.logger = self._setup_persistent_logger(initial_log_dir)
 
-        self.best_model_path = os.path.abspath(os.path.join(RL_CYCLES_DIR, "best_models", "best_model.pth"))
+        self.weight_update_event = mp.Event()
+        self.best_model_path = os.path.abspath(os.path.join(RL_DIR, "best_models", "best_model.pth"))
 
         if not os.path.exists(self.best_model_path):
             self._create_new_model()
 
-        os.makedirs(RL_CYCLES_DIR, exist_ok=True)
+        os.makedirs(RL_DIR, exist_ok=True)
 
         # Get buffer path from the global config file and make it absolute
-        buffer_file_name = os.path.abspath(os.path.join(RL_CYCLES_DIR, "replay_memory.hdf5"))
+        buffer_file_name = os.path.abspath(os.path.join(RL_DIR, "replay_memory.hdf5"))
         self.buffer_file_path = buffer_file_name
 
     def _create_new_model(self):
@@ -98,22 +100,28 @@ class RLOrchestrator:
             'model_state_dict': model.state_dict(),
         }
 
-        os.makedirs(os.path.join(RL_CYCLES_DIR, 'best_models'),  exist_ok=True)
+        os.makedirs(os.path.join(RL_DIR, 'best_models'),  exist_ok=True)
 
-        torch.save(model_dict, os.path.join(RL_CYCLES_DIR, 'best_models', 'initial_model.pth'))
-        torch.save(model_dict, os.path.join(RL_CYCLES_DIR, 'best_models', 'best_model.pth'))
+        torch.save(model_dict, os.path.join(RL_DIR, 'best_models', 'initial_model.pth'))
+        torch.save(model_dict, os.path.join(RL_DIR, 'best_models', 'best_model.pth'))
 
 
-    def _setup_cycle_logger(self, cycle_dir):
-        logger = logging.getLogger(f"RLOrchestrator_Cycle_{self.current_cycle}")
+    def _setup_persistent_logger(self, log_dir):
+        """
+        Configures a persistent logger for the current 1k-step rotation directory.
+        """
+        logger = logging.getLogger("RLOrchestrator")
         logger.setLevel(logging.INFO)
         
+        # Clear old handlers to avoid duplicate logging when rotating folders
         if logger.hasHandlers():
             logger.handlers.clear()
             
         formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
-        log_filename = "orchestrator.log"
-        file_handler = logging.FileHandler(os.path.join(cycle_dir, log_filename), mode='a')
+        log_filepath = os.path.join(log_dir, "orchestrator.log")
+        
+        # 'a' mode is critical for persisting logs if the script restarts
+        file_handler = logging.FileHandler(log_filepath, mode='a')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
         
@@ -124,18 +132,20 @@ class RLOrchestrator:
         with open(CONFIG_RL_STATE_FILE, 'w') as f:
             yaml.safe_dump(self.state_config, f)
 
+
+
     def get_dynamic_buffer_limit(self):
         """
         Calculates the target buffer capacity for the current training step.
         Returns a linear ramp from min_size to max_size.
         """
 
-        if self.current_steps >= self.params_config['global']['buffer_ramp_steps']:
+        if self.current_steps.value >= self.params_config['global']['buffer_ramp_steps']:
             return self.params_config['global']['max_buffer_size']
         
         # Linear Interpolation Formula
         # Capacity = Min + (Progress % * (Max - Min))
-        progress = self.current_steps / self.params_config['global']['buffer_ramp_steps']
+        progress = self.current_steps.value / self.params_config['global']['buffer_ramp_steps']
         growth_range = self.params_config['global']['max_buffer_size'] - self.params_config['global']['min_buffer_size']
         
         current_capacity = self.params_config['global']['min_buffer_size'] + (progress * growth_range)
@@ -151,18 +161,6 @@ class RLOrchestrator:
         values = np.array([item['value_target'] for item in new_data], dtype=np.float16)
 
         self.logger.info(f"Appending new data ({len(new_data)} positions) to the circular buffer: {self.buffer_file_path}")
-        
-        # Check for file corruption *before* opening for modification
-        if os.path.exists(self.buffer_file_path):
-            try:
-                with h5py.File(self.buffer_file_path, 'r') as hf_check:
-                    if not all(dset in hf_check for dset in ['inputs', 'policies', 'values']):
-                        raise Exception(
-                            f"Buffer file is logically corrupted. Missing one or more datasets: {list(hf_check.keys())}."
-                        )
-            except Exception as e:
-                self.logger.critical(f"FATAL: Buffer file is corrupted and cannot be used: {e}")
-                raise Exception("Buffer file is corrupted. Cannot proceed.") from e
 
         # Proceed with the original, efficient in-place modification
         current_size = self.state_config['state']['buffer']['count']
@@ -245,142 +243,125 @@ class RLOrchestrator:
 
     def run(self):
         """
-        The main orchestration loop.
+        Main persistent loop.
         """
-        while self.current_steps < self.total_steps:
-            # --- Setup cycle-specific directories and logger ---
-            cycle_dir = os.path.join(
-                RL_CYCLES_DIR, 
-                f"iter_{self.current_cycle:04d}_step_{self.current_steps}"
-            )            
-            os.makedirs(cycle_dir, exist_ok=True)
+        # 1. Initialize persistent generation ONCE
+        self.data_gen_task = DataGenerationTask(
+            output_dir=RL_DIR,
+            current_steps=self.current_steps,
+            rotation_interval=self.params_config['global']['logging_rotation_steps'],
+            best_model_path=self.best_model_path,
+            model_config=self.params_config['model'],
+            data_generation_config=self.params_config['data_generation'],
+            state_config=self.state_config,
+            weight_update_event=self.weight_update_event
+        )
+
+        self.train_task = TrainTask(
+            best_model_path=self.best_model_path,
+            model_config=self.params_config['model'],
+            training_config=self.params_config['training'],
+            state_config=self.state_config['state'],
+            global_config=self.params_config['global'],
+            hdf5_path=self.buffer_file_path,
+        )
+
+        # 2. Start the generator
+        data_iterator = self.data_gen_task.run_persistently(chunk_size=int(self.params_config['training']['batch_size'] / self.params_config['training']['sampling_ratio']))
+        current_log_dir = None
+
+        while self.current_steps.value < self.total_steps:
+            rotation_interval = self.params_config['global']['logging_rotation_steps']
+            target_folder_step = ((self.current_steps.value // rotation_interval) * rotation_interval)
+            new_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:05d}")
             
-            # --- Create a NEW logger for this cycle ---
-            self.logger = self._setup_cycle_logger(cycle_dir)
+            if new_log_dir != current_log_dir:
+                os.makedirs(new_log_dir, exist_ok=True)
+                current_log_dir = new_log_dir
+                self.logger = self._setup_persistent_logger(current_log_dir)
+                self.logger.info(f"New logging phase started at step {self.current_steps.value}")
 
+            # --- Step 1: Collect Data (1 Step worth) ---
+            start_data_gen_time = time.time()
+            new_data_chunk, games_in_chunk, chunk_entropy = next(data_iterator)
+            total_data_gen_time = time.time() - start_data_gen_time
+            self.state_config['state']['lifetime']['hours_generating'] = round(self.state_config['state']['lifetime']['hours_generating']  + (total_data_gen_time / 3600), 2)
 
-            self.logger.info(f"Orchestrator initialized. Reading state from: {CONFIG_RL_STATE_FILE}")
-            self.logger.info(f"Last saved self-play positions: {self.state_config['state']['current_cycle']['samples_collected']}")
-            self.logger.info(f"Current buffer size: {self.state_config['state']['buffer']['count']}")
-            
-            self.logger.info(f"Cycle-specific logs will be stored in: {cycle_dir}")
+            # --- Step 2: Update Buffer (SWMR) ---
+            self._update_circular_buffer(new_data_chunk)
 
-            # Step 1: Run self-play data generation in chunks
-            self.logger.info("1. Generating self-play data...")
-            
-            total_positions_for_cycle = self.params_config['global']['data_generation_positions_per_cycle']
-            save_interval = self.params_config['global']['data_generation_save_interval']
-            
-            # Get the starting point from the state config
-            positions_generated_current_cycle = self.state_config['state']['current_cycle']['samples_collected']
-            remaining_positions_current_cycle = total_positions_for_cycle - positions_generated_current_cycle
-            
-            # Instantiate the DataGenerationTask once for the cycle
-            if remaining_positions_current_cycle > 0:
-                data_generation_task = DataGenerationTask(
-                    output_dir=cycle_dir,
-                    current_steps=self.current_steps,
-                    best_model_path=self.best_model_path,
-                    model_config=self.params_config['model'],
-                    data_generation_config=self.params_config['data_generation'],
-                    state_config=self.state_config
-                )
-
-                start_data_gen_time = time.time()
-                for new_data_chunk, games_in_chunk, chunk_entropy in data_generation_task.run_for_n_positions(remaining_positions_current_cycle, save_interval):
-                             
-                    # Process the new chunk of data
-                    self._update_circular_buffer(new_data_chunk)
-                    
-                    self.state_config['state']['current_cycle']['samples_collected'] +=  len(new_data_chunk)
-                    self.state_config['state']['current_cycle']['games_played'] += games_in_chunk
-                    self.state_config['state']['current_cycle']['self_play_entropy'] = round(float(self.state_config['state']['current_cycle']['self_play_entropy'] + chunk_entropy), 2)
-                    
-                    self.state_config['state']['lifetime']['samples_generated'] += len(new_data_chunk)
-                    self.state_config['state']['lifetime']['games_played'] += games_in_chunk
-
-                    total_data_gen_time = time.time() - start_data_gen_time
-                    self.state_config['state']['lifetime']['hours_generating'] = round(self.state_config['state']['lifetime']['hours_generating']  + (total_data_gen_time / 3600), 2)
-                    start_data_gen_time = time.time()
-
-
-                    # Periodically save the state to the YAML file
-                    self.logger.info(
-                        f"Chunk saved. Total positions for cycle {self.current_cycle}: "
-                        f"{ len(new_data_chunk)}/{remaining_positions_current_cycle}. Saving state..."
-                    )
-                    self._save_state()
-
-                self.logger.info(f"--- Cycle {self.current_cycle} self-play completed successfully! ---")
-                self._save_state()
-                data_generation_task = None
-                            
-                            
-            # Step 2. Training
-            self.logger.info("2. Training a new model on the updated data buffer...")
             start_train_time = time.time()
-
-            train_task = TrainTask(
-                output_dir=cycle_dir,
-                best_model_path=self.best_model_path,
-                model_config=self.params_config['model'],
-                training_config=self.params_config['training'],
-                state_config=self.state_config['state'],
-                global_config=self.params_config['global'],
-                hdf5_path=self.buffer_file_path,
-                cycle_number=self.current_cycle,
-            )
-            test_model_path, steps = train_task.run_training_loop()
+            test_model_path = self.train_task.run_single_step(current_log_dir, self.state_config)
             total_train_time = time.time() - start_train_time
-
             self.state_config['state']['lifetime']['hours_training'] = round(self.state_config['state']['lifetime']['hours_training']  + (total_train_time / 3600), 2)
-            train_task = None
 
-            self.logger.info(f"2. Model has trained successfully for {steps} steps.")
-            self.current_steps += steps
-            self.state_config['state']['lifetime']['training_steps'] = self.current_steps
-                        
-            # Override the best model with the new model
-            self.logger.info(f"Saving new model from {test_model_path} to {self.best_model_path}...")
             shutil.copy(test_model_path, self.best_model_path)
             os.remove(test_model_path)
-                        
-            self.logger.info("Saving state for the next cycle...")
+            
+            # Signal InferenceBatchers to reload from disk
+            self.weight_update_event.set()
+
+            # --- Step 5: Update State ---
+            with self.current_steps.get_lock():
+                self.current_steps.value += 1
+
+            self.state_config['state']['lifetime']['training_steps'] = int(self.current_steps.value)
+            self.state_config['state']['lifetime']['samples_generated'] += int(len(new_data_chunk))
+            self.state_config['state']['lifetime']['games_played'] += int(games_in_chunk)
+            self.state_config['state']['lifetime']['self_play_entropy'] += int(round(chunk_entropy, 2))
+            
             self._save_state()
 
-            # Save config and state each cycle
-            self.logger.info(f"Saving current state as backup")
-            shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(cycle_dir, f'iter_{self.current_cycle:04d}_step_{self.current_steps}_state.yaml'))
+            if self.current_steps.value // self.save_interval > (self.current_steps.value - 1) // self.save_interval:
+                backup_dir = os.path.join(RL_DIR, 'backup')
+                os.makedirs(backup_dir, exist_ok=True)
 
-            self.logger.info(f"Saving current config as backup")
-            shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(cycle_dir, f'iter_{self.current_cycle:04d}_step_{self.current_steps}_config.yaml'))
+                # Save current best model with step metadata
+                model_backup_path = os.path.join(
+                    backup_dir, 
+                    f'step_{self.current_steps.value:05d}_model.pth'
+                )
+                shutil.copy(self.best_model_path, model_backup_path)
 
-            self.state_config['state']['current_cycle']['samples_collected'] = 0
-            self.state_config['state']['current_cycle']['games_played'] = 0
-            self.state_config['state']['current_cycle']['self_play_entropy'] = 0
-            self.state_config['state']['lifetime']['cycle_idx'] = self.current_cycle + 1
+                buffer_backup_path = os.path.join(
+                    backup_dir, 
+                    f'step_{self.current_steps.value:05d}_replay_memory.hdf5'
+                )
+                
+                self.logger.info(f"Creating periodic backup at step {self.current_steps.value}...")
+                shutil.copy(self.buffer_file_path, buffer_backup_path)
 
-            self._save_state()
+                # Backup the state and config files as well
+                shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(current_log_dir, f'step_{self.current_steps.value:05d}_state.yaml'))
+                shutil.copy(CONFIG_RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_steps.value:05d}_config.yaml'))
 
-            # Save copy of best model and replay buffer every save interval
-            if self.current_steps // self.save_interval > (self.current_steps - steps) // self.save_interval:
-                os.makedirs(os.path.join(RL_CYCLES_DIR, 'backup'),  exist_ok=True)
-
-                current_best_model = os.path.join(RL_CYCLES_DIR, f'best_models/iter_{self.current_cycle:04d}_step_{self.current_steps}_model.pth')
-
-                shutil.copy(self.best_model_path, current_best_model)
-
-                self.logger.info(f"Saving current circular buffer as backup")
-                shutil.copy(self.buffer_file_path, os.path.join(RL_CYCLES_DIR, f'backup/iter_{self.current_cycle:04d}_step_{self.current_steps}_replay_memory.hdf5'))
-
-            self.current_cycle += 1
-
-            # Increment loop
-            if self.current_steps <= self.total_steps:
-                self.logger.info(f"Sleeping for 10 seconds before starting cycle {self.current_cycle}...")
-                time.sleep(10)
+        # Training loop is finished
+        self.logger.info("Total training steps reached. Shutting down workers...")
         
+        # 1. Signal everyone to stop
+        self.data_gen_task.stop_event.set()
+        
+        # 2. Cleanup
+        self.data_gen_task.terminate_all()
+        
+        self.logger.info("All persistent tasks terminated. Orchestrator exiting.")
+                    
 
 if __name__ == "__main__":
     orchestrator = RLOrchestrator()
-    orchestrator.run()
+    try:
+        orchestrator.run()
+    except KeyboardInterrupt:
+        print("\nManual interruption detected. Shutting down...")
+    except Exception as e:
+        # Use the orchestrator logger if available, otherwise print
+        if orchestrator.logger:
+            orchestrator.logger.error(f"Orchestrator encountered an error: {e}", exc_info=True)
+        else:
+            print(f"Orchestrator encountered an error: {e}")
+    finally:
+            # Check if the task was initialized inside run()
+            if hasattr(orchestrator, 'self.data_gen_task'):
+                print("Cleaning up background workers...")
+                orchestrator.self.data_gen_task.terminate_all()
+            print("Shutdown complete.")
