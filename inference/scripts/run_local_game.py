@@ -425,6 +425,7 @@ def main():
         shared_value_buffer,
         stop_event,
         None,
+        None,
         None)
     )
     inference_process.start()
