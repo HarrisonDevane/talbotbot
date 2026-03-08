@@ -61,7 +61,7 @@ class InferenceBatcher:
     
 
 
-    def load_model(self):
+    def _load_model(self):
         """Load the model. This should be called inside the process."""
         self.model = ChessAIModel(
             num_input_planes=self.model_config['input_planes'],
@@ -112,7 +112,7 @@ class InferenceBatcher:
         psutil.Process().cpu_affinity(core_id)
 
 
-    def run(self, output_dir, inference_queue, result_queues, core_id, shared_input_buffer, shared_policy_buffer, shared_value_buffer, stop_event, current_steps, rotation_interval):
+    def run(self, output_dir, inference_queue, result_queues, core_id, shared_input_buffer, shared_policy_buffer, shared_value_buffer, stop_event, current_steps, sync_interval, rotation_interval):
         """
         The main entry point for the batcher process.
         It sets up the process environment and then starts the main loop.
@@ -126,6 +126,7 @@ class InferenceBatcher:
         self.shared_value_buffer = shared_value_buffer
         self.stop_event = stop_event
         self.current_steps = current_steps
+        self.sync_interval = sync_interval
         self.rotation_interval = rotation_interval
 
         self._apply_process_settings(core_id)
@@ -145,7 +146,7 @@ class InferenceBatcher:
             os.makedirs(self.log_dir, exist_ok=True)
             self._setup_logger()
 
-        self.load_model()
+        self._load_model()
         
         stream = None
         if self.device.type == 'cuda':
@@ -162,13 +163,16 @@ class InferenceBatcher:
         interval_total_inferences = 0
         
         while not self.stop_event.is_set():
-            if self.training and self.local_model_step < self.current_steps.value:
-                self.logger.info(f"Weight update event detected. Reloading model from step {self.current_steps.value}")
-                self.model = None
-                torch.cuda.empty_cache()
+            if self.training:
+                global_step = self.current_steps.value
                 
-                self.load_model()
-                self.local_model_step = self.current_steps.value
+                # Trigger reload ONLY on the interval and ONLY if we haven't loaded this step yet
+                if global_step % self.sync_interval == 0 and self.local_model_step < global_step:
+                    self.logger.info(f"Syncing EMA model at step {global_step}...")
+                    
+                    # Load the model and update the local step count
+                    self._load_model() 
+                    self.local_model_step = global_step
 
             # Collect requests from the inference queue.
             while len(requests) < self.batch_size:

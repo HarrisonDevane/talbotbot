@@ -75,9 +75,10 @@ class RLOrchestrator:
         
         # Logger now points to the correct versioned folder immediately
         self.logger = self._setup_persistent_logger(initial_log_dir)
+        self.latest_model_path = os.path.abspath(os.path.join(RL_DIR, "best_models", "latest_model.pth"))
         self.best_model_path = os.path.abspath(os.path.join(RL_DIR, "best_models", "best_model.pth"))
 
-        if not os.path.exists(self.best_model_path):
+        if not os.path.exists(self.latest_model_path):
             self._create_new_model()
 
         os.makedirs(RL_DIR, exist_ok=True)
@@ -110,6 +111,7 @@ class RLOrchestrator:
         os.makedirs(os.path.join(RL_DIR, 'best_models'),  exist_ok=True)
 
         torch.save(model_dict, os.path.join(RL_DIR, 'best_models', 'initial_model.pth'))
+        torch.save(model_dict, os.path.join(RL_DIR, 'best_models', 'latest_model.pth'))
         torch.save(model_dict, os.path.join(RL_DIR, 'best_models', 'best_model.pth'))
 
 
@@ -167,7 +169,7 @@ class RLOrchestrator:
         policies = np.array([item['policy'] for item in new_data], dtype=np.float16)
         values = np.array([item['value_target'] for item in new_data], dtype=np.float16)
 
-        self.logger.info(f"Appending new data ({len(new_data)} positions) to the circular buffer: {self.buffer_file_path}")
+        self.logger.debug(f"Appending new data ({len(new_data)} positions) to the circular buffer: {self.buffer_file_path}")
 
         # Proceed with the original, efficient in-place modification
         current_size = self.state_config['state']['buffer']['count']
@@ -257,6 +259,7 @@ class RLOrchestrator:
             output_dir=RL_DIR,
             current_steps=self.current_steps,
             rotation_interval=self.params_config['global']['logging_rotation_steps'],
+            sync_interval=self.params_config['training']['sync_interval'],
             best_model_path=self.best_model_path,
             model_config=self.params_config['model'],
             data_generation_config=self.params_config['data_generation'],
@@ -265,6 +268,7 @@ class RLOrchestrator:
 
         self.train_task = TrainTask(
             best_model_path=self.best_model_path,
+            latest_model_path=self.latest_model_path,
             model_config=self.params_config['model'],
             training_config=self.params_config['training'],
             state_config=self.state_config['state'],
@@ -297,14 +301,19 @@ class RLOrchestrator:
             self._update_circular_buffer(new_data_chunk)
 
             start_train_time = time.time()
-            test_model_path = self.train_task.run_single_step(current_log_dir, self.state_config)
+            test_latest_path, test_best_path = self.train_task.run_single_step(current_log_dir, self.state_config)
             total_train_time = time.time() - start_train_time
             self.state_config['state']['lifetime']['hours_training'] = round(self.state_config['state']['lifetime']['hours_training']  + (total_train_time / 3600), 4)
 
-            shutil.copy(test_model_path, self.best_model_path)
-            os.remove(test_model_path)
+            shutil.copy(test_latest_path, self.latest_model_path)
+            os.remove(test_latest_path)
 
-            # --- Step 5: Update State ---
+            if test_best_path:
+                self.logger.info('Updating best model')
+                shutil.copy(test_best_path, self.best_model_path)
+                os.remove(test_best_path)
+
+            # --- Step 3: Update State ---
             with self.current_steps.get_lock():
                 self.current_steps.value += 1
 
@@ -323,19 +332,16 @@ class RLOrchestrator:
                 backup_dir = os.path.join(RL_DIR, 'backup')
                 os.makedirs(backup_dir, exist_ok=True)
 
+                self.logger.info(f"Creating periodic backup at step {self.current_steps.value}...")
+
                 # Save current best model with step metadata
-                model_backup_path = os.path.join(
-                    backup_dir, 
-                    f'step_{self.current_steps.value:06d}_model.pth'
-                )
+                model_backup_path = os.path.join(backup_dir, f'step_{self.current_steps.value:06d}_best_model.pth')
                 shutil.copy(self.best_model_path, model_backup_path)
 
-                buffer_backup_path = os.path.join(
-                    backup_dir, 
-                    f'step_{self.current_steps.value:06d}_replay_memory.hdf5'
-                )
-                
-                self.logger.info(f"Creating periodic backup at step {self.current_steps.value}...")
+                latest_model_backup_path = os.path.join(backup_dir, f'step_{self.current_steps.value:06d}_latest_model.pth')
+                shutil.copy(self.latest_model_path, latest_model_backup_path)
+
+                buffer_backup_path = os.path.join(backup_dir, f'step_{self.current_steps.value:06d}_replay_memory.hdf5')
                 shutil.copy(self.buffer_file_path, buffer_backup_path)
 
                 # Backup the state and config files as well
