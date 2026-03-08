@@ -97,7 +97,10 @@ class RLOrchestrator:
         model = ChessAIModel(
             num_input_planes=self.params_config['model']['input_planes'],
             num_residual_blocks=self.params_config['model']['resblocks'],
-            num_filters=self.params_config['model']['filters']
+            num_filters=self.params_config['model']['filters'],
+            bottleneck_channels=self.params_config['model']['bottleneck_channels'],
+            broadcast_reduction_ratio=self.params_config['model']['broadcast_reduction_ratio'],
+            broadcast_interval=self.params_config['model']['broadcast_interval']
         )
 
         model_dict = {

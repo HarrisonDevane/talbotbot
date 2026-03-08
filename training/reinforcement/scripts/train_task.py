@@ -43,9 +43,9 @@ class TrainTask:
             num_input_planes=self.model_config['input_planes'],
             num_residual_blocks=self.model_config['resblocks'],
             num_filters=self.model_config['filters'],
-            dropout_rate_conv=self.training_config['dropout_rate_conv'],
-            dropout_rate_fc=self.training_config['dropout_rate_fc'],
-            dropout_conv_start_block=self.training_config['dropout_conv_start_block']
+            bottleneck_channels=self.model_config['bottleneck_channels'],
+            broadcast_reduction_ratio=self.model_config['broadcast_reduction_ratio'],
+            broadcast_interval=self.model_config['broadcast_interval']
         ).to(self.device)
 
         self.optimizer = optim.SGD(

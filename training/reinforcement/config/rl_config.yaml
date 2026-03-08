@@ -9,8 +9,11 @@ global:
 
 model:
   input_planes: 69                                   # 68-plane feature stack (P1 pieces, P2 pieces, reps, etc.)
-  filters: 128                                       # Convolutional filters (Network "width")
-  resblocks: 16                                      # Residual blocks (Network "depth")
+  filters: 256                                       # Convolutional filters (Network "width")
+  resblocks: 16                                      # Total residual blocks (Network "depth")
+  bottleneck_channels: 128                           # Squeezed 3x3 convolution depth. Halving 'filters' here makes the network ~2x faster.
+  broadcast_reduction_ratio: 4                       # Shrinks the hidden FC layer in the Squeeze-and-Excitation block to prevent parameter bloat.
+  broadcast_interval: 8                              # Replaces a standard block with a Global Broadcasting block every N layers for instant cross-board vision.
 
 data_generation:
   inference_worker_cores:                            # Dedicated CPU cores for the Batching Process (feeding the GPU)
@@ -24,7 +27,7 @@ data_generation:
   gumbel_c_visit: 50.0                               # Sigma used for gumbel score calucation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_noise: 1.0                                  # Gumbel noise value
-  gumbel_search_budget: [64,64,64,64]                # Search depth distribution (k = 2^number, search depth = sum)
+  gumbel_search_budget: [32,32,32,32]                # Search depth distribution (k = 2^number, search depth = sum)
   temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
   temperature_top_move: 0.6                          # Probability the top move is played
   temperature_blunder_threshold: 1.0                 # Threshold for ignoring blunders
@@ -37,7 +40,7 @@ data_generation:
 
 training:
   batch_size: 4096                                   # Positions per Gradient Update
-  sampling_ratio: 2.0                                # Train on x the amount of data generated
+  sampling_ratio: 1.0                                # Train on x the amount of data generated
   replacement: True                                  # Allow sampling the same position twice in one batch
   policy_loss_weight: 1.0                            # Weight for Move Prediction loss
   value_loss_weight: 1.0                             # Weight for Win/Loss Prediction loss
@@ -49,7 +52,4 @@ training:
   lr_low: 1e-3
   momentum_rate: 0.9                                 # SGD Momentum
   data_loader_workers: 1                             # CPU threads loading data from HDF5
-  dropout_rate_conv: 0.0                             # Dropout in convolutional layers
-  dropout_rate_fc: 0.0                               # Dropout in fully connected head
-  dropout_conv_start_block: 10                       # If using dropout, start at block 10
   main_logging_level: 20                             # INFO level

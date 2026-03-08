@@ -63,9 +63,14 @@ class InferenceBatcher:
 
     def load_model(self):
         """Load the model. This should be called inside the process."""
-        self.model = ChessAIModel(num_input_planes=self.model_config['input_planes'], 
-                                  num_residual_blocks=self.model_config['resblocks'], 
-                                  num_filters=self.model_config['filters'])
+        self.model = ChessAIModel(
+            num_input_planes=self.model_config['input_planes'],
+            num_residual_blocks=self.model_config['resblocks'],
+            num_filters=self.model_config['filters'],
+            bottleneck_channels=self.model_config['bottleneck_channels'],
+            broadcast_reduction_ratio=self.model_config['broadcast_reduction_ratio'],
+            broadcast_interval=self.model_config['broadcast_interval']
+        )
         
         checkpoint = torch.load(
             self.model_path, 
