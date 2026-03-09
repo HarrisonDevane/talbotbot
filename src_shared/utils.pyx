@@ -12,6 +12,23 @@ import cython
 cimport numpy as cnp  # For c-typed access to NumPy data structures/types
 from libc.math cimport tanh
 
+# Add this to the top of utils.pyx alongside the imports
+cdef extern from *:
+    """
+    // MSVC (Windows) compatibility
+    #if defined(_MSC_VER)
+    #include <intrin.h>
+    #pragma intrinsic(_BitScanForward64)
+    static __inline int __builtin_ctzll(unsigned long long bb) {
+        unsigned long index;
+        _BitScanForward64(&index, bb);
+        return index;
+    }
+    #endif
+    // GCC/Clang already have __builtin_ctzll defined natively
+    """
+    int __builtin_ctzll(unsigned long long x) nogil
+
 cdef int _BOARD_DIM = 8
 cdef int _INPUT_CHANNELS = 69
 cdef int _TOTAL_INPUT_SIZE = _INPUT_CHANNELS * _BOARD_DIM * _BOARD_DIM
@@ -50,31 +67,53 @@ PAWN_PROMO_MOVE_TYPES_LIST = list(PAWN_PROMO_MOVE_TYPES_MAPPING.keys())
 
 # --- Helper Functions (C-typed) ---
 
-# UPDATED: Now accepts orientation_color to handle "Me" vs "Opponent" logic
-cdef cnp.ndarray _get_piece_planes(board_state: object, orientation_color: bint):
-    """Helper for board_to_tensor_69. Fills planes relative to orientation_color."""
+cdef cnp.ndarray _get_piece_planes(object board_state, bint orientation_color):
+    """
+    Fills planes relative to orientation_color using fast bitboard scanning.
+    """
     cdef cnp.ndarray piece_planes = np.zeros((12, _BOARD_DIM, _BOARD_DIM), dtype=np.float32)
-    cdef dict piece_to_plane = {
-        chess.PAWN: 0, chess.KNIGHT: 1, chess.BISHOP: 2,
-        chess.ROOK: 3, chess.QUEEN: 4, chess.KING: 5,
-    }
-    cdef int row, col, base_plane, plane_idx
-    cdef object square, piece
+    
+    # C-typed variables for the fast loop
+    cdef unsigned long long bb, color_mask
+    cdef int square, row, col, base_plane, plane_idx, pt_idx
+    cdef bint is_me, color
 
-    for square, piece in board_state.piece_map().items():
-        # Standard Matrix coordinates (Rank 7 -> Row 0)
-        row = 7 - chess.square_rank(square)
-        col = chess.square_file(square)
+    # Map python-chess internal piece bitboards (1-indexed in python-chess: PAWN=1...KING=6)
+    cdef tuple piece_masks = (
+        board_state.pawns,
+        board_state.knights,
+        board_state.bishops,
+        board_state.rooks,
+        board_state.queens,
+        board_state.kings
+    )
+
+    # Iterate over both colors: True (White) and False (Black)
+    for color in (True, False):
+        is_me = (color == orientation_color)
+        base_plane = 0 if is_me else 6
+        color_mask = board_state.occupied_co[color]
         
-        # Relative Logic: "Me" (0-5) vs "Opponent" (6-11)
-        if piece.color == orientation_color:
-            base_plane = 0 
-        else:
-            base_plane = 6 
-        
-        plane_idx = base_plane + piece_to_plane[piece.piece_type]
-        piece_planes[plane_idx, row, col] = 1.0
-        
+        for pt_idx in range(6):
+            # Bitwise AND: Intersect the piece type bitboard with the color bitboard
+            bb = piece_masks[pt_idx] & color_mask
+            plane_idx = base_plane + pt_idx
+            
+            # Fast bit-scan loop: Iterates only as many times as there are pieces
+            while bb:
+                # Find the index of the lowest set bit (0-63)
+                square = __builtin_ctzll(bb)
+                
+                # Convert 1D square to 2D tensor coordinates (Rank 7 -> Row 0)
+                # bitwise right-shift by 3 is division by 8; bitwise AND 7 is modulo 8
+                row = 7 - (square >> 3) 
+                col = square & 7
+                
+                piece_planes[plane_idx, row, col] = 1.0
+                
+                # Clear the lowest set bit to move to the next piece
+                bb &= (bb - 1)
+
     return piece_planes
 
 

@@ -378,7 +378,7 @@ if __name__ == "__main__":
             print(f"Orchestrator encountered an error: {e}")
     finally:
             # Check if the task was initialized inside run()
-            if hasattr(orchestrator, 'self.data_gen_task'):
+            if hasattr(orchestrator, 'data_gen_task'):
                 print("Cleaning up background workers...")
-                orchestrator.self.data_gen_task.terminate_all()
+                orchestrator.data_gen_task.terminate_all()
             print("Shutdown complete.")

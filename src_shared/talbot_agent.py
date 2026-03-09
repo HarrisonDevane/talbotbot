@@ -87,7 +87,7 @@ class TalbotAgent:
             entropy = np.log(len(best_winning_moves))
 
             for move in best_winning_moves:
-                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
+                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
                 flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                 policy_vector[flat_index] = prob_per_move
             
@@ -119,7 +119,7 @@ class TalbotAgent:
             entropy = np.log(len(best_draw_moves))
 
             for move in best_draw_moves:
-                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
+                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
                 flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                 policy_vector[flat_index] = prob_per_move
 
@@ -144,7 +144,7 @@ class TalbotAgent:
             entropy = np.log(len(longest_mate_moves))
 
             for move in longest_mate_moves:
-                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root.board)
+                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
                 flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
                 policy_vector[flat_index] = prob_per_move
 
@@ -242,8 +242,8 @@ class TalbotAgent:
         simulation_speed = (simulation_count / total_move_time) if total_move_time > 0 else 0
 
         self.logger.info(f"Total move time: {total_move_time:.4f}, with {simulation_speed:.4f} simulations per second")
-        self.logger.info(f"Total entropy: {entropy}")
-        self.logger.info(f"Average root node value: {self.mcts.root.calculate_v_mix()}")
+        self.logger.info(f"Total entropy: {entropy:.4f}")
+        self.logger.info(f"Average root node value: {self.mcts.root.calculate_v_mix():.4f}")
 
         return best_move, policy_vector, simulation_count, entropy
 

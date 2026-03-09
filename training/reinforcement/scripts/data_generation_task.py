@@ -160,14 +160,18 @@ class DataGenerationTask:
 
         self.max_batch_size = self.num_workers * self.data_generation_config['batch_size_per_worker'] * self.data_generation_config['batch_size_factor']
 
+        use_fp16 = torch.cuda.is_available()
+        input_dtype = torch.float16 if use_fp16 else torch.float32
+
         # Create Global Shared Buffers (Single Instance)
         self.shared_input_buffer = torch.zeros(
-            self.max_batch_size, src_shared.utils.INPUT_CHANNELS, src_shared.utils.BOARD_DIM, src_shared.utils.BOARD_DIM, dtype=torch.float32
+            self.max_batch_size, src_shared.utils.INPUT_CHANNELS, src_shared.utils.BOARD_DIM, src_shared.utils.BOARD_DIM, dtype=input_dtype
         ).share_memory_()
 
         self.shared_policy_buffer = torch.zeros(
             self.max_batch_size, src_shared.utils.TOTAL_POLICY_MOVES, dtype=torch.float16
         ).share_memory_()
+        
         # Value (float32)
         self.shared_value_buffer = torch.zeros(
             self.max_batch_size, 1, dtype=torch.float32

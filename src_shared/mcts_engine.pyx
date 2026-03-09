@@ -10,10 +10,11 @@ import queue
 import operator
 import numpy as np
 cimport numpy as cnp
+from libc.math cimport exp
 import src_shared.utils
 cimport src_shared.mcts_node as MCTSNode_c
 
-cnp.import_array() 
+cnp.import_array()
 
 cdef extern from "math.h":
     double sqrt(double x)
@@ -49,6 +50,7 @@ cdef class MCTSEngine:
     cdef public MCTSNode_c.MCTSNode root 
     
     cdef public object logger
+    cdef public object root_board
     cdef public object inference_queue
     cdef public object result_queue
     cdef public object in_flight_nodes
@@ -79,7 +81,8 @@ cdef class MCTSEngine:
         self.gumbel_c_visit = gumbel_c_visit
         self.gumbel_c_scale = gumbel_c_scale
 
-        self.root = MCTSNode_c.MCTSNode(board.copy())
+        self.root_board = board
+        self.root = MCTSNode_c.MCTSNode()
         self.in_flight_nodes = {}
 
         # Initializing for run simulations method
@@ -106,6 +109,24 @@ cdef class MCTSEngine:
         self.policy_logits_dtype = torch.float16 if self.use_fp16 else torch.float32
 
 
+    cdef _sync_board_to_node(self, MCTSNode_c.MCTSNode node):
+        """
+        Resets root_board to the current position, then pushes moves 
+        down the path to 'node'.
+        """
+        while self.root_board.move_stack:
+            self.root_board.pop()
+        
+        cdef list path = []
+        cdef MCTSNode_c.MCTSNode current = node
+        while current.parent is not None:
+            path.append(current.move)
+            current = current.parent
+            
+        for i in range(len(path) - 1, -1, -1):
+            self.root_board.push(path[i])
+
+
     cdef _wait_for_inference(self):
         """
         Handles the final flush of the inference queue and waits for all
@@ -117,6 +138,7 @@ cdef class MCTSEngine:
         cdef MCTSNode_c.MCTSNode node
         cdef double value_output
         cdef object policy_logits
+        cdef list completed_indices
 
         cdef int batch_buffer_size = len(self.batch_buffer)
 
@@ -128,123 +150,125 @@ cdef class MCTSEngine:
         # Wait for remaining nodes - this is explicitly acknowledged as a blocking wait_for_inference step
         while self.inference_received < self.inference_sent:
             try:
-                buffer_index = self.result_queue.get()
+                completed_indices = self.result_queue.get()
 
-                node = self.in_flight_nodes.pop(buffer_index)
-                self.inference_received += 1
+                for buffer_index in completed_indices:
+                    node = self.in_flight_nodes.pop(buffer_index)
+                    self.inference_received += 1
 
-                raw_policy_logits = self.shared_policy_buffer[buffer_index] 
-                raw_value_output = self.shared_value_buffer[buffer_index]
+                    raw_policy_logits = self.shared_policy_buffer[buffer_index] 
+                    raw_value_output = self.shared_value_buffer[buffer_index]
 
-                policy_logits = raw_policy_logits.to(self.policy_logits_dtype)
-                value_output = raw_value_output.item()
+                    policy_logits = raw_policy_logits.to(self.policy_logits_dtype)
+                    value_output = raw_value_output.item()
 
-                self.buffer_free_slots.put(buffer_index) 
-                
-                if not node.expanded:
-                    self._expand(node, policy_logits)
-                
-                self._backpropagate(node, value_output, is_terminal=False)                
-                self.logger.debug(f"[Backpropagation] Expanding and backpropagating on node during final wait.")
+                    self.buffer_free_slots.put(buffer_index) 
+                    
+                    # DEFERRED EXPANSION
+                    if not node.expanded:
+                        node.pending_logits = policy_logits
+                     
+                    self._backpropagate(node, value_output, is_terminal=False)                
+                    self.logger.debug(f"[Backpropagation] Backpropagating on node during final wait.")
 
             except queue.Empty:
                 self.logger.debug(f"[Misc] Result queue empty during final wait (self.inference_received={self.inference_received}, self.inference_sent={self.inference_sent}). Waiting for more results...")
                 break
 
         self.time_wait_for_inference += (time.perf_counter() - time_wait_for_inference_start)
+        
 
 
-    cpdef _select(self, MCTSNode_c.MCTSNode start_node):
+    cpdef _select(self, MCTSNode_c.MCTSNode start_node, list simulation_path):
         """
-        Traverses using Deterministic Policy Matching.
-        Delegates score calculation to child.calculate_gumbel_score().
+        Optimized Traversal: Single-pass selection with zero list allocations.
         """
         cdef double time_selection_start = time.perf_counter()
         
         cdef MCTSNode_c.MCTSNode node = start_node
-        cdef MCTSNode_c.MCTSNode best_child
-        cdef MCTSNode_c.MCTSNode child
+        cdef MCTSNode_c.MCTSNode child, best_child
         
-        # Variables for selection
-        cdef double max_visits, sum_visits
-        cdef double max_score_logit, sum_score_exp
+        cdef double max_visits, sum_visits, v_mix
+        cdef double max_score_logit, sum_score_exp, score
         cdef double pi_prime, child_n_norm, deficit, best_deficit
-        cdef double score
         
-        cdef list children_list
-        cdef int i, n_children
-        
-        while node.children and node.expanded and not node.selected:
-            best_child = None
-            best_deficit = -999999999.0
-            
-            children_list = list(node.children.values())
-            n_children = len(children_list)
-            if n_children == 0: break
+        while True:
+            # JUST-IN-TIME EXPANSION
+            if node.pending_logits is not None:
+                self._expand(node, node.pending_logits)
+                node.pending_logits = None
+                
+            if not node.children or not node.expanded or node.selected:
+                break
 
+            best_child = None
+            best_deficit = -1e20
+            
+            # 1. First Pass: Get Max Visits and v_mix
             max_visits = 0.0
             sum_visits = 0.0
-            for child in children_list:
-                if child.visits > max_visits: max_visits = child.visits
+            for child in node.children.values():
+                if child.visits > max_visits:
+                    max_visits = child.visits
                 sum_visits += child.visits
             
-            max_score_logit = -999999999.0
             v_mix = node.calculate_v_mix()
-
-            for i in range(n_children):
-                child = children_list[i]
+            
+            # 2. Second Pass: Calculate Gumbel scores and find max logit for stable Softmax
+            max_score_logit = -1e20
+            for child in node.children.values():
                 score = child.calculate_gumbel_score(self.gumbel_c_visit, self.gumbel_c_scale, max_visits, v_mix)
-                
                 if score > max_score_logit:
                     max_score_logit = score
             
+            # 3. Third Pass: Sum exps and find Best Deficit (Deterministic Policy Matching)
             sum_score_exp = 0.0
-            for i in range(n_children):
-                child = children_list[i]
-                sum_score_exp += math.exp(child.gumbel_score - max_score_logit)
-            
+            for child in node.children.values():
+                sum_score_exp += exp(child.gumbel_score - max_score_logit)
 
-            for i in range(n_children):
-                child = children_list[i]
-                
-                # Target Probability (Pi_prime)
-                pi_prime = math.exp(child.gumbel_score - max_score_logit) / sum_score_exp
-                
-                # Actual Visit Portion
+            for child in node.children.values():
+                pi_prime = exp(child.gumbel_score - max_score_logit) / sum_score_exp
                 child_n_norm = child.visits / (1.0 + sum_visits)
                 
                 deficit = pi_prime - child_n_norm
-                
                 if deficit > best_deficit:
                     best_deficit = deficit
                     best_child = child
             
+            if best_child is None:
+                break
+
+            self.root_board.push(best_child.move) 
+            simulation_path.append(best_child)
             node = best_child
         
         self.time_selection += (time.perf_counter() - time_selection_start)
         return node
 
 
-    def _mark_selected(self, MCTSNode_c.MCTSNode node):
-
-        cdef double time_misc_start = time.perf_counter()
+    cdef _mark_selected(self, MCTSNode_c.MCTSNode node):
+        """
+        Optimized: Only crawls up the tree when a node's last child is queued.
+        """
         cdef MCTSNode_c.MCTSNode current_node = node
-
-        while current_node is not None:
-            if all(child.selected for child in current_node.children.values()):
-                current_node.selected = True
-                self.logger.debug(f"[Misc] Node {current_node.move} (parent of a fully queued subtree) also marked as selected.")
-            else:
+        cdef MCTSNode_c.MCTSNode parent
+        
+        current_node.selected = True
+        
+        parent = current_node.parent
+        while parent is not None:
+            parent.num_unselected_children -= 1
+            if parent.num_unselected_children > 0:
                 break
+                
+            parent.selected = True
+            current_node = parent
+            parent = current_node.parent
 
-            current_node = current_node.parent
-
-        self.time_misc += (time.perf_counter() - time_misc_start)
-
-
-    cdef _retrieve_inference(self):
+    cdef _retrieve_inference(self, bint block):
         cdef double time_retrieval_start
         cdef int buffer_index
+        cdef object completed_indices
         cdef object raw_policy_logits, raw_value_output
         cdef MCTSNode_c.MCTSNode node
         cdef double value_output
@@ -253,23 +277,29 @@ cdef class MCTSEngine:
         while True:
             try:
                 time_retrieval_start = time.perf_counter()
-                buffer_index = self.result_queue.get_nowait()
+                
+                # We now receive a list of indices from the queue
+                completed_indices = self.result_queue.get(block=block)
+                block = False
+                
+                for buffer_index in completed_indices:
+                    node = self.in_flight_nodes.pop(buffer_index)
+                    self.inference_received += 1
 
-                node = self.in_flight_nodes.pop(buffer_index)
-                self.inference_received += 1
+                    raw_policy_logits = self.shared_policy_buffer[buffer_index] 
+                    raw_value_output = self.shared_value_buffer[buffer_index]
 
-                raw_policy_logits = self.shared_policy_buffer[buffer_index] 
-                raw_value_output = self.shared_value_buffer[buffer_index]
+                    policy_logits = raw_policy_logits.to(self.policy_logits_dtype)
+                    value_output = raw_value_output.item()
 
-                policy_logits = raw_policy_logits.to(self.policy_logits_dtype)
-                value_output = raw_value_output.item()
+                    self.buffer_free_slots.put(buffer_index) 
+                    
+                    if not node.expanded:
+                        node.pending_logits = policy_logits
+                        
+                    self._backpropagate(node, value_output, is_terminal=False)
 
-                self.buffer_free_slots.put(buffer_index) 
                 self.time_retrieval += (time.perf_counter() - time_retrieval_start)
-
-                if not node.expanded:
-                    self._expand(node, policy_logits)
-                self._backpropagate(node, value_output, is_terminal=False)
 
             except queue.Empty:
                 break
@@ -291,13 +321,13 @@ cdef class MCTSEngine:
         cdef object result
         cdef double value = 0.0
         
-        result = leaf.board.result(claim_draw=True)
+        result = self.root_board.result(claim_draw=True)
         self._mark_selected(leaf)
         
         if result == "1-0":
-            value = 1.0 if leaf.board.turn == chess.WHITE else -1.0
+            value = 1.0 if self.root_board.turn == chess.WHITE else -1.0
         elif result == "0-1":
-            value = 1.0 if leaf.board.turn == chess.BLACK else -1.0
+            value = 1.0 if self.root_board.turn == chess.BLACK else -1.0
             
         self.time_expansion += (time.perf_counter() - time_expansion_start)
         self._backpropagate(leaf, value, is_terminal=True)
@@ -309,19 +339,19 @@ cdef class MCTSEngine:
         cdef int buffer_index
         cdef object numpy_board, board_input
         
-        while self.buffer_free_slots.qsize() == 0:
-            self._retrieve_inference()
-            
+        # Fast spin-wait from the old engine
+        while self.buffer_free_slots.empty():
+            self._retrieve_inference(block=False)
             if self.batch_buffer:
                 self._submit_batch()
-            
             time.sleep(0.001)
 
-        buffer_index = self.buffer_free_slots.get() 
+        buffer_index = self.buffer_free_slots.get()
+        
         self._mark_selected(leaf)
         self.in_flight_nodes[buffer_index] = leaf
         
-        numpy_board = src_shared.utils.board_to_tensor_69(leaf.board)
+        numpy_board = src_shared.utils.board_to_tensor_69(self.root_board)
         board_input = torch.from_numpy(numpy_board).float()
         
         if self.use_fp16:
@@ -332,56 +362,80 @@ cdef class MCTSEngine:
         self.batch_buffer.append((self.worker_id, buffer_index))
         self._virtual_loss(leaf, is_applying=True)
 
+        if len(self.batch_buffer) >= self.worker_batch_size:
+            self._submit_batch()
+
         self.time_misc += (time.perf_counter() - time_misc_start) 
         self.simulation_count += 1
 
 
     cdef _run_single_async_simulation(self, MCTSNode_c.MCTSNode start_node):
         """ 
-        Runs one descent starting from start_node, handles queueing. 
+        Runs one descent starting from start_node, handles queueing.
         """
         cdef MCTSNode_c.MCTSNode leaf
         cdef int current_batch_size
         cdef double time_misc_start
+        cdef list simulation_path = []
+        cdef int start_path_len
+
+        self.root_board.push(start_node.move)
+        simulation_path.append(start_node)
         
         while True:
-            self._retrieve_inference()
+            self._retrieve_inference(block=False)
             current_batch_size = len(self.batch_buffer)
 
             if current_batch_size >= self.worker_batch_size:
                 self._submit_batch()
             
-            # Check if start node is queued for inference (this handles when all nodes in tree are queued)
+            # Check if start node is fully queued
             if start_node.selected:
                 if current_batch_size > 0:
                     self._submit_batch()
 
-                # Root is queued + not waiting for inference results -> break
+                # Root is queued + all inferences received -> break (Terminal state reached)
                 if self.inference_received >= self.inference_sent:
-                    self.logger.info(f"Only terminal nodes remaining - breaking MCTS loop")
-                    return
+                    self.logger.debug(f"Only terminal nodes remaining - breaking MCTS loop")
+                    break
 
                 time.sleep(0.001)
                 continue
 
-            leaf = self._select(start_node)
+            start_path_len = len(simulation_path)
+            leaf = self._select(start_node, simulation_path)
 
-            if leaf == start_node:
-                self.logger.debug(f"Start node chosen - restarting loop")
-                time.sleep(0.001)
-                continue
-
-            if self.buffer_free_slots.qsize() == 0:
-                self.logger.debug(f"No free buffer indices")
-                time.sleep(0.001)
-                continue
-    
-            if leaf.board.is_game_over(claim_draw=True):
+            if self.root_board.is_game_over(claim_draw=True):
                 self._handle_terminal_node(leaf)
-            else:
-                self._queue_leaf_for_inference(leaf)
+                break
+                
+            if leaf.selected or self.buffer_free_slots.empty():
+                if self.batch_buffer:
+                    self._submit_batch()
 
-            return
+                if leaf.selected and self.inference_received >= self.inference_sent:
+                    self._backpropagate(leaf, leaf.calculate_v_mix(), is_terminal=False)
+                    self.simulation_count += 1
+                    break
+                    
+                while len(simulation_path) > start_path_len:
+                    self.root_board.pop()
+                    simulation_path.pop()
+                
+                time.sleep(0.001)
+                continue
+
+            # 3. Normal leaf expansion
+            self._queue_leaf_for_inference(leaf)
+            break
+
+        # Final cleanup: backtrack to the root
+        while simulation_path:  
+            self.root_board.pop()
+            simulation_path.pop()
+
+        return
+
 
     cpdef _log_tournament_results(self, candidates, phase_name):
         cdef double root_v_mix = self.root.calculate_v_mix()
@@ -401,6 +455,7 @@ cdef class MCTSEngine:
         
         self.logger.info("-" * 95)
             
+
     cpdef run_simulations(self, list phase_budgets):
         """
         Executes the Gumbel MuZero 'Sequential Halving' search using an explicit list of phase budgets.
@@ -441,6 +496,11 @@ cdef class MCTSEngine:
         self._submit_batch()
         self._wait_for_inference()
 
+        # ENSURE ROOT EXPANSION BEFORE PHASE 0
+        if self.root.pending_logits is not None:
+            self._expand(self.root, self.root.pending_logits)
+            self.root.pending_logits = None
+
         all_nodes = list(self.root.children.values())
         active_candidates = []
         
@@ -450,10 +510,12 @@ cdef class MCTSEngine:
             child.gumbel_score = child.gumbel_noise + child.raw_logit
 
             # Check for terminal nodes in all children
-            if child.board.is_game_over(claim_draw=True):
+            self.root_board.push(child.move)
+            if self.root_board.is_game_over(claim_draw=True):
                 self._handle_terminal_node(child)
             else:
                 active_candidates.append(child)
+            self.root_board.pop()
 
         # Cap k at the actual number of legal moves (minus terminal states) available on the board
         actual_k = min(1 << len(phase_budgets), len(active_candidates))
@@ -482,8 +544,10 @@ cdef class MCTSEngine:
             if phase_idx == 0:
                 for child in active_candidates:
                     remaining_budget -= 1
-                    if not child.board.is_game_over(claim_draw=True):
+                    self.root_board.push(child.move)
+                    if not self.root_board.is_game_over(claim_draw=True):
                         self._queue_leaf_for_inference(child)
+                    self.root_board.pop()
 
                 self._submit_batch()
                 self._wait_for_inference()
@@ -545,11 +609,9 @@ cdef class MCTSEngine:
     cpdef _expand(self, MCTSNode_c.MCTSNode node, policy_logits: torch.Tensor):
         cdef double time_expansion_start = time.perf_counter()
         
-        # 1. Generate moves
-        cdef list legal_moves = list(cython_chess.generate_legal_moves(node.board, chess.BB_ALL, chess.BB_ALL))
+        cdef list legal_moves = list(cython_chess.generate_legal_moves(self.root_board, chess.BB_ALL, chess.BB_ALL))
         cdef int num_moves = len(legal_moves)
         
-        # 2. Pre-allocate NumPy arrays (int64 maps to torch.long)
         cdef cnp.ndarray[cnp.int64_t, ndim=1] from_row_arr = np.empty(num_moves, dtype=np.int64)
         cdef cnp.ndarray[cnp.int64_t, ndim=1] from_col_arr = np.empty(num_moves, dtype=np.int64)
         cdef cnp.ndarray[cnp.int64_t, ndim=1] channel_arr = np.empty(num_moves, dtype=np.int64)
@@ -564,82 +626,81 @@ cdef class MCTSEngine:
         cdef object move
         cdef MCTSNode_c.MCTSNode child_node
 
-        # 3. Fast Loop
         for i in range(num_moves):
             move = legal_moves[i]
-            from_row_int, from_col_int, channel_int = src_shared.utils.move_to_policy_components(move, node.board)
+            from_row_int, from_col_int, channel_int = src_shared.utils.move_to_policy_components(move, self.root_board)
             
-            # Direct C-array assignment
             from_row_view[i] = from_row_int
             from_col_view[i] = from_col_int
             channel_view[i] = channel_int
 
-            child_node = MCTSNode_c.MCTSNode(board=None, parent=node, move=move)
+            child_node = MCTSNode_c.MCTSNode(parent=node, move=move)
             node.children[move] = child_node
             child_nodes_in_order[i] = child_node
 
-    
+        if num_moves > 0:
+            from_row_tensor = torch.from_numpy(from_row_arr)
+            from_col_tensor = torch.from_numpy(from_col_arr)
+            channel_tensor = torch.from_numpy(channel_arr)
 
-        # 4. Tensor Creation (Zero-copy where possible)
-        from_row_tensor = torch.from_numpy(from_row_arr)
-        from_col_tensor = torch.from_numpy(from_col_arr)
-        channel_tensor = torch.from_numpy(channel_arr)
+            indices_tensor = src_shared.utils.policy_components_to_flat_index_torch(
+                from_row_tensor, from_col_tensor, channel_tensor
+            )
 
-        indices_tensor = src_shared.utils.policy_components_to_flat_index_torch(
-            from_row_tensor, from_col_tensor, channel_tensor
-        )
+            raw_logits_for_legal_moves = policy_logits.flatten()[indices_tensor]
 
-        raw_logits_for_legal_moves = policy_logits.flatten()[indices_tensor]
+            for i in range(num_moves):
+                current_child = <MCTSNode_c.MCTSNode>child_nodes_in_order[i]
+                current_child.raw_logit = float(raw_logits_for_legal_moves[i])
 
-        for i in range(num_moves):
-            current_child = <MCTSNode_c.MCTSNode>child_nodes_in_order[i]
-            current_child.raw_logit = float(raw_logits_for_legal_moves[i])
-
+        node.num_unselected_children = num_moves
         node.expanded = True
         self.time_expansion += (time.perf_counter() - time_expansion_start)
 
 
-
-
     cdef _backpropagate_minimax(self, MCTSNode_c.MCTSNode node):
         """
-        Checks for forced wins, forced losses and draws by decision
+        Optimized: Single-pass minimax update without Python list/lambda overhead.
         """
-        cdef double avg_value
-        cdef object winning_children
-        cdef object best_win
-        cdef object losing_children
-        cdef object worst_los
-        
-        if node.children:
-            # Check for a winning move (any child is a loss for opponent)
-            winning_children = [c for c in node.children.values() if c.forced_outcome == -1]
+        if not node.children:
+            return
+
+        cdef MCTSNode_c.MCTSNode child
+        cdef int best_win_dtm = 999999
+        cdef int worst_loss_dtm = -1
+        cdef bint has_draw = False
+        cdef bint all_children_are_wins = True
+        cdef bint has_winning_child = False
+
+        # Single pass over children dictionary
+        for child in node.children.values():
+            if child.forced_outcome == -1:
+                has_winning_child = True
+                if child.distance_to_mate < best_win_dtm:
+                    best_win_dtm = child.distance_to_mate
             
-            if node.visits > 0:
-                avg_value = node.value_sum / node.visits
+            if child.forced_outcome == 0:
+                has_draw = True
+            
+            if child.forced_outcome != 1:
+                all_children_are_wins = False
             else:
-                avg_value = 0.0
+                if child.distance_to_mate > worst_loss_dtm:
+                    worst_loss_dtm = child.distance_to_mate
 
-            if winning_children:
-                node.forced_outcome = 1
-                best_win = min(winning_children, key=lambda c: c.distance_to_mate)
-                node.distance_to_mate = best_win.distance_to_mate + 1
-
-            # Rule 2: Check for draw (only if no win above), and the current position is evaluated as losing
-            elif any(child.forced_outcome == 0 for child in node.children.values()) and (avg_value <= 0.0):
-                node.forced_outcome = 0
-                node.distance_to_mate = 0
-
-            # Rule 3: Check for forced loss (only if no win or draw)
-            elif all(c.forced_outcome == 1 for c in node.children.values()):
-                losing_children = [c for c in node.children.values() if c.forced_outcome == 1]
-                if losing_children:
-                    node.forced_outcome = -1
-                    worst_loss = max(losing_children, key=lambda c: c.distance_to_mate)
-                    node.distance_to_mate = worst_loss.distance_to_mate + 1
-            else:
-                node.forced_outcome = None
-                node.distance_to_mate = None
+        # Logic Implementation
+        if has_winning_child:
+            node.forced_outcome = 1
+            node.distance_to_mate = best_win_dtm + 1
+        elif has_draw and (node.visits > 0 and (node.value_sum / node.visits) <= 0.0):
+            node.forced_outcome = 0
+            node.distance_to_mate = 0
+        elif all_children_are_wins:
+            node.forced_outcome = -1
+            node.distance_to_mate = worst_loss_dtm + 1
+        else:
+            node.forced_outcome = None
+            node.distance_to_mate = None
 
 
     cdef _backpropagate(self, MCTSNode_c.MCTSNode node, double value, bint is_terminal):

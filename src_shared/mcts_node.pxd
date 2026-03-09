@@ -2,12 +2,10 @@ cdef class MCTSNode:
     # C-Typed Pointers for node traversal (must be declared)
     cdef public MCTSNode parent # <-- Crucial for cdef MCTSNode declarations
     
-    # FIX: Declared 'move' as a generic Python object (object)
     cdef public object move
-    cdef public object _board
-    
-    # --- C-Typed Attributes accessed by MCTSEngine (Remain C-types) ---
+    cdef public object pending_logits
     cdef public int visits
+    cdef public int num_unselected_children
     cdef public double value_sum
     cdef public double raw_logit
     cdef public double raw_value

@@ -14,13 +14,12 @@ cdef class MCTSNode:
     Cython-optimized MCTS Node.
     """
 
-    def __init__(self, board: chess.Board = None, parent: 'MCTSNode' = None, move: chess.Move = None):
-        # Assign Python objects directly
-        self._board = board
+    def __init__(self, parent: 'MCTSNode' = None, move: chess.Move = None):
         self.parent = parent
         self.move = move
         self.children = {}
         self.forced_outcome = None
+        self.pending_logits = None
         
         # Initialize C-typed numeric values
         self.visits = 0
@@ -40,20 +39,6 @@ cdef class MCTSNode:
         # Initialize C-typed booleans
         self.expanded = False
         self.selected = False
-
-
-    @property
-    def board(self) -> chess.Board:
-        # Lazily create board to save memory
-        cdef object current_board
-        
-        if self._board is None and self.parent is not None:
-            current_board = self.parent.board.copy()
-            current_board.push(self.move)
-            self._board = current_board
-            
-        return self._board
-
 
     cpdef double calculate_gumbel_score(self, double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix):
         """
