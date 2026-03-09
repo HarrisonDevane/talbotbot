@@ -83,7 +83,7 @@ cdef class MCTSEngine:
 
         self.root_board = board
         self.root = MCTSNode_c.MCTSNode()
-        self.in_flight_nodes = {}
+        self.in_flight_nodes = [None] * len(shared_input_buffer)
 
         # Initializing for run simulations method
         self.simulation_count = 0
@@ -153,7 +153,8 @@ cdef class MCTSEngine:
                 completed_indices = self.result_queue.get()
 
                 for buffer_index in completed_indices:
-                    node = self.in_flight_nodes.pop(buffer_index)
+                    node = self.in_flight_nodes[buffer_index]
+                    self.in_flight_nodes[buffer_index] = None
                     self.inference_received += 1
 
                     raw_policy_logits = self.shared_policy_buffer[buffer_index] 
@@ -283,7 +284,9 @@ cdef class MCTSEngine:
                 block = False
                 
                 for buffer_index in completed_indices:
-                    node = self.in_flight_nodes.pop(buffer_index)
+                    node = self.in_flight_nodes[buffer_index]
+                    self.in_flight_nodes[buffer_index] = None
+
                     self.inference_received += 1
 
                     raw_policy_logits = self.shared_policy_buffer[buffer_index] 
@@ -347,9 +350,8 @@ cdef class MCTSEngine:
             time.sleep(0.001)
 
         buffer_index = self.buffer_free_slots.get()
-        
-        self._mark_selected(leaf)
         self.in_flight_nodes[buffer_index] = leaf
+        self._mark_selected(leaf)
         
         numpy_board = src_shared.utils.board_to_tensor_69(self.root_board)
         board_input = torch.from_numpy(numpy_board).float()

@@ -202,7 +202,7 @@ class TrainTask:
             self.last_log_dir = current_log_dir
 
         # 2. Get Fresh Data
-        train_loader, _ = self._get_dataloaders()
+        train_loader, full_dataset = self._get_dataloaders()
         batch = next(iter(train_loader))
         board_tensors, policy_target, value_targets = [t.to(self.device, non_blocking=True) for t in batch]
 
@@ -248,6 +248,7 @@ class TrainTask:
 
         # --- UPDATE EMA TARGET NETWORK ---
         self._update_ema_network()
+        full_dataset.close()
 
         updated_latest_path = os.path.join(self.output_dir, "updated_latest.pth")
         updated_best_path = os.path.join(self.output_dir, "updated_best.pth")
