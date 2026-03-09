@@ -50,5 +50,4 @@ training:
   reset_interval_steps: 40000                        # Global steps between network plasticity resets
   ema_tau: 0.005                                     # Exponential Moving Average update coefficient for target network
   shrink_alpha: 0.8                                  # Interpolation weight for the Shrink and Perturb encoder reset
-  data_loader_workers: 1                             # CPU threads loading data from HDF5
   main_logging_level: 20                             # INFO level

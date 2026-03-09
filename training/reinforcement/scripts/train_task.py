@@ -17,7 +17,7 @@ sys.path.insert(0, project_root)
 
 # Assuming these imports are correct based on your file structure
 from src_shared.model import ChessAIModel
-from src_shared.data_loader import ChessDataset, _worker_init_fn
+from src_shared.data_loader import ChessDataset
 
 
 class TrainTask:
@@ -137,17 +137,14 @@ class TrainTask:
             indices=self.training_indices
         ) 
 
-        num_workers = self.training_config['data_loader_workers']
         batch_size = self.training_config['batch_size']
 
         train_loader = DataLoader(
             full_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers,
+            num_workers=0,
             pin_memory=True,
-            prefetch_factor=4 if num_workers > 0 else None,
-            worker_init_fn=_worker_init_fn if num_workers > 0 else None,
         )
 
         return train_loader, full_dataset
