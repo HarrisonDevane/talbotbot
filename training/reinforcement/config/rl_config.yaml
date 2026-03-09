@@ -4,7 +4,7 @@ global:
   logging_rotation_steps: 1000                       # How often to make a new log folder
   min_buffer_size: 2048000                           # Minimum Replay Buffer Size
   max_buffer_size: 8192000                           # Max buffer size
-  buffer_ramp_steps: 10000                           # Steps to reach max buffer size
+  buffer_ramp_steps: 40000                           # Steps to reach max buffer size
   hdf5_chunk_size: 16                                # HDF5 storage chunking. Small is better for random access reading.
 
 model:
