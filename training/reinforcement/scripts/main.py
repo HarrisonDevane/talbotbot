@@ -45,8 +45,7 @@ class RLOrchestrator:
                     training_steps: 0           # Tracks global gradient updates (batches trained)
                     games_played: 0             # Total games played since inception
                     samples_generated: 0        # Total positions generated (including overwritten ones)
-                    hours_generating: 0         # Total hours spent in self-play
-                    hours_training: 0           # Total hours spent updating weights
+                    hours_training: 0           # Total hours spent training
                     self_play_entropy: 0.0
                 
                 # Statistics from current save interval                                  
@@ -292,10 +291,7 @@ class RLOrchestrator:
                 self.logger.info(f"New logging phase started at step {self.current_steps.value}")
 
             # --- Step 1: Collect Data (1 Step worth) ---
-            start_data_gen_time = time.time()
             new_data_chunk, games_in_chunk, chunk_entropy = next(data_iterator)
-            total_data_gen_time = time.time() - start_data_gen_time
-            self.state_config['state']['lifetime']['hours_generating'] = round(self.state_config['state']['lifetime']['hours_generating']  + (total_data_gen_time / 3600), 4)
 
             # --- Step 2: Update Buffer (SWMR) ---
             self._update_circular_buffer(new_data_chunk)
