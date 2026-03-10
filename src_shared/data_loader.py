@@ -1,58 +1,36 @@
 import torch
 from torch.utils.data import Dataset
-import h5py
 import numpy as np
+import src_shared.utils as u
 
 class ChessDataset(Dataset):
-    def __init__(self, hdf5_path: str, indices: list):
-        """
-        Standard Dataset for non-persistent training steps.
-        :param indices: The specific absolute positions to sample for this batch.
-        """
-        self.hdf5_path = hdf5_path
+    def __init__(self, buffer_dir: str, indices: list, max_capacity: int):
+        self.buffer_dir = buffer_dir
         self.indices = indices
-
-        # Handles initialized per-worker by _worker_init_fn
-        self.h5_file = None
-        self.boards_dset = None
-        self.policies_dset = None
-        self.values_dset = None
-
+        self.max_capacity = max_capacity
+        
+        # We don't load the files in __init__ to keep it multiprocessing-safe.
+        self.inputs = None
+        self.policies = None
+        self.values = None
 
     def __len__(self):
         return len(self.indices)
 
-
     def __getitem__(self, idx):
-        """
-        Fetches specific data at the requested index.
-        """
-        if self.h5_file is None:
-            self.h5_file = h5py.File(self.hdf5_path, 'r')
-            self.boards_dset = self.h5_file['inputs']
-            self.policies_dset = self.h5_file['policies']
-            self.values_dset = self.h5_file['values']
-
+        if self.inputs is None:
+            import os
+            # Mode 'c' (copy-on-write) or 'r' ensures we don't hold a write lock
+            self.inputs = np.memmap(os.path.join(self.buffer_dir, 'inputs.bin'), dtype='float16', mode='r', shape=(self.max_capacity, u.INPUT_CHANNELS, u.BOARD_DIM, u.BOARD_DIM))
+            self.policies = np.memmap(os.path.join(self.buffer_dir, 'policies.bin'), dtype='float16', mode='r', shape=(self.max_capacity, u.TOTAL_POLICY_MOVES))
+            self.values = np.memmap(os.path.join(self.buffer_dir, 'values.bin'), dtype='float16', mode='r', shape=(self.max_capacity,))
+            
         absolute_pos = self.indices[idx]
         
-        board = self.boards_dset[absolute_pos]
-        policy = self.policies_dset[absolute_pos]
-        value = self.values_dset[absolute_pos]
+        board = np.copy(self.inputs[absolute_pos])
+        policy = np.copy(self.policies[absolute_pos])
+        value = np.copy(self.values[absolute_pos])
 
         return torch.from_numpy(board).float(), \
                torch.from_numpy(policy).float(), \
                torch.tensor(value, dtype=torch.float32)
-    
-
-    def close(self):
-        if hasattr(self, 'h5_file') and self.h5_file is not None:
-            try:
-                if self.h5_file.id.valid:
-                    self.h5_file.close()
-            except:
-                pass
-            self.h5_file = None
-
-
-    def __del__(self):
-        self.close()

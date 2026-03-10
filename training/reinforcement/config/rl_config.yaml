@@ -2,9 +2,7 @@ global:
   total_training_steps: 100000                       # Total gradient updates to perform
   save_interval_steps: 10000                         # How often to backup the "best_model.pth" and replay buffer
   logging_rotation_steps: 10000                      # How often to make a new log folder
-  min_buffer_size: 2048000                           # Minimum Replay Buffer Size
-  max_buffer_size: 8192000                           # Max buffer size
-  buffer_ramp_steps: 40000                           # Steps to reach max buffer size
+  buffer_size: 8192000                               # Max buffer size
   hdf5_chunk_size: 16                                # HDF5 storage chunking. Small is better for random access reading.
 
 model:
@@ -40,7 +38,7 @@ data_generation:
 
 training:
   batch_size: 4096                                   # Positions per Gradient Update
-  sampling_ratio: 16.0                               # Train on x the amount of data generated
+  sampling_ratio: 8.0                                # Train on x the amount of data generated
   replacement: True                                  # Allow sampling the same position twice in one batch
   policy_loss_weight: 1.0                            # Weight for Move Prediction loss
   value_loss_weight: 1.0                             # Weight for Win/Loss Prediction loss
