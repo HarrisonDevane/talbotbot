@@ -232,6 +232,7 @@ class RLOrchestrator:
         current_log_dir = None
 
         while self.current_steps.value < self.total_steps:
+            start_train_time = time.time()
             rotation_interval = self.params_config['global']['logging_rotation_steps']
             target_folder_step = ((self.current_steps.value // rotation_interval) * rotation_interval)
             new_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:06d}")
@@ -248,10 +249,7 @@ class RLOrchestrator:
             # --- Step 2: Update Buffer (SWMR) ---
             self._update_circular_buffer(new_data_chunk)
 
-            start_train_time = time.time()
             test_latest_path, test_best_path = self.train_task.run_single_step(current_log_dir, self.state_config)
-            total_train_time = time.time() - start_train_time
-            self.state_config['state']['lifetime']['hours_training'] = round(self.state_config['state']['lifetime']['hours_training']  + (total_train_time / 3600), 4)
 
             shutil.copy(test_latest_path, self.latest_model_path)
             os.remove(test_latest_path)
@@ -275,6 +273,9 @@ class RLOrchestrator:
             self.state_config['state']['current_interval']['self_play_entropy'] += int(round(chunk_entropy, 4))
             
             self._save_state()
+
+            total_train_time = time.time() - start_train_time
+            self.state_config['state']['lifetime']['hours_training'] = round(self.state_config['state']['lifetime']['hours_training']  + (total_train_time / 3600), 4)
 
             if self.current_steps.value // self.save_interval > (self.current_steps.value - 1) // self.save_interval:
                 backup_dir = os.path.join(RL_DIR, 'backup')
