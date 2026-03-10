@@ -183,7 +183,7 @@ class RLOrchestrator:
                 values_dset = hf['values']
 
                 if inputs_dset.shape[0] < max_positions:
-                    self.logger.info(f"Resizing HDF5 datasets to {max_positions}")
+                    self.logger.debug(f"Resizing HDF5 datasets to {max_positions}")
                     inputs_dset.resize(max_positions, axis=0)
                     policies_dset.resize(max_positions, axis=0)
                     values_dset.resize(max_positions, axis=0)
@@ -305,7 +305,7 @@ class RLOrchestrator:
             os.remove(test_latest_path)
 
             if test_best_path:
-                self.logger.info('Updating best model')
+                self.logger.debug('Saving best model')
                 shutil.copy(test_best_path, self.best_model_path)
                 os.remove(test_best_path)
 

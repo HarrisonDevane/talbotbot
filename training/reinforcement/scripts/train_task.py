@@ -9,6 +9,7 @@ import os
 import sys
 import random
 import numpy as np
+import time
 
 # Ensure project root is in path for imports
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -202,9 +203,11 @@ class TrainTask:
             self.last_log_dir = current_log_dir
 
         # 2. Get Fresh Data
+        data_start = time.perf_counter()
         train_loader, full_dataset = self._get_dataloaders()
         batch = next(iter(train_loader))
         board_tensors, policy_target, value_targets = [t.to(self.device, non_blocking=True) for t in batch]
+        data_time = (time.perf_counter() - data_start) * 1000
 
         # 3. Static LR 
         global_step = self.state_config['lifetime']['training_steps']
@@ -223,6 +226,8 @@ class TrainTask:
         # 5. Training Step
         self.model.train()
         self.optimizer.zero_grad()
+        
+        fw_start = time.perf_counter()
         with torch.amp.autocast('cuda'):
             policy_logits, value_outputs = self.model(board_tensors)
             
@@ -234,17 +239,29 @@ class TrainTask:
             value_loss = self.value_criterion(value_outputs.squeeze(1), value_targets)
             total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
                          (value_loss * self.training_config['value_loss_weight'])
-            
-            self.logger.info(f"Training Step {global_step+1}: "
-                    f"P_Loss={(policy_loss.item() * self.training_config['policy_loss_weight']):.4f}, "
-                    f"V_Loss={(value_loss.item() * self.training_config['value_loss_weight']):.4f}, "
-                    f"T_Loss={total_loss.item():.4f}, "
-                    f"LR={self.optimizer.param_groups[0]['lr']:.4f}")
+        fw_time = (time.perf_counter() - fw_start) * 1000
 
         # 6. Backprop
+        bw_start = time.perf_counter()
         self.scaler.scale(total_loss).backward()
         self.scaler.step(self.optimizer)
         self.scaler.update()
+        bw_time = (time.perf_counter() - bw_start) * 1000
+
+        # Hardware Metrics
+        if torch.cuda.is_available():
+            vram_alloc = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
+            vram_res = torch.cuda.memory_reserved(self.device) / (1024 ** 2)
+        else:
+            vram_alloc, vram_res = 0.0, 0.0
+
+        self.logger.info(f"Training Step {global_step+1}: "
+                f"P_Loss={(policy_loss.item() * self.training_config['policy_loss_weight']):.4f} | "
+                f"V_Loss={(value_loss.item() * self.training_config['value_loss_weight']):.4f} | "
+                f"T_Loss={total_loss.item():.4f} | "
+                f"LR={self.optimizer.param_groups[0]['lr']:.4f} | "
+                f"FW: {fw_time:.1f}ms | BW: {bw_time:.1f}ms | Data: {data_time:.1f}ms | "
+                f"VRAM: {vram_alloc:.0f}MB/{vram_res:.0f}MB")
 
         # --- UPDATE EMA TARGET NETWORK ---
         self._update_ema_network()
