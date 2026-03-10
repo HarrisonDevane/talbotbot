@@ -1,36 +1,56 @@
 import torch
 from torch.utils.data import Dataset
-import numpy as np
-import src_shared.utils as u
+import h5py
 
 class ChessDataset(Dataset):
-    def __init__(self, buffer_dir: str, indices: list, max_capacity: int):
-        self.buffer_dir = buffer_dir
+    def __init__(self, hdf5_path: str, indices: list):
+        self.hdf5_path = hdf5_path
         self.indices = indices
-        self.max_capacity = max_capacity
+
+        # File and dataset handles start as None and are opened lazily
+        self.h5_file = None
+        self.boards_dset = None
+        self.policies_dset = None
+        self.values_dset = None
+
+    def _open_file(self):
+        """Lazy initialization of HDF5 handles for PyTorch multiprocess safety."""
+        # Ensure SWMR is True if you are reading while main.py is writing
+        self.h5_file = h5py.File(self.hdf5_path, 'r', swmr=True)
         
-        # We don't load the files in __init__ to keep it multiprocessing-safe.
-        self.inputs = None
-        self.policies = None
-        self.values = None
+        # FIXED: Match the exact keys written by main.py
+        self.boards_dset = self.h5_file['inputs'] 
+        self.policies_dset = self.h5_file['policies']
+        self.values_dset = self.h5_file['values']
 
     def __len__(self):
         return len(self.indices)
 
     def __getitem__(self, idx):
-        if self.inputs is None:
-            import os
-            # Mode 'c' (copy-on-write) or 'r' ensures we don't hold a write lock
-            self.inputs = np.memmap(os.path.join(self.buffer_dir, 'inputs.bin'), dtype='float16', mode='r', shape=(self.max_capacity, u.INPUT_CHANNELS, u.BOARD_DIM, u.BOARD_DIM))
-            self.policies = np.memmap(os.path.join(self.buffer_dir, 'policies.bin'), dtype='float16', mode='r', shape=(self.max_capacity, u.TOTAL_POLICY_MOVES))
-            self.values = np.memmap(os.path.join(self.buffer_dir, 'values.bin'), dtype='float16', mode='r', shape=(self.max_capacity,))
+        # Open the file on the very first access attempt
+        if self.h5_file is None:
+            self._open_file()
             
         absolute_pos = self.indices[idx]
         
-        board = np.copy(self.inputs[absolute_pos])
-        policy = np.copy(self.policies[absolute_pos])
-        value = np.copy(self.values[absolute_pos])
+        board = self.boards_dset[absolute_pos]
+        policy = self.policies_dset[absolute_pos]
+        value = self.values_dset[absolute_pos]
 
-        return torch.from_numpy(board).float(), \
-               torch.from_numpy(policy).float(), \
-               torch.tensor(value, dtype=torch.float32)
+        boards_tensor = torch.from_numpy(board).float()
+        policies_tensor = torch.from_numpy(policy).float()
+        values_tensor = torch.tensor(value, dtype=torch.float32)
+
+        return boards_tensor, policies_tensor, values_tensor
+
+    def close(self):
+        """Method to explicitly close the file handle."""
+        if hasattr(self, 'h5_file') and self.h5_file is not None:
+            try:
+                self.h5_file.close()
+            except Exception:
+                pass
+            self.h5_file = None
+
+    def __del__(self):
+        self.close()

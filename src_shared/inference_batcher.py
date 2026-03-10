@@ -106,7 +106,7 @@ class InferenceBatcher:
         psutil.Process().cpu_affinity(core_id)
 
 
-    def run(self, output_dir, inference_queue, result_queues, core_id, shared_input_buffer, shared_policy_buffer, shared_value_buffer, stop_event, current_steps, sync_interval, rotation_interval):
+    def run(self, output_dir, inference_queue, result_queues, core_id, shared_input_buffer, shared_policy_buffer, shared_value_buffer, stop_event, current_steps, rotation_interval):
         self.output_dir = output_dir
         self.inference_queue = inference_queue
         self.result_queues = result_queues
@@ -115,7 +115,6 @@ class InferenceBatcher:
         self.shared_value_buffer = shared_value_buffer
         self.stop_event = stop_event
         self.current_steps = current_steps
-        self.sync_interval = sync_interval
         self.rotation_interval = rotation_interval
 
         self._apply_process_settings(core_id)
@@ -153,8 +152,8 @@ class InferenceBatcher:
             if self.training:
                 global_step = self.current_steps.value
                 
-                if global_step % self.sync_interval == 0 and self.local_model_step < global_step:
-                    self.logger.info(f"Syncing EMA model at step {global_step}...")
+                if self.local_model_step < global_step:
+                    self.logger.info(f"Syncing model at step {global_step}...")
                     self._load_model() 
                     self.local_model_step = global_step
 

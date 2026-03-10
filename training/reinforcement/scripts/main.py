@@ -3,6 +3,7 @@ import time
 import yaml
 import logging
 import numpy as np
+import h5py
 import shutil
 import random
 import torch
@@ -16,7 +17,6 @@ current_script_dir = os.path.dirname(os.path.abspath(__file__))
 rl_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 
 from src_shared.model import ChessAIModel
-import src_shared.utils as u
 
 RL_DIR = os.path.abspath(os.path.join(rl_dir, "rl_dir"))
 CONFIG_RL_STATE_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_state.yaml"))
@@ -45,7 +45,7 @@ class RLOrchestrator:
                     training_steps: 0           # Tracks global gradient updates (batches trained)
                     games_played: 0             # Total games played since inception
                     samples_generated: 0        # Total positions generated (including overwritten ones)
-                    hours_training: 0           # Total hours spent training
+                    hours_training: 0           # Total hours spent updating weights
                     self_play_entropy: 0.0
                 
                 # Statistics from current save interval                                  
@@ -74,14 +74,16 @@ class RLOrchestrator:
         
         # Logger now points to the correct versioned folder immediately
         self.logger = self._setup_persistent_logger(initial_log_dir)
-        self.latest_model_path = os.path.abspath(os.path.join(RL_DIR, "best_models", "latest_model.pth"))
         self.best_model_path = os.path.abspath(os.path.join(RL_DIR, "best_models", "best_model.pth"))
 
-        if not os.path.exists(self.latest_model_path):
+        if not os.path.exists(self.best_model_path):
             self._create_new_model()
 
         os.makedirs(RL_DIR, exist_ok=True)
 
+        # Get buffer path from the global config file and make it absolute
+        buffer_file_name = os.path.abspath(os.path.join(RL_DIR, "replay_memory.hdf5"))
+        self.buffer_file_path = buffer_file_name
 
     def _create_new_model(self):
         random.seed(42)
@@ -107,7 +109,6 @@ class RLOrchestrator:
         os.makedirs(os.path.join(RL_DIR, 'best_models'),  exist_ok=True)
 
         torch.save(model_dict, os.path.join(RL_DIR, 'best_models', 'initial_model.pth'))
-        torch.save(model_dict, os.path.join(RL_DIR, 'best_models', 'latest_model.pth'))
         torch.save(model_dict, os.path.join(RL_DIR, 'best_models', 'best_model.pth'))
 
 
@@ -116,7 +117,7 @@ class RLOrchestrator:
         Configures a persistent logger for the current 1k-step rotation directory.
         """
         logger = logging.getLogger("RLOrchestrator")
-        logger.setLevel(logging.INFO)
+        logger.setLevel(self.params_config['data_generation']['main_logging_level'])
         
         # Clear old handlers to avoid duplicate logging when rotating folders
         if logger.hasHandlers():
@@ -139,66 +140,111 @@ class RLOrchestrator:
 
 
 
+    def get_dynamic_buffer_limit(self):
+        """
+        Calculates the target buffer capacity for the current training step.
+        Returns a linear ramp from min_size to max_size.
+        """
+
+        if self.current_steps.value >= self.params_config['global']['buffer_ramp_steps']:
+            return self.params_config['global']['max_buffer_size']
+        
+        # Linear Interpolation Formula
+        # Capacity = Min + (Progress % * (Max - Min))
+        progress = self.current_steps.value / self.params_config['global']['buffer_ramp_steps']
+        growth_range = self.params_config['global']['max_buffer_size'] - self.params_config['global']['min_buffer_size']
+        
+        current_capacity = self.params_config['global']['min_buffer_size'] + (progress * growth_range)
+        
+        return int(current_capacity)
+
+
     def _update_circular_buffer(self, new_data):
-        max_positions = self.params_config['global']['buffer_size']
+        max_positions = self.get_dynamic_buffer_limit()
         
         boards = np.array([item['board_state'] for item in new_data], dtype=np.float16)
         policies = np.array([item['policy'] for item in new_data], dtype=np.float16)
         values = np.array([item['value_target'] for item in new_data], dtype=np.float16)
 
+        self.logger.debug(f"Appending new data ({len(new_data)} positions) to the circular buffer: {self.buffer_file_path}")
+
+        # Proceed with the original, efficient in-place modification
         current_size = self.state_config['state']['buffer']['count']
         current_write_head = self.state_config['state']['buffer']['head_ptr']
         
-        # Initialize binary files if they don't exist
-        inputs_path = os.path.join(RL_DIR, 'inputs.bin')
-        policies_path = os.path.join(RL_DIR, 'policies.bin')
-        values_path = os.path.join(RL_DIR, 'values.bin')
+        with h5py.File(self.buffer_file_path, 'a') as hf:
+            if 'inputs' in hf and 'policies' in hf and 'values' in hf:
+                self.logger.debug(f"Existing datasets (headers) are: {list(hf.keys())}.")
 
-        if not os.path.exists(inputs_path):
-            self.logger.info("Creating raw binary memmap buffer files.")
-            # W+ initializes the file to the exact byte capacity needed
-            np.memmap(inputs_path, dtype='float16', mode='w+', shape=(max_positions, u.INPUT_CHANNELS, u.BOARD_DIM, u.BOARD_DIM)).flush()
-            np.memmap(policies_path, dtype='float16', mode='w+', shape=(max_positions, u.TOTAL_POLICY_MOVES)).flush()
-            np.memmap(values_path, dtype='float16', mode='w+', shape=(max_positions,)).flush()
+                inputs_dset = hf['inputs']
+                policies_dset = hf['policies']
+                values_dset = hf['values']
 
-        # Open in r+ (read/write) mode
-        inputs_dset = np.memmap(inputs_path, dtype='float16', mode='r+', shape=(max_positions, u.INPUT_CHANNELS, u.BOARD_DIM, u.BOARD_DIM))
-        policies_dset = np.memmap(policies_path, dtype='float16', mode='r+', shape=(max_positions, u.TOTAL_POLICY_MOVES))
-        values_dset = np.memmap(values_path, dtype='float16', mode='r+', shape=(max_positions,))
+                if inputs_dset.shape[0] < max_positions:
+                    self.logger.debug(f"Resizing HDF5 datasets to {max_positions}")
+                    inputs_dset.resize(max_positions, axis=0)
+                    policies_dset.resize(max_positions, axis=0)
+                    values_dset.resize(max_positions, axis=0)
 
-        num_remaining = len(boards)
-        
-        if current_write_head + num_remaining <= max_positions:
-            inputs_dset[current_write_head : current_write_head + num_remaining] = boards
-            policies_dset[current_write_head : current_write_head + num_remaining] = policies
-            values_dset[current_write_head : current_write_head + num_remaining] = values
+                num_remaining = len(boards)
+                
+                # Check if the new data fits contiguously without wrapping
+                # (e.g. Ptr=395k, Data=10k, Max=410k -> 405k <= 410k -> Fits!)
+                if current_write_head + num_remaining <= max_positions:
+                    # Case A: No Wrap (or flows into new space)
+                    inputs_dset[current_write_head : current_write_head + num_remaining] = boards
+                    policies_dset[current_write_head : current_write_head + num_remaining] = policies
+                    values_dset[current_write_head : current_write_head + num_remaining] = values
 
-            current_write_head += num_remaining
-            new_count = max(current_size, current_write_head)
-        else:
-            first_part_len = max_positions - current_write_head
-            second_part_len = num_remaining - first_part_len
+                    # Pointer simply moves forward
+                    current_write_head += num_remaining
+                    new_count = max(current_size, current_write_head)
+                
+                else:
+                    # Case B: Wrap Around
+                    # (e.g. Ptr=405k, Data=10k, Max=410k -> 415k > 410k -> Split)
+                    first_part_len = max_positions - current_write_head
+                    second_part_len = num_remaining - first_part_len
 
-            inputs_dset[current_write_head:] = boards[:first_part_len]
-            policies_dset[current_write_head:] = policies[:first_part_len]
-            values_dset[current_write_head:] = values[:first_part_len]
+                    # Write to the end (filling the new space)
+                    inputs_dset[current_write_head:] = boards[:first_part_len]
+                    policies_dset[current_write_head:] = policies[:first_part_len]
+                    values_dset[current_write_head:] = values[:first_part_len]
 
-            inputs_dset[:second_part_len] = boards[first_part_len:]
-            policies_dset[:second_part_len] = policies[first_part_len:]
-            values_dset[:second_part_len] = values[first_part_len:]
+                    # Wrap the rest to 0 (overwriting oldest data)
+                    inputs_dset[:second_part_len] = boards[first_part_len:]
+                    policies_dset[:second_part_len] = policies[first_part_len:]
+                    values_dset[:second_part_len] = values[first_part_len:]
 
-            current_write_head = second_part_len
-            new_count = max_positions
-            self.state_config['state']['buffer']['wraps'] += 1
+                    # Pointer wraps to the end of the second part
+                    current_write_head = second_part_len
+                    new_count = max_positions
+                    self.state_config['state']['buffer']['wraps'] += 1
 
-        # Force write to disk
-        inputs_dset.flush()
-        policies_dset.flush()
-        values_dset.flush()
-        
-        current_write_head = current_write_head % max_positions
-        self.state_config['state']['buffer']['head_ptr'] = current_write_head
-        self.state_config['state']['buffer']['count'] = new_count
+                # --- 3. UPDATE STATE ---
+                # Ensure the pointer is strictly modulo the size (safety)
+                current_write_head = current_write_head % max_positions
+                
+                self.state_config['state']['buffer']['head_ptr'] = current_write_head
+                self.state_config['state']['buffer']['count'] = new_count
+
+            else:
+                # File is brand new or was just created
+                self.logger.info("Creating new HDF5 datasets for the buffer with explicit chunking.")
+                hdf5_chunk_size = self.params_config['global']['hdf5_chunk_size']
+                
+                # Use the shape of the first data chunk to define the rest of the dimensions
+                board_shape = boards.shape[1:]
+                policy_shape = policies.shape[1:]
+                
+                # Create datasets with an explicit chunk shape
+                hf.create_dataset('inputs', data=boards, maxshape=(None, *board_shape), dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size, *board_shape))
+                hf.create_dataset('policies', data=policies, maxshape=(None, *policy_shape), dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size, *policy_shape))
+                hf.create_dataset('values', data=values, maxshape=(None,),dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size,))
+                
+                # Update the new state variables
+                self.state_config['state']['buffer']['count'] = len(new_data)
+                self.state_config['state']['buffer']['head_ptr'] = len(new_data) % max_positions
 
 
     def run(self):
@@ -210,7 +256,6 @@ class RLOrchestrator:
             output_dir=RL_DIR,
             current_steps=self.current_steps,
             rotation_interval=self.params_config['global']['logging_rotation_steps'],
-            sync_interval=self.params_config['training']['sync_interval'],
             best_model_path=self.best_model_path,
             model_config=self.params_config['model'],
             data_generation_config=self.params_config['data_generation'],
@@ -219,12 +264,11 @@ class RLOrchestrator:
 
         self.train_task = TrainTask(
             best_model_path=self.best_model_path,
-            latest_model_path=self.latest_model_path,
             model_config=self.params_config['model'],
             training_config=self.params_config['training'],
             state_config=self.state_config['state'],
             global_config=self.params_config['global'],
-            buffer_dir=RL_DIR,
+            hdf5_path=self.buffer_file_path,
         )
 
         # 2. Start the generator
@@ -232,7 +276,7 @@ class RLOrchestrator:
         current_log_dir = None
 
         while self.current_steps.value < self.total_steps:
-            start_train_time = time.time()
+            start_time = time.time()
             rotation_interval = self.params_config['global']['logging_rotation_steps']
             target_folder_step = ((self.current_steps.value // rotation_interval) * rotation_interval)
             new_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:06d}")
@@ -249,17 +293,12 @@ class RLOrchestrator:
             # --- Step 2: Update Buffer (SWMR) ---
             self._update_circular_buffer(new_data_chunk)
 
-            test_latest_path, test_best_path = self.train_task.run_single_step(current_log_dir, self.state_config)
+            test_model_path = self.train_task.run_single_step(current_log_dir, self.state_config)
 
-            shutil.copy(test_latest_path, self.latest_model_path)
-            os.remove(test_latest_path)
+            shutil.copy(test_model_path, self.best_model_path)
+            os.remove(test_model_path)
 
-            if test_best_path:
-                self.logger.debug('Saving best model')
-                shutil.copy(test_best_path, self.best_model_path)
-                os.remove(test_best_path)
-
-            # --- Step 3: Update State ---
+            # --- Step 5: Update State ---
             with self.current_steps.get_lock():
                 self.current_steps.value += 1
 
@@ -274,21 +313,27 @@ class RLOrchestrator:
             
             self._save_state()
 
-            total_train_time = time.time() - start_train_time
-            self.state_config['state']['lifetime']['hours_training'] = round(self.state_config['state']['lifetime']['hours_training']  + (total_train_time / 3600), 4)
+            total_time = time.time() - start_time
+            self.state_config['state']['lifetime']['hours_training'] = round(self.state_config['state']['lifetime']['hours_training']  + (total_time / 3600), 4)
 
             if self.current_steps.value // self.save_interval > (self.current_steps.value - 1) // self.save_interval:
                 backup_dir = os.path.join(RL_DIR, 'backup')
                 os.makedirs(backup_dir, exist_ok=True)
 
-                self.logger.info(f"Creating periodic backup at step {self.current_steps.value}...")
-
                 # Save current best model with step metadata
-                model_backup_path = os.path.join(backup_dir, f'step_{self.current_steps.value:06d}_best_model.pth')
+                model_backup_path = os.path.join(
+                    backup_dir, 
+                    f'step_{self.current_steps.value:06d}_model.pth'
+                )
                 shutil.copy(self.best_model_path, model_backup_path)
 
-                latest_model_backup_path = os.path.join(backup_dir, f'step_{self.current_steps.value:06d}_latest_model.pth')
-                shutil.copy(self.latest_model_path, latest_model_backup_path)
+                buffer_backup_path = os.path.join(
+                    backup_dir, 
+                    f'step_{self.current_steps.value:06d}_replay_memory.hdf5'
+                )
+                
+                self.logger.info(f"Creating periodic backup at step {self.current_steps.value}...")
+                shutil.copy(self.buffer_file_path, buffer_backup_path)
 
                 # Backup the state and config files as well
                 shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(current_log_dir, f'step_{self.current_steps.value:06d}_state.yaml'))
