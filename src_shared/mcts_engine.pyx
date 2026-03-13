@@ -676,7 +676,7 @@ cdef class MCTSEngine:
 
     cdef _backpropagate_minimax(self, MCTSNode_c.MCTSNode node):
         """
-        Optimized: Single-pass minimax update without Python list/lambda overhead.
+        Pure Exact-Value Solver for Mates Only
         """
         if not node.children:
             return
@@ -684,7 +684,6 @@ cdef class MCTSEngine:
         cdef MCTSNode_c.MCTSNode child
         cdef int best_win_dtm = 999999
         cdef int worst_loss_dtm = -1
-        cdef bint has_draw = False
         cdef bint all_children_are_wins = True
         cdef bint has_winning_child = False
 
@@ -694,9 +693,6 @@ cdef class MCTSEngine:
                 has_winning_child = True
                 if child.distance_to_mate < best_win_dtm:
                     best_win_dtm = child.distance_to_mate
-            
-            if child.forced_outcome == 0:
-                has_draw = True
             
             if child.forced_outcome != 1:
                 all_children_are_wins = False
@@ -708,16 +704,13 @@ cdef class MCTSEngine:
         if has_winning_child:
             node.forced_outcome = 1
             node.distance_to_mate = best_win_dtm + 1
-        elif has_draw and (node.visits > 0 and (node.value_sum / node.visits) <= 0.0):
-            node.forced_outcome = 0
-            node.distance_to_mate = 0
         elif all_children_are_wins:
             node.forced_outcome = -1
             node.distance_to_mate = worst_loss_dtm + 1
         else:
             node.forced_outcome = None
             node.distance_to_mate = None
-
+            
 
     cdef _backpropagate(self, MCTSNode_c.MCTSNode node, double value, bint is_terminal):
         """

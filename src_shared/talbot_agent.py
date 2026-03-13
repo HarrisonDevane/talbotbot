@@ -94,7 +94,7 @@ class TalbotAgent:
             self.logger.info(f"{len(best_winning_moves)} forced win/s in {min_dtm} moves were found.")
 
         # If a position is losing (defined by the average root node value) but has a forced draw available, take the draw based on the cutoff
-        elif (self.mcts.root.forced_outcome == 0) and any(c.forced_outcome == 0 for c in self.mcts.root.children.values()) and (self.mcts.root.calculate_v_mix() <= self.talbot_config['draw_cutoff']):
+        elif any(c.forced_outcome == 0 for c in self.mcts.root.children.values()) and (self.mcts.root.calculate_v_mix() <= self.talbot_config['draw_cutoff']):
             draw_moves = [
                 move for move, child in self.mcts.root.children.items()
                 if child.forced_outcome == 0
@@ -154,7 +154,6 @@ class TalbotAgent:
         elif (self.use_resignation and self.mcts.root.calculate_v_mix() < self.talbot_config['resignation_cutoff']):
             return None, policy_vector, simulation_count, 0.0
 
-        
         else:
             # 1. Gather stats from VISITED nodes only
             children = self.mcts.root.children
