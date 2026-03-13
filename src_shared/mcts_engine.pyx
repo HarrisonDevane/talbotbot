@@ -209,6 +209,9 @@ cdef class MCTSEngine:
             max_visits = 0.0
             sum_visits = 0.0
             for child in node.children.values():
+                if child.forced_outcome == 1:
+                    continue
+                    
                 if child.visits > max_visits:
                     max_visits = child.visits
                 sum_visits += child.visits
@@ -218,6 +221,8 @@ cdef class MCTSEngine:
             # 2. Second Pass: Calculate Gumbel scores and find max logit for stable Softmax
             max_score_logit = -1e20
             for child in node.children.values():
+                if child.forced_outcome == 1:
+                    continue 
                 score = child.calculate_gumbel_score(self.gumbel_c_visit, self.gumbel_c_scale, max_visits, v_mix)
                 if score > max_score_logit:
                     max_score_logit = score
@@ -225,9 +230,13 @@ cdef class MCTSEngine:
             # 3. Third Pass: Sum exps and find Best Deficit (Deterministic Policy Matching)
             sum_score_exp = 0.0
             for child in node.children.values():
+                if child.forced_outcome == 1:
+                    continue
                 sum_score_exp += exp(child.gumbel_score - max_score_logit)
 
             for child in node.children.values():
+                if child.forced_outcome == 1:
+                    continue
                 pi_prime = exp(child.gumbel_score - max_score_logit) / sum_score_exp
                 child_n_norm = child.visits / (1.0 + sum_visits)
                 
@@ -580,9 +589,14 @@ cdef class MCTSEngine:
 
             # F. Prune (Halve the candidates, unless we are on the final phase)
             if len(active_candidates) > 1 and phase_idx < (len(phase_budgets) - 1):
-                active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
-                cutoff = (len(active_candidates) + 1) // 2
-                active_candidates = active_candidates[:cutoff]
+                active_candidates = [c for c in active_candidates if c.forced_outcome != 1]
+                if len(active_candidates) == 0:
+                    break
+                
+                if len(active_candidates) > 1:
+                    active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
+                    cutoff = (len(active_candidates) + 1) // 2
+                    active_candidates = active_candidates[:cutoff]
 
         
         # 6. Final Score Update
