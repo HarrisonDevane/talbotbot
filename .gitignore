@@ -58,6 +58,9 @@ Thumbs.db
 build/*
 *.c
 *.pyd
+*.log
+*.hdf5
+*.pth
 
 # Model paths
 training/supervised/v1_pol_mvplayed_val_result_nsearch/model/
@@ -78,13 +81,7 @@ training/supervised/v3_hqgames_mcts/data/
 training/supervised/v4_hqgames_with_tactics_opmcts/data/
 training/supervised/v5_historic_input_channels/data/
 
-# Inference logs
-inference/logs
-
 # Reinforcement logs + data
-training/reinforcement/rl_dir/**/*.hdf5
-training/reinforcement/rl_dir/**/*.pth
 training/reinforcement/rl_dir/run_step_*/
-training/reinforcement/rl_dir/*.log
 training/reinforcement/config/rl_state.yaml
 training/reinforcement/rl_dir/backup/*
