@@ -188,10 +188,12 @@ class TalbotAgent:
             if ply_count <= self.talbot_config['temperature_ply_cutoff']:
                 visits = np.array([c.visits for c in visited_nodes], dtype=np.float32)
                 
-                # Identify absolute best move (Max visits -> Max Gumbel Score tiebreak)
-                max_visit_count = np.max(visits)
-                max_visit_indices = np.where(visits == max_visit_count)[0]
-                best_idx = max_visit_indices[np.argmax([visited_nodes[i].gumbel_score for i in max_visit_indices])]
+                # Identify the top 2 survivors by visit count
+                sorted_indices = np.argsort(visits)[::-1]
+                top_indices = sorted_indices[:2]
+
+                # Let the Gumbel Score decide the absolute best move among the survivors
+                best_idx = top_indices[np.argmax([visited_nodes[i].gumbel_score for i in top_indices])]
                 best_node = visited_nodes[best_idx]
                 best_q_val = -best_node.calculate_v_mix()
                 
@@ -232,10 +234,10 @@ class TalbotAgent:
                 best_move = visited_nodes[chosen_idx].move
                 
             else:
-                 max_visit_count = max(c.visits for c in visited_nodes)
-                 most_visited_set = [c for c in visited_nodes if c.visits >= max_visit_count]
-                 best_move = max(most_visited_set, key=lambda c: c.gumbel_score).move
-
+                # Outside temperature phase: Get top 2 by visits, pick max Gumbel Score
+                sorted_by_visits = sorted(visited_nodes, key=lambda c: c.visits, reverse=True)
+                top_candidates = sorted_by_visits[:2]
+                best_move = max(top_candidates, key=lambda c: c.gumbel_score).move
 
         move_end_time = time.time()
         total_move_time = move_end_time - move_start_time
