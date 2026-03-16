@@ -343,6 +343,8 @@ class RLOrchestrator:
                 self.state_config['state']['current_interval']['games_played'] = 0
                 self.state_config['state']['current_interval']['self_play_entropy'] = 0
 
+                self._save_state()
+
         # Training loop is finished
         self.logger.info("Total training steps reached. Shutting down workers...")
         

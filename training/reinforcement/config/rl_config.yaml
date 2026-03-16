@@ -1,5 +1,5 @@
 global:
-  total_training_steps: 5000                         # Total gradient updates to perform
+  total_training_steps: 20000                        # Total gradient updates to perform
   save_interval_steps: 1000                          # How often to backup the "best_model.pth" and replay buffer
   logging_rotation_steps: 1000                       # How often to make a new log folder
   min_buffer_size: 1024000                           # Minimum Replay Buffer Size
@@ -31,7 +31,7 @@ data_generation:
   temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
   temperature_top_move: 0.6                          # Probability the top move is played
   temperature_blunder_threshold: 0.3                 # Threshold for ignoring blunders
-  draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
+  draw_cutoff: -0.25                                 # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.90                          # Bot resigns to save compute time
   main_logging_level: 20                             # INFO level
