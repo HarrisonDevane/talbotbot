@@ -160,7 +160,7 @@ cdef class MCTSEngine:
                     raw_policy_logits = self.shared_policy_buffer[buffer_index] 
                     raw_value_output = self.shared_value_buffer[buffer_index]
 
-                    policy_logits = raw_policy_logits.to(self.policy_logits_dtype)
+                    policy_logits = raw_policy_logits.to(self.policy_logits_dtype, copy=True)
                     value_output = raw_value_output.item()
 
                     self.buffer_free_slots.put(buffer_index) 
@@ -311,7 +311,7 @@ cdef class MCTSEngine:
                     raw_policy_logits = self.shared_policy_buffer[buffer_index] 
                     raw_value_output = self.shared_value_buffer[buffer_index]
 
-                    policy_logits = raw_policy_logits.to(self.policy_logits_dtype)
+                    policy_logits = raw_policy_logits.to(self.policy_logits_dtype, copy=True)
                     value_output = raw_value_output.item()
 
                     self.buffer_free_slots.put(buffer_index) 
