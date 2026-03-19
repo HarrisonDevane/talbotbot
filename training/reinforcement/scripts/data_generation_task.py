@@ -168,7 +168,7 @@ class DataGenerationTask:
         ).share_memory_()
 
         self.shared_policy_buffer = torch.zeros(
-            self.max_batch_size, src_shared.utils.TOTAL_POLICY_MOVES, dtype=torch.float16
+            self.max_batch_size, src_shared.utils.TOTAL_POLICY_MOVES, dtype=torch.float32
         ).share_memory_()
         
         # Value (float32)

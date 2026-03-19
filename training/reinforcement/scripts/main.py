@@ -163,7 +163,7 @@ class RLOrchestrator:
         max_positions = self.get_dynamic_buffer_limit()
         
         boards = np.array([item['board_state'] for item in new_data], dtype=np.float16)
-        policies = np.array([item['policy'] for item in new_data], dtype=np.float16)
+        policies = np.array([item['policy'] for item in new_data], dtype=np.float32)
         values = np.array([item['value_target'] for item in new_data], dtype=np.float16)
 
         self.logger.debug(f"Appending new data ({len(new_data)} positions) to the circular buffer: {self.buffer_file_path}")
@@ -239,7 +239,7 @@ class RLOrchestrator:
                 
                 # Create datasets with an explicit chunk shape
                 hf.create_dataset('inputs', data=boards, maxshape=(None, *board_shape), dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size, *board_shape))
-                hf.create_dataset('policies', data=policies, maxshape=(None, *policy_shape), dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size, *policy_shape))
+                hf.create_dataset('policies', data=policies, maxshape=(None, *policy_shape), dtype=np.float32, compression='gzip', chunks=(hdf5_chunk_size, *policy_shape))
                 hf.create_dataset('values', data=values, maxshape=(None,),dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size,))
                 
                 # Update the new state variables
