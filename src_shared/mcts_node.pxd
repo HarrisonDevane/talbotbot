@@ -1,7 +1,7 @@
 cdef class MCTSNode:
     # C-Typed Pointers for node traversal (must be declared)
-    cdef public MCTSNode parent # <-- Crucial for cdef MCTSNode declarations
-    
+    cdef public MCTSNode parent
+    cdef public list child_list
     cdef public object move
     cdef public object pending_logits
     cdef public int visits

@@ -192,6 +192,8 @@ cdef class MCTSEngine:
         cdef double max_visits, sum_visits, v_mix
         cdef double max_score_logit, sum_score_exp, score
         cdef double pi_prime, child_n_norm, deficit, best_deficit
+        cdef int i
+        cdef int num_children
         
         while True:
             # JUST-IN-TIME EXPANSION
@@ -208,7 +210,12 @@ cdef class MCTSEngine:
             # 1. First Pass: Get Max Visits and v_mix
             max_visits = 0.0
             sum_visits = 0.0
-            for child in node.children.values():
+
+
+            num_children = len(node.child_list)
+
+            for i in range(num_children):
+                child = <MCTSNode_c.MCTSNode>node.child_list[i]
                 if child.forced_outcome == 1:
                     continue
                     
@@ -220,7 +227,8 @@ cdef class MCTSEngine:
             
             # 2. Second Pass: Calculate Gumbel scores and find max logit for stable Softmax
             max_score_logit = -1e20
-            for child in node.children.values():
+            for i in range(num_children):
+                child = <MCTSNode_c.MCTSNode>node.child_list[i]
                 if child.forced_outcome == 1:
                     continue 
                 score = child.calculate_gumbel_score(self.gumbel_c_visit, self.gumbel_c_scale, max_visits, v_mix)
@@ -229,12 +237,14 @@ cdef class MCTSEngine:
             
             # 3. Third Pass: Sum exps and find Best Deficit (Deterministic Policy Matching)
             sum_score_exp = 0.0
-            for child in node.children.values():
+            for i in range(num_children):
+                child = <MCTSNode_c.MCTSNode>node.child_list[i]
                 if child.forced_outcome == 1:
                     continue
                 sum_score_exp += exp(child.gumbel_score - max_score_logit)
 
-            for child in node.children.values():
+            for i in range(num_children):
+                child = <MCTSNode_c.MCTSNode>node.child_list[i]
                 if child.forced_outcome == 1:
                     continue
                 pi_prime = exp(child.gumbel_score - max_score_logit) / sum_score_exp
@@ -671,6 +681,7 @@ cdef class MCTSEngine:
 
         node.num_unselected_children = num_moves
         node.expanded = True
+        node.child_list = child_nodes_in_order
         self.time_expansion += (time.perf_counter() - time_expansion_start)
 
 
@@ -686,9 +697,12 @@ cdef class MCTSEngine:
         cdef int worst_loss_dtm = -1
         cdef bint all_children_are_wins = True
         cdef bint has_winning_child = False
+        cdef int i
+        cdef int num_children = len(node.child_list)
 
         # Single pass over children dictionary
-        for child in node.children.values():
+        for i in range(num_children):
+            child = <MCTSNode_c.MCTSNode>node.child_list[i]            
             if child.forced_outcome == -1:
                 has_winning_child = True
                 if child.distance_to_mate < best_win_dtm:

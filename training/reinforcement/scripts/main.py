@@ -86,11 +86,11 @@ class RLOrchestrator:
         self.buffer_file_path = buffer_file_name
 
     def _create_new_model(self):
-        random.seed(42)
-        np.random.seed(42)
-        torch.manual_seed(42)
+        random.seed(self.params_config['training']['seed'])
+        np.random.seed(self.params_config['training']['seed'])
+        torch.manual_seed(self.params_config['training']['seed'])
         if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(42)
+            torch.cuda.manual_seed_all(self.params_config['training']['seed'])
 
         # Create a new, seeded instance of the model
         model = ChessAIModel(

@@ -120,7 +120,7 @@ cdef cnp.ndarray _get_piece_planes(object board_state, bint orientation_color):
 cpdef cnp.ndarray board_to_tensor_69(object board):
     """
     Encode a python-chess Board into a (68, 8, 8) numpy float32 tensor.
-    Fully Relative Representation with Spatial Invariance.
+    Fully Relative Representation with Spatial Invariance (Vertical Mirror).
     """
     cdef cnp.ndarray planes = np.zeros((_INPUT_CHANNELS, _BOARD_DIM, _BOARD_DIM), dtype=np.float32)
     
@@ -136,25 +136,16 @@ cpdef cnp.ndarray board_to_tensor_69(object board):
     # 2. Auxiliary Planes (12-17)
     planes[12, :, :] = 1.0 if board.turn == chess.WHITE else 0.0
 
-    # Planes 13-16: Castling Rights (Relative + Spatial)
+    # Planes 13-16: Castling Rights
+    # Since we strictly vertically mirror, Kingside is ALWAYS right (+x) 
+    # and Queenside is ALWAYS left (-x) for both colors.
     us = board.turn
     them = not board.turn
 
-    if board.turn == chess.WHITE:
-        # White: Kingside is Right (Spatial), Queenside is Left
-        # Ch 13/14 = Mine, Ch 15/16 = Theirs
-        planes[13, :, :] = 1.0 if board.has_kingside_castling_rights(us) else 0.0
-        planes[14, :, :] = 1.0 if board.has_queenside_castling_rights(us) else 0.0
-        planes[15, :, :] = 1.0 if board.has_kingside_castling_rights(them) else 0.0
-        planes[16, :, :] = 1.0 if board.has_queenside_castling_rights(them) else 0.0
-    else:
-        # Black: Queenside is Right (Spatial), Kingside is Left
-        # We want Ch 13 to always mean "Castle Right"
-        # So we map Black's Queenside rights to Ch 13
-        planes[13, :, :] = 1.0 if board.has_queenside_castling_rights(us) else 0.0
-        planes[14, :, :] = 1.0 if board.has_kingside_castling_rights(us) else 0.0
-        planes[15, :, :] = 1.0 if board.has_queenside_castling_rights(them) else 0.0
-        planes[16, :, :] = 1.0 if board.has_kingside_castling_rights(them) else 0.0
+    planes[13, :, :] = 1.0 if board.has_kingside_castling_rights(us) else 0.0
+    planes[14, :, :] = 1.0 if board.has_queenside_castling_rights(us) else 0.0
+    planes[15, :, :] = 1.0 if board.has_kingside_castling_rights(them) else 0.0
+    planes[16, :, :] = 1.0 if board.has_queenside_castling_rights(them) else 0.0
 
     # Plane 17: En Passant
     # We DO NOT pre-flip. The global flip later handles this correctly.
@@ -182,9 +173,10 @@ cpdef cnp.ndarray board_to_tensor_69(object board):
     # 5. Add 50-move rule counter
     planes[68, :, :] = board.halfmove_clock / 100.0
 
-    # 6. Spatial Flip
+    # 6. Spatial Flip (Vertical Mirror ONLY)
     if board.turn == chess.BLACK:
-        planes = np.flip(planes, axis=(1, 2)).copy()
+        # axis=1 mirrors ranks, leaving files identical. 
+        planes = np.flip(planes, axis=1).copy()
 
     return planes
 
@@ -206,22 +198,19 @@ cpdef tuple move_to_policy_components(object move, object board):
     from_rank, from_file = chess.square_rank(move.from_square), chess.square_file(move.from_square)
     to_rank, to_file = chess.square_rank(move.to_square), chess.square_file(move.to_square)
 
-    # Coordinate normalization (Explicit Geometry Logic)
+    # Coordinate normalization (Strict Vertical Symmetry Logic)
     if board.turn == chess.WHITE:
         # White Perspective (Standard Matrix: Top-Left is a8)
-        # Rank 7 -> Row 0, File 0 -> Col 0
         from_row_norm = 7 - from_rank
         from_col_norm = from_file
         to_row_norm = 7 - to_rank
         to_col_norm = to_file
     else:
-        # Black Perspective (Rotated 180 Matrix: Top-Left is h1)
-        # Rank 0 -> Row 0, File 7 -> Col 0
-        # This matches np.flip(axis=(1,2)) used in input tensor
+        # Black Perspective (Vertical Mirror Matrix: Top-Left is a1)
         from_row_norm = from_rank
-        from_col_norm = 7 - from_file
+        from_col_norm = from_file
         to_row_norm = to_rank
-        to_col_norm = 7 - to_file
+        to_col_norm = to_file
 
     dr = to_row_norm - from_row_norm
     df = to_col_norm - from_col_norm
@@ -245,9 +234,9 @@ cpdef tuple move_to_policy_components(object move, object board):
     # 3. Handle Castling (treated as King moves for 2 squares)
     if board.is_castling(move):
         if df == 2:
-            direction_key = (0, 1) # East
+            direction_key = (0, 1) # East (Kingside)
         elif df == -2:
-            direction_key = (0, -1) # West
+            direction_key = (0, -1) # West (Queenside)
         else:
             raise ValueError(f"Unexpected castling move displacement: {move}")
 
@@ -283,7 +272,6 @@ cpdef tuple move_to_policy_components(object move, object board):
     return from_row_norm, from_col_norm, channel
 
 
-# FIX: Changed return type from 'chess.Move' to 'object'
 cpdef object policy_components_to_move(int from_row_norm, int from_col_norm, int channel, object board):
     """Converts a (row, col, channel) index back to a chess.Move."""
     
@@ -298,14 +286,11 @@ cpdef object policy_components_to_move(int from_row_norm, int from_col_norm, int
 
     # Inverse coordinate normalization (Matches the explicit geometry above)
     if board.turn == chess.WHITE:
-        # Inverse of (7 - rank) is (7 - row)
         actual_from_rank = 7 - from_row_norm
         actual_from_file = from_col_norm
     else:
-        # Inverse of (rank) is (row)
         actual_from_rank = from_row_norm
-        # Inverse of (7 - file) is (7 - col) -- FIX APPLIED
-        actual_from_file = 7 - from_col_norm
+        actual_from_file = from_col_norm
 
     actual_from_square = chess.square(actual_from_file, actual_from_rank)
 
@@ -332,7 +317,7 @@ cpdef object policy_components_to_move(int from_row_norm, int from_col_norm, int
             actual_to_file = to_col_norm
         else:
             actual_to_rank = to_row_norm
-            actual_to_file = 7 - to_col_norm # FIX APPLIED
+            actual_to_file = to_col_norm
 
         actual_to_square = chess.square(actual_to_file, actual_to_rank)
         move = chess.Move(actual_from_square, actual_to_square, promotion=promotion_piece)
@@ -357,7 +342,7 @@ cpdef object policy_components_to_move(int from_row_norm, int from_col_norm, int
             actual_to_file = to_col_norm
         else:
             actual_to_rank = to_row_norm
-            actual_to_file = 7 - to_col_norm # FIX APPLIED
+            actual_to_file = to_col_norm
 
         actual_to_square = chess.square(actual_to_file, actual_to_rank)
         move = chess.Move(actual_from_square, actual_to_square)
@@ -386,7 +371,7 @@ cpdef object policy_components_to_move(int from_row_norm, int from_col_norm, int
             actual_to_file = to_col_norm
         else:
             actual_to_rank = to_row_norm
-            actual_to_file = 7 - to_col_norm # FIX APPLIED
+            actual_to_file = to_col_norm
         
         actual_to_square = chess.square(actual_to_file, actual_to_rank)
         move = chess.Move(actual_from_square, actual_to_square)
@@ -408,7 +393,6 @@ cpdef object policy_components_to_move(int from_row_norm, int from_col_norm, int
 @cython.cdivision(True)
 cpdef inline int policy_components_to_flat_index(int from_row, int from_col, int channel):
     """Converts a (from_row, from_col, channel) tuple into a single integer index."""
-
     cdef int index
     index = from_row * (_BOARD_DIM * _POLICY_CHANNELS) + \
             from_col * _POLICY_CHANNELS + \
@@ -419,7 +403,6 @@ cpdef inline int policy_components_to_flat_index(int from_row, int from_col, int
 @cython.cdivision(True)
 cpdef inline tuple policy_flat_index_to_components(int flat_index):
     """Converts a single integer index back into its (from_row, from_col, channel) tuple."""
-    
     cdef int channel, remaining, from_col, from_row
     
     channel = flat_index % _POLICY_CHANNELS

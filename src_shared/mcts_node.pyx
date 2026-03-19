@@ -17,6 +17,7 @@ cdef class MCTSNode:
     def __init__(self, parent: 'MCTSNode' = None, move: chess.Move = None):
         self.parent = parent
         self.move = move
+        self.child_list = []
         self.children = {}
         self.forced_outcome = None
         self.pending_logits = None
@@ -68,8 +69,12 @@ cdef class MCTSNode:
     cpdef double calculate_v_mix(self):
         cdef double sum_visits = 0.0
         cdef double sum_q_weighted = 0.0
-        
-        for child in self.children.values():
+        cdef int i
+        cdef int num_children = len(self.child_list)
+        cdef MCTSNode child
+
+        for i in range(num_children):
+            child = <MCTSNode>self.child_list[i]
             if child.visits > 0:
                 sum_visits += child.visits
                 sum_q_weighted += (child.visits * (-child.value_sum / child.visits))
