@@ -64,6 +64,59 @@ PAWN_PROMO_MOVE_TYPES_MAPPING = {
 }
 PAWN_PROMO_MOVE_TYPES_LIST = list(PAWN_PROMO_MOVE_TYPES_MAPPING.keys())
 
+HORIZONTAL_FLIP_MAPPING_LIST = [
+    # Dir 0: North -> North
+    0, 1, 2, 3, 4, 5, 6,
+    # Dir 1 (NE) -> Dir 7 (NW)
+    49, 50, 51, 52, 53, 54, 55,
+    # Dir 2 (E) -> Dir 6 (W)
+    42, 43, 44, 45, 46, 47, 48,
+    # Dir 3 (SE) -> Dir 5 (SW)
+    35, 36, 37, 38, 39, 40, 41,
+    # Dir 4: South -> South
+    28, 29, 30, 31, 32, 33, 34,
+    # Dir 5 (SW) -> Dir 3 (SE)
+    21, 22, 23, 24, 25, 26, 27,
+    # Dir 6 (W) -> Dir 2 (E)
+    14, 15, 16, 17, 18, 19, 20,
+    # Dir 7 (NW) -> Dir 1 (NE)
+    7, 8, 9, 10, 11, 12, 13,
+    # Knights: Swap Left/Right Offsets
+    57, 56, 59, 58, 61, 60, 63, 62,
+    # Underpromotions: Swap Left/Right captures for N, B, R
+    64, 66, 65,
+    67, 69, 68,
+    70, 72, 71
+]
+
+VERTICAL_FLIP_MAPPING_LIST = [
+    # Dir 0 (North) -> Dir 4 (South)
+    28, 29, 30, 31, 32, 33, 34,
+    # Dir 1 (NE) -> Dir 3 (SE)
+    21, 22, 23, 24, 25, 26, 27,
+    # Dir 2 (East) -> Dir 2 (East) (Stays same)
+    14, 15, 16, 17, 18, 19, 20,
+    # Dir 3 (SE) -> Dir 1 (NE)
+    7, 8, 9, 10, 11, 12, 13,
+    # Dir 4 (South) -> Dir 0 (North)
+    0, 1, 2, 3, 4, 5, 6,
+    # Dir 5 (SW) -> Dir 7 (NW)
+    49, 50, 51, 52, 53, 54, 55,
+    # Dir 6 (West) -> Dir 6 (West) (Stays same)
+    42, 43, 44, 45, 46, 47, 48,
+    # Dir 7 (NW) -> Dir 5 (SW)
+    35, 36, 37, 38, 39, 40, 41,
+    # Knights: Swap North-offsets with South-offsets
+    # (dr, df): (-2, -1) -> (2, -1), (-2, 1) -> (2, 1), etc.
+    62, 63, 60, 61, 58, 59, 56, 57,
+    # Underpromotions: Vertically, a promotion is still a promotion.
+    # We only swap the file-direction of the capture (Left/Right)
+    # 64-66 (N), 67-69 (B), 70-72 (R)
+    64, 65, 66, 67, 68, 69, 70, 71, 72
+]
+
+_cached_horizontal_mapping_tensor = None
+_cached_vertical_mapping_tensor = None
 
 # --- Helper Functions (C-typed) ---
 
@@ -119,7 +172,7 @@ cdef cnp.ndarray _get_piece_planes(object board_state, bint orientation_color):
 
 cpdef cnp.ndarray board_to_tensor_69(object board):
     """
-    Encode a python-chess Board into a (68, 8, 8) numpy float32 tensor.
+    Encode a python-chess Board into a (69, 8, 8) numpy float32 tensor.
     Fully Relative Representation with Spatial Invariance (Vertical Mirror).
     """
     cdef cnp.ndarray planes = np.zeros((_INPUT_CHANNELS, _BOARD_DIM, _BOARD_DIM), dtype=np.float32)
@@ -400,6 +453,7 @@ cpdef inline int policy_components_to_flat_index(int from_row, int from_col, int
     
     return index
 
+
 @cython.cdivision(True)
 cpdef inline tuple policy_flat_index_to_components(int flat_index):
     """Converts a single integer index back into its (from_row, from_col, channel) tuple."""
@@ -435,6 +489,7 @@ cpdef object policy_components_to_flat_index_torch(object from_row_tensor,
     
     return flat_index_tensor
 
+
 @cython.cdivision(True)
 cpdef tuple policy_flat_index_to_components_torch(object flat_index_tensor):
     """Converts a 1D tensor of flat integer indices back into (from_row, from_col, channel) tensors."""
@@ -452,3 +507,64 @@ cpdef tuple policy_flat_index_to_components_torch(object flat_index_tensor):
     from_row_tensor = remaining_tensor // _BOARD_DIM
     
     return from_row_tensor, from_col_tensor, channel_tensor
+
+
+cpdef cnp.ndarray get_legal_move_mask(object board):
+    """Generates a 4672-length boolean array where True indicates a legal move."""
+    cdef cnp.ndarray mask = np.zeros(_TOTAL_POLICY_MOVES, dtype=np.bool_)
+    cdef list legal_moves = list(board.legal_moves)
+    cdef int from_row, from_col, channel, flat_index
+    cdef object move
+    
+    for move in legal_moves:
+        from_row, from_col, channel = move_to_policy_components(move, board)
+        flat_index = policy_components_to_flat_index(from_row, from_col, channel)
+        mask[flat_index] = True
+        
+    return mask
+
+
+cpdef tuple apply_horizontal_flip_torch(object boards_tensor, object policies_tensor, object masks_tensor):
+    """
+    Applies a horizontal flip to the board, policy, and mask tensors.
+    """
+    global _cached_horizontal_mapping_tensor
+    if _cached_horizontal_mapping_tensor is None:
+        _cached_horizontal_mapping_tensor = torch.tensor(HORIZONTAL_FLIP_MAPPING_LIST, dtype=torch.long)
+
+    boards_tensor = torch.flip(boards_tensor, dims=[2])
+    policies_3d = policies_tensor.view(_BOARD_DIM, _BOARD_DIM, _POLICY_CHANNELS)
+    masks_3d = masks_tensor.view(_BOARD_DIM, _BOARD_DIM, _POLICY_CHANNELS)
+
+    policies_3d = torch.flip(policies_3d, dims=[1])
+    masks_3d = torch.flip(masks_3d, dims=[1])
+
+    policies_3d = policies_3d[:, :, _cached_horizontal_mapping_tensor]
+    masks_3d = masks_3d[:, :, _cached_horizontal_mapping_tensor]
+
+    policies_tensor = policies_3d.reshape(-1)
+    masks_tensor = masks_3d.reshape(-1)
+
+    return boards_tensor, policies_tensor, masks_tensor
+
+
+cpdef tuple apply_vertical_flip_torch(object boards_tensor, object policies_tensor, object masks_tensor):
+    """
+    Applies a vertical flip to the board, policy, and mask tensors.
+    """
+    global _cached_vertical_mapping_tensor
+    if _cached_vertical_mapping_tensor is None:
+        _cached_vertical_mapping_tensor = torch.tensor(VERTICAL_FLIP_MAPPING_LIST, dtype=torch.long)
+
+    boards_tensor = torch.flip(boards_tensor, dims=[1])
+    
+    policies_3d = policies_tensor.view(_BOARD_DIM, _BOARD_DIM, _POLICY_CHANNELS)
+    masks_3d = masks_tensor.view(_BOARD_DIM, _BOARD_DIM, _POLICY_CHANNELS)
+
+    policies_3d = torch.flip(policies_3d, dims=[0])
+    masks_3d = torch.flip(masks_3d, dims=[0])
+
+    policies_3d = policies_3d[:, :, _cached_vertical_mapping_tensor]
+    masks_3d = masks_3d[:, :, _cached_vertical_mapping_tensor]
+
+    return boards_tensor, policies_3d.reshape(-1), masks_3d.reshape(-1)

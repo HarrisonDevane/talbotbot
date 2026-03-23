@@ -27,6 +27,7 @@ evaluation:
   temperature_ply_cutoff: 0                         # Sample proportional to visit count for first moves
   temperature_top_move: 0.5                          # Probability the top move is played
   temperature_blunder_threshold: 0.1                 # Threshold for ignoring blunders
+  forced_target_smoothing: 0.01                      # How much probability to assign to non-winning legal minimax moves
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -1.0                           # Bot resigns to save compute time

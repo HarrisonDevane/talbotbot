@@ -75,10 +75,13 @@ class DataGenerationGameWorker:
                 self.logger.info(f"Game {game_number} ended by resignation.")
 
             else:
-                board_state_tensor = src_shared.utils.board_to_tensor_69(current_board)                
+                board_state_tensor = src_shared.utils.board_to_tensor_69(current_board)
+                legal_mask = src_shared.utils.get_legal_move_mask(current_board)
+
                 raw_training_data.append({
                     "board_state": board_state_tensor,
                     "policy": policy_vector,
+                    "legal_mask": legal_mask,
                     "turn": current_board.turn,
                     "simulation_count": simulation_count
                 })
@@ -105,7 +108,8 @@ class DataGenerationGameWorker:
             final_training_data.append({
                 'board_state': move_num['board_state'],
                 'policy': move_num['policy'],
-                'value_target': final_game_value if move_num['turn'] == chess.WHITE else -final_game_value
+                'value_target': final_game_value if move_num['turn'] == chess.WHITE else -final_game_value,
+                "legal_mask": move_num['legal_mask']
             })
             
         return final_training_data, total_simulations, total_entropy

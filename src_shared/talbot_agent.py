@@ -70,6 +70,9 @@ class TalbotAgent:
         best_move = None
         policy_vector = np.zeros(src_shared.utils.TOTAL_POLICY_MOVES, dtype=np.float32)
 
+        # Extract the smoothing factor from your config
+        smoothing_factor = self.talbot_config['forced_target_smoothing']
+
         # If a forced win is detected, choose the fastest winning move.
         if (self.mcts.root.forced_outcome == 1) and any(c.forced_outcome == -1 for c in self.mcts.root.children.values()):
             winning_moves = [
@@ -83,31 +86,50 @@ class TalbotAgent:
             ]
             
             best_move = np.random.choice(best_winning_moves)
-            prob_per_move = 1.0 / len(best_winning_moves)
-            entropy = np.log(len(best_winning_moves))
+            
+            other_visited_moves = [
+                move for move, child in self.mcts.root.children.items() 
+                if child.visits > 0 and move not in best_winning_moves
+            ]
+            
+            if len(other_visited_moves) > 0:
+                prob_per_best = (1.0 - smoothing_factor) / len(best_winning_moves)
+                prob_per_other = smoothing_factor / len(other_visited_moves)
+            else:
+                prob_per_best = 1.0 / len(best_winning_moves)
+                prob_per_other = 0.0
+
+            entropy = 0.0
+            if prob_per_best > 0:
+                entropy -= len(best_winning_moves) * (prob_per_best * np.log(prob_per_best))
+            if prob_per_other > 0:
+                entropy -= len(other_visited_moves) * (prob_per_other * np.log(prob_per_other))
 
             for move in best_winning_moves:
                 from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
                 flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                policy_vector[flat_index] = prob_per_move
+                policy_vector[flat_index] = prob_per_best
+                
+            for move in other_visited_moves:
+                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
+                flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
+                policy_vector[flat_index] = prob_per_other
             
-            self.logger.info(f"{len(best_winning_moves)} forced win/s in {min_dtm} moves were found.")
+            self.logger.info(f"{len(best_winning_moves)} forced win/s in {min_dtm} moves were found. Applied {smoothing_factor} smoothing.")
 
-        # If a position is losing (defined by the average root node value) but has a forced draw available, take the draw based on the cutoff
+        # If a position is losing but has a forced draw available, take the draw based on the cutoff
         elif any(c.forced_outcome == 0 for c in self.mcts.root.children.values()) and (self.mcts.root.calculate_v_mix() <= self.talbot_config['draw_cutoff']):
             draw_moves = [
                 move for move, child in self.mcts.root.children.items()
                 if child.forced_outcome == 0
             ]
 
-            # Calculate the average value for each draw move
             draw_move_values = {}
             for move in draw_moves:
                 child = self.mcts.root.children[move]
                 average_value = -child.calculate_v_mix()
                 draw_move_values[move] = average_value
 
-            # Find the maximum average value
             max_avg_value = max(draw_move_values.values())
             best_draw_moves = [
                 move for move, avg_value in draw_move_values.items()
@@ -115,15 +137,36 @@ class TalbotAgent:
             ]
 
             best_move = np.random.choice(best_draw_moves)
-            prob_per_move = 1.0 / len(best_draw_moves)
-            entropy = np.log(len(best_draw_moves))
+            
+            other_visited_moves = [
+                move for move, child in self.mcts.root.children.items() 
+                if child.visits > 0 and move not in best_draw_moves
+            ]
+            
+            if len(other_visited_moves) > 0:
+                prob_per_best = (1.0 - smoothing_factor) / len(best_draw_moves)
+                prob_per_other = smoothing_factor / len(other_visited_moves)
+            else:
+                prob_per_best = 1.0 / len(best_draw_moves)
+                prob_per_other = 0.0
+
+            entropy = 0.0
+            if prob_per_best > 0:
+                entropy -= len(best_draw_moves) * (prob_per_best * np.log(prob_per_best))
+            if prob_per_other > 0:
+                entropy -= len(other_visited_moves) * (prob_per_other * np.log(prob_per_other))
 
             for move in best_draw_moves:
                 from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
                 flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                policy_vector[flat_index] = prob_per_move
+                policy_vector[flat_index] = prob_per_best
+                
+            for move in other_visited_moves:
+                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
+                flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
+                policy_vector[flat_index] = prob_per_other
 
-            self.logger.info(f"A forced draw is the best possible outcome. Choosing one of {len(best_draw_moves)} moves with the highest average value ({max_avg_value:.4f}).")
+            self.logger.info(f"Forced draw chosen from {len(best_draw_moves)} moves. Applied {smoothing_factor} smoothing.")
 
         # If a forced loss is detected, choose the move that leads to the longest mate for the opponent.
         elif (self.mcts.root.forced_outcome == -1) and any(c.forced_outcome == 1 for c in self.mcts.root.children.values()):
@@ -132,23 +175,43 @@ class TalbotAgent:
                 key=lambda c: c.distance_to_mate
             )
             
-            best_move = losing_child_for_parent.move
-            
-            # Distribute probabilities equally among all children that lead to the same longest mate.
             longest_mate_moves = [
                 move for move, child in self.mcts.root.children.items() 
                 if child.distance_to_mate == losing_child_for_parent.distance_to_mate
             ]
             
-            prob_per_move = 1.0 / len(longest_mate_moves)
-            entropy = np.log(len(longest_mate_moves))
+            best_move = np.random.choice(longest_mate_moves)
+            
+            # --- LABEL SMOOTHING LOGIC ---
+            other_visited_moves = [
+                move for move, child in self.mcts.root.children.items() 
+                if child.visits > 0 and move not in longest_mate_moves
+            ]
+            
+            if len(other_visited_moves) > 0:
+                prob_per_best = (1.0 - smoothing_factor) / len(longest_mate_moves)
+                prob_per_other = smoothing_factor / len(other_visited_moves)
+            else:
+                prob_per_best = 1.0 / len(longest_mate_moves)
+                prob_per_other = 0.0
+
+            entropy = 0.0
+            if prob_per_best > 0:
+                entropy -= len(longest_mate_moves) * (prob_per_best * np.log(prob_per_best))
+            if prob_per_other > 0:
+                entropy -= len(other_visited_moves) * (prob_per_other * np.log(prob_per_other))
 
             for move in longest_mate_moves:
                 from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
                 flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                policy_vector[flat_index] = prob_per_move
+                policy_vector[flat_index] = prob_per_best
+                
+            for move in other_visited_moves:
+                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
+                flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
+                policy_vector[flat_index] = prob_per_other
 
-            self.logger.info(f"Forced loss detected at the root. Selecting move that delays the loss the longest ({losing_child_for_parent.distance_to_mate} moves).")
+            self.logger.info(f"Forced loss detected. Delayed {losing_child_for_parent.distance_to_mate} moves. Applied {smoothing_factor} smoothing.")
         
         # Resign if below threshold
         elif (self.use_resignation and self.mcts.root.calculate_v_mix() < self.talbot_config['resignation_cutoff']):

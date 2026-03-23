@@ -79,8 +79,6 @@ class RLOrchestrator:
         if not os.path.exists(self.best_model_path):
             self._create_new_model()
 
-        os.makedirs(RL_DIR, exist_ok=True)
-
         # Get buffer path from the global config file and make it absolute
         buffer_file_name = os.path.abspath(os.path.join(RL_DIR, "replay_memory.hdf5"))
         self.buffer_file_path = buffer_file_name
@@ -165,6 +163,7 @@ class RLOrchestrator:
         boards = np.array([item['board_state'] for item in new_data], dtype=np.float16)
         policies = np.array([item['policy'] for item in new_data], dtype=np.float32)
         values = np.array([item['value_target'] for item in new_data], dtype=np.float16)
+        masks = np.array([item['legal_mask'] for item in new_data], dtype=np.bool_)
 
         self.logger.debug(f"Appending new data ({len(new_data)} positions) to the circular buffer: {self.buffer_file_path}")
 
@@ -179,12 +178,15 @@ class RLOrchestrator:
                 inputs_dset = hf['inputs']
                 policies_dset = hf['policies']
                 values_dset = hf['values']
+                masks_dset = hf['legal_masks']
 
                 if inputs_dset.shape[0] < max_positions:
                     self.logger.debug(f"Resizing HDF5 datasets to {max_positions}")
                     inputs_dset.resize(max_positions, axis=0)
                     policies_dset.resize(max_positions, axis=0)
                     values_dset.resize(max_positions, axis=0)
+                    masks_dset.resize(max_positions, axis=0)
+
 
                 num_remaining = len(boards)
                 
@@ -195,6 +197,7 @@ class RLOrchestrator:
                     inputs_dset[current_write_head : current_write_head + num_remaining] = boards
                     policies_dset[current_write_head : current_write_head + num_remaining] = policies
                     values_dset[current_write_head : current_write_head + num_remaining] = values
+                    masks_dset[current_write_head : current_write_head + num_remaining] = masks
 
                     # Pointer simply moves forward
                     current_write_head += num_remaining
@@ -210,11 +213,14 @@ class RLOrchestrator:
                     inputs_dset[current_write_head:] = boards[:first_part_len]
                     policies_dset[current_write_head:] = policies[:first_part_len]
                     values_dset[current_write_head:] = values[:first_part_len]
+                    masks_dset[current_write_head:] = masks[:first_part_len]
+
 
                     # Wrap the rest to 0 (overwriting oldest data)
                     inputs_dset[:second_part_len] = boards[first_part_len:]
                     policies_dset[:second_part_len] = policies[first_part_len:]
                     values_dset[:second_part_len] = values[first_part_len:]
+                    masks_dset[:second_part_len] = masks[first_part_len:]
 
                     # Pointer wraps to the end of the second part
                     current_write_head = second_part_len
@@ -241,6 +247,7 @@ class RLOrchestrator:
                 hf.create_dataset('inputs', data=boards, maxshape=(None, *board_shape), dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size, *board_shape))
                 hf.create_dataset('policies', data=policies, maxshape=(None, *policy_shape), dtype=np.float32, compression='gzip', chunks=(hdf5_chunk_size, *policy_shape))
                 hf.create_dataset('values', data=values, maxshape=(None,),dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size,))
+                hf.create_dataset('legal_masks', data=masks, maxshape=(None, 4672), dtype=np.bool_, compression='gzip', chunks=(hdf5_chunk_size, 4672))
                 
                 # Update the new state variables
                 self.state_config['state']['buffer']['count'] = len(new_data)
@@ -305,12 +312,15 @@ class RLOrchestrator:
             self.state_config['state']['lifetime']['training_steps'] = int(self.current_steps.value)
             self.state_config['state']['lifetime']['samples_generated'] += int(len(new_data_chunk))
             self.state_config['state']['lifetime']['games_played'] += int(games_in_chunk)
-            self.state_config['state']['lifetime']['self_play_entropy'] += int(round(chunk_entropy, 4))
+            self.state_config['state']['lifetime']['self_play_entropy'] = round(
+                self.state_config['state']['lifetime']['self_play_entropy'] + float(chunk_entropy), 4)
 
             self.state_config['state']['current_interval']['samples_generated'] += int(len(new_data_chunk))
             self.state_config['state']['current_interval']['games_played'] += int(games_in_chunk)
-            self.state_config['state']['current_interval']['self_play_entropy'] += int(round(chunk_entropy, 4))
-            
+
+            self.state_config['state']['current_interval']['self_play_entropy'] = round(
+                self.state_config['state']['current_interval']['self_play_entropy'] + float(chunk_entropy), 4)
+
             self._save_state()
 
             total_time = time.time() - start_time

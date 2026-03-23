@@ -31,6 +31,7 @@ data_generation:
   temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
   temperature_top_move: 0.6                          # Probability the top move is played
   temperature_blunder_threshold: 0.3                 # Threshold for ignoring blunders
+  forced_target_smoothing: 0.01                      # How much probability to assign to non-winning legal minimax moves
   draw_cutoff: -0.25                                 # Value threshold to consider a game a draw (minimax)
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.90                          # Bot resigns to save compute time
@@ -48,4 +49,5 @@ training:
   weight_decay: 1e-4                                 # L2 Regularization
   learning_rate: 1e-1                                # SGD Learning Rate for different phases of training
   momentum_rate: 0.9                                 # SGD Momentum
+  augment: True                                      # In symmetric no-castle positions, 2x augmentation. In no-pawn positions, 4x augmentation
   main_logging_level: 20                             # INFO level

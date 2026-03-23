@@ -119,7 +119,8 @@ class TrainTask:
 
         full_dataset = ChessDataset(
             hdf5_path=self.hdf5_path, 
-            indices=self.training_indices
+            indices=self.training_indices,
+            augment=self.training_config['augment']
         ) 
 
         batch_size = self.training_config['batch_size']
@@ -132,6 +133,7 @@ class TrainTask:
         )
 
         return train_loader, full_dataset
+
 
     def run_single_step(self, current_log_dir, state_config):
         """
@@ -156,7 +158,9 @@ class TrainTask:
         data_start = time.perf_counter()
         train_loader, _ = self._get_dataloaders()
         batch = next(iter(train_loader))
-        board_tensors, policy_target, value_targets = [t.to(self.device, non_blocking=True) for t in batch]
+        
+        board_tensors, policy_target, value_targets, true_legal_masks = [t.to(self.device, non_blocking=True) for t in batch]
+        
         data_time = (time.perf_counter() - data_start) * 1000
 
         # 3. Dynamic LR Update
@@ -173,27 +177,28 @@ class TrainTask:
         fw_start = time.perf_counter()
         with torch.amp.autocast('cuda'):
             policy_logits, value_outputs = self.model(board_tensors)
+
+        # Step outside autocast for numerically sensitive ops
+        policy_logits = policy_logits.float()  # promote to FP32
+        policy_logits = policy_logits.masked_fill(~true_legal_masks, -1e9)
+        policy_log_softmax = F.log_softmax(policy_logits, dim=1)
+
+        policy_loss = self.policy_criterion(policy_log_softmax, policy_target.float())
+        value_loss = self.value_criterion(value_outputs.squeeze(1).float(), value_targets.float())
+
+        total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
+                    (value_loss * self.training_config['value_loss_weight'])
             
-            # Masking and Loss logic
-            legal_mask = policy_target > 0.0
-            policy_logits = policy_logits.masked_fill(~legal_mask, torch.finfo(policy_logits.dtype).min)
-            policy_log_softmax = F.log_softmax(policy_logits, dim=1)
+        # Additional Stats Calculation (No Grad)
+        with torch.no_grad():
+            # Entropy: sum(-p * log(p))
+            policy_probs = torch.exp(policy_log_softmax)
+            policy_entropy = -(policy_probs * policy_log_softmax).sum(dim=1).mean()
             
-            policy_loss = self.policy_criterion(policy_log_softmax, policy_target)
-            value_loss = self.value_criterion(value_outputs.squeeze(1), value_targets)
-            total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
-                         (value_loss * self.training_config['value_loss_weight'])
+            # Value Means
+            v_out_mean = value_outputs.mean()
+            v_tar_mean = value_targets.mean()
             
-            # Additional Stats Calculation (No Grad)
-            with torch.no_grad():
-                # Entropy: sum(-p * log(p))
-                policy_probs = torch.exp(policy_log_softmax)
-                policy_entropy = -(policy_probs * policy_log_softmax).sum(dim=1).mean()
-                
-                # Value Means
-                v_out_mean = value_outputs.mean()
-                v_tar_mean = value_targets.mean()
-                
         fw_time = (time.perf_counter() - fw_start) * 1000
 
         # 5. Backprop
