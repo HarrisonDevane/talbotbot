@@ -120,7 +120,6 @@ class TrainTask:
         full_dataset = ChessDataset(
             hdf5_path=self.hdf5_path, 
             indices=self.training_indices,
-            augment=self.training_config['augment']
         ) 
 
         batch_size = self.training_config['batch_size']

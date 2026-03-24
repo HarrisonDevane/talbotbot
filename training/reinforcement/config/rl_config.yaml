@@ -49,5 +49,4 @@ training:
   weight_decay: 1e-4                                 # L2 Regularization
   learning_rate: 1e-1                                # SGD Learning Rate for different phases of training
   momentum_rate: 0.9                                 # SGD Momentum
-  augment: True                                      # In symmetric no-castle positions, 2x augmentation. In no-pawn positions, 4x augmentation
   main_logging_level: 20                             # INFO level

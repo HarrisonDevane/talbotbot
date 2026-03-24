@@ -5,10 +5,9 @@ import h5py
 import src_shared.utils as utils
 
 class ChessDataset(Dataset):
-    def __init__(self, hdf5_path: str, indices: list, augment: bool):
+    def __init__(self, hdf5_path: str, indices: list):
         self.hdf5_path = hdf5_path
         self.indices = indices
-        self.augment = augment
 
         # File and dataset handles start as None and are opened lazily
         self.h5_file = None
@@ -44,23 +43,6 @@ class ChessDataset(Dataset):
         policies_tensor = torch.from_numpy(policy).float()
         values_tensor = torch.tensor(value, dtype=torch.float32)
         masks_tensor = torch.from_numpy(mask).bool()
-
-        if self.augment:
-            # 1. Horizontal Flip (2x) - Valid if no castling
-            if boards_tensor[13:17, :, :].sum() == 0.0 and random.random() > 0.5:
-                boards_tensor, policies_tensor, masks_tensor = utils.apply_horizontal_flip_torch(
-                    boards_tensor, policies_tensor, masks_tensor
-                )
-
-            # 2. Vertical Flip (Adds 2x -> Total 4x)
-            # Valid ONLY if no castling AND no pawns exist in current or historical plies
-            # Pawn planes: 0, 6 (current) and 18, 24, 30, 36, 42, 48, 54, 60 (history)
-            pawn_indices = [0, 6, 18, 24, 30, 36, 42, 48, 54, 60]
-            
-            if boards_tensor[pawn_indices, :, :].sum() == 0.0 and random.random() > 0.5:
-                boards_tensor, policies_tensor, masks_tensor = utils.apply_vertical_flip_torch(
-                    boards_tensor, policies_tensor, masks_tensor
-                )
 
         return boards_tensor, policies_tensor, values_tensor, masks_tensor
 
