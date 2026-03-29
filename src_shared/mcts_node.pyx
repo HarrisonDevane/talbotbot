@@ -8,6 +8,38 @@ import math
 import torch
 import chess
 
+# Value Sign Convention:
+# value_sum accumulates from this node's own perspective (positive = good for the player to move here).
+# When ranking children, q_val negates value_sum to convert to the parent's perspective.
+# forced_outcome uses this node's perspective: -1 = forced win for the player here, 1 = forced loss, 0 = draw.
+
+# ==============================================================================
+# NEGAMAX VALUE CONVENTION
+# ==============================================================================
+# 1. NODE PERSPECTIVE (POV): 
+#    'value_sum' is stored from the node's OWN perspective. 
+#    A positive value means "The player whose turn it is AT THIS NODE is winning."
+#    This is maintained by flipping the sign at every ply during backpropagation
+#    (e.g., value = -value) in mcts_engine.pyx.
+#
+# 2. PARENT SELECTION (RANKING):
+#    When a parent evaluates its children (moves), it must see them from ITS POV.
+#    Since a "good" move for the child is "bad" for the parent, we negate:
+#    q_val = -value_sum / visits.
+#    This converts the child's "Good for me" into the parent's "Good for parent."
+#
+# 3. UNVISITED NODES (V_MIX):
+#    v_mix is calculated at the parent level as a weighted average of the 
+#    already-negated (parent-relative) q_vals of visited children.
+#    Therefore, v_mix is already in the PARENT'S perspective.
+#    To keep unvisited nodes on the same scale, we assign: q_val = v_mix.
+#
+# 4. TERMINAL SOLVER (FORCED OUTCOME):
+#    Also follows the Node's Own POV:
+#    -1 = FORCED WIN for the player moving at this node.
+#     1 = FORCED LOSS for the player moving at this node.
+#     0 = DRAW.
+
 # The MCTSNode is defined as a cdef class (Extension Type)
 cdef class MCTSNode:
     """

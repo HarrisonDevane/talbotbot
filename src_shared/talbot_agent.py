@@ -67,218 +67,100 @@ class TalbotAgent:
 
         simulation_count = self.mcts.run_simulations(phase_budgets)
 
-        best_move = None
-        policy_vector = np.zeros(src_shared.utils.TOTAL_POLICY_MOVES, dtype=np.float32)
+        # --- 1. CALCULATE BASE MCTS POLICY (All Legal Moves) ---
+        all_children = list(self.mcts.root.children.values())
+        all_moves = [c.move for c in all_children]
 
-        # Extract the smoothing factor from your config
-        smoothing_factor = self.talbot_config['forced_target_smoothing']
+        # Extract base probabilities using the noiseless Gumbel scores for ALL legal moves
+        base_logits = np.array([c.gumbel_score - c.gumbel_noise for c in all_children], dtype=np.float32)
+        base_logits = base_logits - np.max(base_logits)
+        base_probs = np.exp(base_logits) / np.sum(np.exp(base_logits))
 
-        # If a forced win is detected, choose the fastest winning move.
-        if (self.mcts.root.forced_outcome == 1) and any(c.forced_outcome == -1 for c in self.mcts.root.children.values()):
-            winning_moves = [
-                move for move, child in self.mcts.root.children.items() 
-                if child.forced_outcome == -1
-            ]
-            min_dtm = min(self.mcts.root.children[move].distance_to_mate for move in winning_moves)
-            best_winning_moves = [
-                move for move in winning_moves 
-                if self.mcts.root.children[move].distance_to_mate == min_dtm
-            ]
+        # --- 2. ISOLATE NODE CLASSIFICATIONS (All Legal Moves) ---
+        visited_nodes = [c for c in all_children if c.visits > 0]
+
+        winning_nodes = [c for c in all_children if c.forced_outcome == -1]
+        losing_nodes = [c for c in all_children if c.forced_outcome == 1]
+        draw_nodes = [c for c in all_children if c.forced_outcome == 0]
+        non_forced_nodes = [c for c in all_children if c.forced_outcome is None]
+        non_forced_visited = [c for c in non_forced_nodes if c.visits > 0]
+
+        # --- 3. TARGET GENERATION (final_probs over ALL legal moves) ---
+        smoothing_factor = self.talbot_config['minimax_smoothing_factor']
+
+        if winning_nodes:
+            # Find the fastest mate(s)
+            min_dtm = min(child.distance_to_mate for child in winning_nodes)
+            fastest_wins = [child for child in winning_nodes if child.distance_to_mate == min_dtm]
             
-            best_move = np.random.choice(best_winning_moves)
-            
-            other_visited_moves = [
-                move for move, child in self.mcts.root.children.items() 
-                if child.visits > 0 and move not in best_winning_moves
-            ]
-            
-            if len(other_visited_moves) > 0:
-                prob_per_best = (1.0 - smoothing_factor) / len(best_winning_moves)
-                prob_per_other = smoothing_factor / len(other_visited_moves)
-            else:
-                prob_per_best = 1.0 / len(best_winning_moves)
-                prob_per_other = 0.0
+            # Rule: Treat all FASTEST forced wins with equal probability for the prior
+            minimax_probs = np.zeros(len(all_children), dtype=np.float32)
+            prob_per_best = 1.0 / len(fastest_wins)
+            for i, child in enumerate(all_children):
+                if child in fastest_wins:
+                    minimax_probs[i] = prob_per_best
+                    
+            final_probs = (1.0 - smoothing_factor) * base_probs + (smoothing_factor * minimax_probs)
+            self.logger.info(f"{len(fastest_wins)} fastest win(s) found (DTM {min_dtm}).")
 
-            entropy = 0.0
-            if prob_per_best > 0:
-                entropy -= len(best_winning_moves) * (prob_per_best * np.log(prob_per_best))
-            if prob_per_other > 0:
-                entropy -= len(other_visited_moves) * (prob_per_other * np.log(prob_per_other))
+        elif draw_nodes and (self.mcts.root.calculate_v_mix() <= self.talbot_config['draw_cutoff']):
+            # Rule: Treat draw like a winning node if condition is satisfied
+            minimax_probs = np.zeros(len(all_children), dtype=np.float32)
+            prob_per_best = 1.0 / len(draw_nodes)
+            for i, child in enumerate(all_children):
+                if child in draw_nodes:
+                    minimax_probs[i] = prob_per_best
+            final_probs = (1.0 - smoothing_factor) * base_probs + (smoothing_factor * minimax_probs)
+            self.logger.info(f"Forced draw condition met for {len(draw_nodes)}.")
 
-            for move in best_winning_moves:
-                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
-                flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                policy_vector[flat_index] = prob_per_best
-                
-            for move in other_visited_moves:
-                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
-                flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                policy_vector[flat_index] = prob_per_other
-            
-            self.logger.info(f"{len(best_winning_moves)} forced win/s in {min_dtm} moves were found. Applied {smoothing_factor} smoothing.")
-
-        # If a position is losing but has a forced draw available, take the draw based on the cutoff
-        elif any(c.forced_outcome == 0 for c in self.mcts.root.children.values()) and (self.mcts.root.calculate_v_mix() <= self.talbot_config['draw_cutoff']):
-            draw_moves = [
-                move for move, child in self.mcts.root.children.items()
-                if child.forced_outcome == 0
-            ]
-
-            draw_move_values = {}
-            for move in draw_moves:
-                child = self.mcts.root.children[move]
-                average_value = -child.calculate_v_mix()
-                draw_move_values[move] = average_value
-
-            max_avg_value = max(draw_move_values.values())
-            best_draw_moves = [
-                move for move, avg_value in draw_move_values.items()
-                if abs(avg_value - max_avg_value) < 1e-6
-            ]
-
-            best_move = np.random.choice(best_draw_moves)
-            
-            other_visited_moves = [
-                move for move, child in self.mcts.root.children.items() 
-                if child.visits > 0 and move not in best_draw_moves
-            ]
-            
-            if len(other_visited_moves) > 0:
-                prob_per_best = (1.0 - smoothing_factor) / len(best_draw_moves)
-                prob_per_other = smoothing_factor / len(other_visited_moves)
-            else:
-                prob_per_best = 1.0 / len(best_draw_moves)
-                prob_per_other = 0.0
-
-            entropy = 0.0
-            if prob_per_best > 0:
-                entropy -= len(best_draw_moves) * (prob_per_best * np.log(prob_per_best))
-            if prob_per_other > 0:
-                entropy -= len(other_visited_moves) * (prob_per_other * np.log(prob_per_other))
-
-            for move in best_draw_moves:
-                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
-                flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                policy_vector[flat_index] = prob_per_best
-                
-            for move in other_visited_moves:
-                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
-                flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                policy_vector[flat_index] = prob_per_other
-
-            self.logger.info(f"Forced draw chosen from {len(best_draw_moves)} moves. Applied {smoothing_factor} smoothing.")
-
-        # If a forced loss is detected, choose the move that leads to the longest mate for the opponent.
-        elif (self.mcts.root.forced_outcome == -1) and any(c.forced_outcome == 1 for c in self.mcts.root.children.values()):
-            losing_child_for_parent = max(
-                (child for child in self.mcts.root.children.values()),
-                key=lambda c: c.distance_to_mate
-            )
-            
-            longest_mate_moves = [
-                move for move, child in self.mcts.root.children.items() 
-                if child.distance_to_mate == losing_child_for_parent.distance_to_mate
-            ]
-            
-            best_move = np.random.choice(longest_mate_moves)
-            
-            # --- LABEL SMOOTHING LOGIC ---
-            other_visited_moves = [
-                move for move, child in self.mcts.root.children.items() 
-                if child.visits > 0 and move not in longest_mate_moves
-            ]
-            
-            if len(other_visited_moves) > 0:
-                prob_per_best = (1.0 - smoothing_factor) / len(longest_mate_moves)
-                prob_per_other = smoothing_factor / len(other_visited_moves)
-            else:
-                prob_per_best = 1.0 / len(longest_mate_moves)
-                prob_per_other = 0.0
-
-            entropy = 0.0
-            if prob_per_best > 0:
-                entropy -= len(longest_mate_moves) * (prob_per_best * np.log(prob_per_best))
-            if prob_per_other > 0:
-                entropy -= len(other_visited_moves) * (prob_per_other * np.log(prob_per_other))
-
-            for move in longest_mate_moves:
-                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
-                flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                policy_vector[flat_index] = prob_per_best
-                
-            for move in other_visited_moves:
-                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, self.mcts.root_board)
-                flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                policy_vector[flat_index] = prob_per_other
-
-            self.logger.info(f"Forced loss detected. Delayed {losing_child_for_parent.distance_to_mate} moves. Applied {smoothing_factor} smoothing.")
-        
-        # Resign if below threshold
-        elif (self.use_resignation and self.mcts.root.calculate_v_mix() < self.talbot_config['resignation_cutoff']):
-            return None, policy_vector, simulation_count, 0.0
+        elif losing_nodes and non_forced_nodes:
+            # Rule: Inverse blend. Boost safe moves evenly. Losing moves retain (smoothing_factor * base_probs).
+            minimax_probs = np.zeros(len(all_children), dtype=np.float32)
+            prob_per_best = 1.0 / len(non_forced_nodes)
+            for i, child in enumerate(all_children):
+                if child in non_forced_nodes:
+                    minimax_probs[i] = prob_per_best
+            final_probs = (1.0 - smoothing_factor) * base_probs + (smoothing_factor * minimax_probs)
+            self.logger.info(f"{len(losing_nodes)} forced loss(es) found.")
 
         else:
-            # 1. Gather stats from VISITED nodes only
-            children = self.mcts.root.children
-            visited_nodes = [c for c in children.values() if c.visits > 0 and c.forced_outcome not in [0, 1]]
+            # Rule: No wins, no losses, and draw condition not met. Ignore and use base.
+            final_probs = base_probs
 
-            if not visited_nodes:
-                visited_nodes = list(children.values())
+        # --- 4. MOVE SELECTION ---
+        # Rule A: If a move is winning, pick it (lowest DTM)
+        if winning_nodes:
+            min_dtm = min(c.distance_to_mate for c in winning_nodes)
+            best_move = random.choice([c.move for c in winning_nodes if c.distance_to_mate == min_dtm])
 
-            # 3. Construct Targets
-            target_logits = []
-            moves = []
+        # Rule B: If a move is drawing and the draw condition is satisfied, pick it
+        elif draw_nodes and (self.mcts.root.calculate_v_mix() <= self.talbot_config['draw_cutoff']):
+            best_move = random.choice([c.move for c in draw_nodes])
             
-            for move, child in children.items():
-                target_logits.append(child.gumbel_score - child.gumbel_noise)
-                moves.append(move)
-
-            target_logits = np.array(target_logits)
-            target_logits = target_logits - np.max(target_logits)
-            target_probs = np.exp(target_logits) / np.sum(np.exp(target_logits))
-
-            entropy = -np.sum(target_probs * np.log(target_probs + 1e-10))
-
-            # 4. Map to Policy Vector
-            policy_vector = np.zeros(src_shared.utils.TOTAL_POLICY_MOVES, dtype=np.float32)
-            for i, move in enumerate(moves):
-                from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, board)
-                flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-                policy_vector[flat_index] = target_probs[i]
-
-
+        # Rule C: Filter losing moves out of the pool. Select from safe visited nodes.
+        elif non_forced_visited:
             if ply_count <= self.talbot_config['temperature_ply_cutoff']:
-                visits = np.array([c.visits for c in visited_nodes], dtype=np.float32)
-                
-                # Identify the top 2 survivors by visit count
-                indices = list(range(len(visited_nodes)))
-                indices.sort(key=lambda i: (visited_nodes[i].visits, visited_nodes[i].gumbel_score), reverse=True)
+                visits = np.array([c.visits for c in non_forced_visited], dtype=np.float32)
+                indices = list(range(len(non_forced_visited)))
+                indices.sort(key=lambda i: (non_forced_visited[i].visits, non_forced_visited[i].gumbel_score), reverse=True)
                 top_indices = indices[:2]
-
-                # Let the Gumbel Score decide the absolute best move among the survivors
-                best_idx = top_indices[np.argmax([visited_nodes[i].gumbel_score for i in top_indices])]
-                best_node = visited_nodes[best_idx]
-                best_q_val = -best_node.calculate_v_mix()
                 
-                valid_indices = []
-                for i, node in enumerate(visited_nodes):
-                    node_q_val = -node.calculate_v_mix()
-                    if (best_q_val - node_q_val) <= self.talbot_config['temperature_blunder_threshold']:
-                        valid_indices.append(i)
+                best_idx = top_indices[np.argmax([non_forced_visited[i].gumbel_score for i in top_indices])]
+                best_q_val = -non_forced_visited[best_idx].calculate_v_mix()
                 
-                # Hardcode the top move to the target percentage (e.g., 0.7)
-                act_probs = np.zeros(len(visited_nodes), dtype=np.float32)
+                valid_indices = [i for i, node in enumerate(non_forced_visited) 
+                                 if (best_q_val - (-node.calculate_v_mix())) <= self.talbot_config['temperature_blunder_threshold']]
+                
+                act_probs = np.zeros(len(non_forced_visited), dtype=np.float32)
                 top_prob = self.talbot_config['temperature_top_move']
                 act_probs[best_idx] = top_prob
                 
-                # Distribute the remaining probability linearly to the rest based on their visits
                 remaining_prob = 1.0 - top_prob
                 other_indices = [i for i in valid_indices if i != best_idx]
                 
                 if remaining_prob > 0 and len(other_indices) > 0:
                     other_visits = visits[other_indices]
                     sum_other_visits = np.sum(other_visits)
-                    
                     if sum_other_visits > 0:
                         act_probs[other_indices] = (other_visits / sum_other_visits) * remaining_prob
                     else:
@@ -287,24 +169,37 @@ class TalbotAgent:
                     act_probs[best_idx] = 1.0
                 
                 act_probs /= np.sum(act_probs)
-
-                move_probs = [(visited_nodes[i].move, act_probs[i]) for i in range(len(visited_nodes)) if act_probs[i] > 0]
-                move_probs.sort(key=lambda x: x[1], reverse=True)
-                dist_str = " | ".join([f"{m}: {p:.3f}" for m, p in move_probs])
-                self.logger.info(f"Action Probabilities: {dist_str}")
-                
-                chosen_idx = np.random.choice(len(visited_nodes), p=act_probs)
-                best_move = visited_nodes[chosen_idx].move
-                
+                chosen_idx = np.random.choice(len(non_forced_visited), p=act_probs)
+                best_move = non_forced_visited[chosen_idx].move
             else:
-                # Outside temperature phase: Get top 2 by visits, pick max Gumbel Score
-                sorted_by_visits = sorted(
-                    visited_nodes, 
-                    key=lambda c: (c.visits, c.gumbel_score), 
-                    reverse=True
-                )
-                top_candidates = sorted_by_visits[:2]
-                best_move = max(top_candidates, key=lambda c: c.gumbel_score).move
+                # Late game: Greedy choice strictly from safe moves
+                sorted_by_visits = sorted(non_forced_visited, key=lambda c: (c.visits, c.gumbel_score), reverse=True)
+                best_move = max(sorted_by_visits[:2], key=lambda c: c.gumbel_score).move
+                
+        # Rule D: If all visited moves are forced losses, delay the mate as long as possible
+        else:
+            if draw_nodes:
+                # Take the draw over getting checkmated
+                best_move = random.choice(draw_nodes).move
+            elif losing_nodes:
+                # Delay the mate as long as possible
+                best_move = max(losing_nodes, key=lambda c: c.distance_to_mate).move
+            else:
+                # Absolute fallback
+                best_move = random.choice(all_moves)
+
+        # Check Resignation (After target generation, before return)
+        if (self.use_resignation and self.mcts.root.calculate_v_mix() < self.talbot_config['resignation_cutoff']):
+            return None, np.zeros(src_shared.utils.TOTAL_POLICY_MOVES, dtype=np.float32), simulation_count, 0.0
+
+        # --- 5. MAP TO GLOBAL POLICY TENSOR ---
+        policy_vector = np.zeros(src_shared.utils.TOTAL_POLICY_MOVES, dtype=np.float32)
+        for i, move in enumerate(all_moves):
+            from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, board)
+            flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
+            policy_vector[flat_index] = final_probs[i]
+
+        entropy = -np.sum(final_probs * np.log(final_probs + 1e-10))
 
         move_end_time = time.time()
         total_move_time = move_end_time - move_start_time

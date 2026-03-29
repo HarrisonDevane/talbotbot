@@ -3,14 +3,13 @@ import torch.nn as nn
 import torch.optim as optim
 import logging
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 import os
 import sys
-import random
 import time
 import numpy as np
+import h5py
 
 # Ensure project root is in path for imports
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -18,7 +17,6 @@ project_root = os.path.abspath(os.path.join(current_script_dir, "../../.."))
 sys.path.insert(0, project_root)
 
 from src_shared.model import ChessAIModel
-from src_shared.data_loader import ChessDataset
 
 
 class TrainTask:
@@ -91,53 +89,9 @@ class TrainTask:
         return logger
 
 
-    def _get_shuffled_sample_indices(self):
-        """
-        Calculates a list of absolute sample indices from the original HDF5 file.
-        """
-        total_positions_source = self.state_config['buffer']['count']
-
-        # Total pool of individual sample indices (positions) to sample FROM
-        all_sample_indices = np.arange(total_positions_source)
-        
-        # Train for dynamic number of steps based on a fixed sampling ratio
-        total_samples = self.training_config['batch_size']
-        
-        final_indices = np.random.choice(
-            all_sample_indices, 
-            size=total_samples, 
-            replace=self.training_config['replacement']
-        ).tolist()
-        
-        random.shuffle(final_indices)
-        
-        return final_indices
-
-
-    def _get_dataloaders(self):
-        self.training_indices = self._get_shuffled_sample_indices()
-
-        full_dataset = ChessDataset(
-            hdf5_path=self.hdf5_path, 
-            indices=self.training_indices,
-        ) 
-
-        batch_size = self.training_config['batch_size']
-
-        train_loader = DataLoader(
-            full_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            pin_memory=True,
-        )
-
-        return train_loader, full_dataset
-
-
     def run_single_step(self, current_log_dir, state_config):
         """
-        Performs exactly one gradient update. 
-        Rebuilds DataLoader each time to ensure perfectly fresh sampling.
+        Performs exactly one gradient update using high-speed HDF5 bulk reading.
         """
         self.state_config = state_config['state']
 
@@ -153,12 +107,39 @@ class TrainTask:
 
             self.last_log_dir = current_log_dir
 
-        # 2. Get Fresh Data
+        # 2. Get Fresh Data (Bulk Read + Replacement)
         data_start = time.perf_counter()
-        train_loader, _ = self._get_dataloaders()
-        batch = next(iter(train_loader))
         
-        board_tensors, policy_target, value_targets, true_legal_masks = [t.to(self.device, non_blocking=True) for t in batch]
+        batch_size = self.training_config['batch_size']
+        total_positions = self.state_config['buffer']['count']
+        
+        if total_positions == 0:
+            raise ValueError("Replay buffer is empty. Cannot perform training step.")
+
+        # True random sample WITH replacement
+        raw_indices = np.random.choice(total_positions, size=batch_size, replace=True)
+        
+        # Extract unique indices for HDF5, and get the inverse map to rebuild the duplicates
+        unique_indices, inverse_indices = np.unique(raw_indices, return_inverse=True)
+
+        # Do ONE massive disk read using only the unique, sorted indices
+        with h5py.File(self.hdf5_path, 'r') as hf:
+            boards_unique = hf['inputs'][unique_indices]
+            policies_unique = hf['policies'][unique_indices]
+            values_unique = hf['values'][unique_indices]
+            masks_unique = hf['legal_masks'][unique_indices]
+
+        # Expand the unique data back to the full batch size (restoring duplicates & random order)
+        boards_np = boards_unique[inverse_indices]
+        policies_np = policies_unique[inverse_indices]
+        values_np = values_unique[inverse_indices]
+        masks_np = masks_unique[inverse_indices]
+
+        # Convert to PyTorch and send directly to VRAM
+        board_tensors = torch.from_numpy(boards_np).float().to(self.device, non_blocking=True)
+        policy_target = torch.from_numpy(policies_np).float().to(self.device, non_blocking=True)
+        value_targets = torch.tensor(values_np, dtype=torch.float32).to(self.device, non_blocking=True)
+        true_legal_masks = torch.from_numpy(masks_np).bool().to(self.device, non_blocking=True)
         
         data_time = (time.perf_counter() - data_start) * 1000
 
