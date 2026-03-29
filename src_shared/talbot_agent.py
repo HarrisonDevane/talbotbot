@@ -36,7 +36,7 @@ class TalbotAgent:
         self.mcts = None
         self.use_resignation = None
     
-    def get_move(self, board, ply_count, phase_budgets):
+    def get_move(self, board, ply_count, gumbel_search_depth, gumbel_m):
         """
         Runs MCTS simulations and selects a move based on a temperature schedule.
         """
@@ -65,7 +65,7 @@ class TalbotAgent:
             buffer_free_slots=self.buffer_free_slots
         )
 
-        simulation_count = self.mcts.run_simulations(phase_budgets)
+        simulation_count = self.mcts.run_simulations(gumbel_search_depth, gumbel_m)
 
         # --- 1. CALCULATE BASE MCTS POLICY (All Legal Moves) ---
         all_children = list(self.mcts.root.children.values())

@@ -285,6 +285,28 @@ cdef class MCTSEngine:
             current_node = parent
             parent = current_node.parent
 
+
+    cdef _unmark_selected(self, MCTSNode_c.MCTSNode node):
+        cdef MCTSNode_c.MCTSNode current_node = node
+        cdef MCTSNode_c.MCTSNode parent
+        
+        current_node.selected = False
+        parent = current_node.parent
+        
+        while parent is not None:
+            parent.num_unselected_children += 1
+            
+            # If it is exactly 1, it means it was previously 0 (fully selected).
+            # We must unselect it and tell ITS parent that a slot opened up.
+            if parent.num_unselected_children == 1:
+                parent.selected = False
+                current_node = parent
+                parent = current_node.parent
+            else:
+                # If it's > 1, the parent wasn't fully selected anyway. We can stop.
+                break
+
+
     cdef _retrieve_inference(self, bint block):
         cdef double time_retrieval_start
         cdef int buffer_index
@@ -477,23 +499,24 @@ cdef class MCTSEngine:
         self.logger.info("-" * 95)
             
 
-    cpdef run_simulations(self, list phase_budgets):
+    cpdef run_simulations(self, int search_depth, int max_m):
         """
-        Executes the Gumbel MuZero 'Sequential Halving' search using an explicit list of phase budgets.
-        Example: phase_budgets = [32, 32, 32, 32]
+        Executes the Gumbel MuZero 'Sequential Halving' search dynamically.
+        Instead of a hardcoded list, it allocates the simulation budget
+        across log2(m) phases.
         """
-        cdef int phase_budget
         cdef int sims_per_candidate
         cdef list all_nodes
         cdef list active_candidates
-        cdef list child_candidates
         cdef MCTSNode_c.MCTSNode child
-        cdef int initial_k
-        cdef int actual_k
+        cdef int m
+        cdef int num_phases
+        cdef int phase_budget
+        cdef int remaining_search_depth
+        cdef int num_cands
         cdef int i
         cdef int cutoff
         cdef int phase_idx
-        cdef int remaining_budget
         cdef double max_visits_phase
         cdef double max_visits_final
         cdef double root_v_mix
@@ -525,7 +548,7 @@ cdef class MCTSEngine:
         all_nodes = list(self.root.children.values())
         active_candidates = []
         
-        # 3. Initialize Gumbel Noise
+        # 2. Initialize Gumbel Noise
         for child in all_nodes:
             child.gumbel_noise = np.random.gumbel(0, self.gumbel_noise)
             child.gumbel_score = child.gumbel_noise + child.raw_logit
@@ -538,33 +561,39 @@ cdef class MCTSEngine:
                 active_candidates.append(child)
             self.root_board.pop()
 
-        # Cap k at the actual number of legal moves (minus terminal states) available on the board
-        actual_k = min(1 << len(phase_budgets), len(active_candidates))
-        self.logger.info(1 << len(phase_budgets))
+        # 3. Determine actual m (bounded by available legal moves)
+        m = min(max_m, len(active_candidates))
 
-        if len(active_candidates) == 0:
+        if m == 0:
             return self.simulation_count
 
         self._log_tournament_results(all_nodes, "Initial candidates:")
 
-        # 4. Initial Pruning (Top-k by prior + noise)
+        # 4. Initial Pruning (Top-m by prior + noise)
         active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
-        active_candidates = active_candidates[:actual_k]
+        active_candidates = active_candidates[:m]
 
-        # 5. Explicit Halving Loop
-        for phase_idx, phase_budget in enumerate(phase_budgets):
+        # Calculate phases
+        if m <= 1:
+            num_phases = 1
+        else:
+            num_phases = int(math.ceil(math.log2(m)))
             
-            # Stop if we've drilled down to the final survivor early
-            if len(active_candidates) <= 1: 
+        phase_budget = search_depth // num_phases
+        remaining_search_depth = search_depth
+
+        # 5. Dynamic Sequential Halving Loop
+        for phase_idx in range(num_phases):
+            num_cands = len(active_candidates)
+            if num_cands <= 1:
                 break
 
-            self.logger.info(f"Phase {phase_idx}: Budget {phase_budget} -> {phase_budget // len(active_candidates)} sims for {len(active_candidates)} candidates.")
+            self.logger.info(f"Phase {phase_idx}: Budget {phase_budget} -> {phase_budget // num_cands} sims for {num_cands} candidates.")
             
-            remaining_budget = phase_budget
-
+            # Root expansion budget tracking and initialization for Phase 0
             if phase_idx == 0:
                 for child in active_candidates:
-                    remaining_budget -= 1
+                    remaining_search_depth -= 1
                     self.root_board.push(child.move)
                     if not self.root_board.is_game_over(claim_draw=True):
                         self._queue_leaf_for_inference(child)
@@ -573,14 +602,26 @@ cdef class MCTSEngine:
                 self._submit_batch()
                 self._wait_for_inference()
 
+            # Calculate exact visits for this phase
+            if phase_idx == num_phases - 1:
+                # The final phase consumes all remaining extra visits to exactly hit n
+                sims_per_candidate = remaining_search_depth // num_cands
+            else:
+                # Standard phase follows max(1, floor(budget / candidates))
+                sims_per_candidate = max(1, phase_budget // num_cands)
+                
+                # Deduct the 1 visit we already spent on expansion during Phase 0
+                if phase_idx == 0:
+                    sims_per_candidate = max(0, sims_per_candidate - 1)
 
-            # Explicit budget consumption
-            sims_per_candidate = remaining_budget // len(active_candidates)
+            # Safety bound to never exceed remaining budget
+            sims_per_candidate = max(0, min(sims_per_candidate, remaining_search_depth // num_cands))
 
             # A. Run Batch Simulations
             for i in range(sims_per_candidate):
                 for child in active_candidates:
                     self._run_single_async_simulation(child)
+                    remaining_search_depth -= 1
 
             # B. Sync Barrier
             self._wait_for_inference() 
@@ -597,18 +638,18 @@ cdef class MCTSEngine:
             # E. Log Results
             self._log_tournament_results(active_candidates, f"Phase {phase_idx} End")
 
-            # F. Prune (Halve the candidates, unless we are on the final phase)
-            if len(active_candidates) > 1 and phase_idx < (len(phase_budgets) - 1):
+            # F. Prune (Halve the candidates, ensuring we don't accidentally drop below 2 before the end)
+            if num_cands > 1 and phase_idx < (num_phases - 1):
                 active_candidates = [c for c in active_candidates if c.forced_outcome != 1]
                 if len(active_candidates) == 0:
                     break
                 
                 if len(active_candidates) > 1:
                     active_candidates.sort(key=operator.attrgetter('gumbel_score'), reverse=True)
+                    # Use integer division to exactly halve, or round up if odd
                     cutoff = (len(active_candidates) + 1) // 2
                     active_candidates = active_candidates[:cutoff]
 
-        
         # 6. Final Score Update
         max_visits_final = max([c.visits for c in all_nodes if c.visits > 0], default=1.0)
         root_v_mix = self.root.calculate_v_mix()
@@ -616,7 +657,6 @@ cdef class MCTSEngine:
         for child in all_nodes:
             child.calculate_gumbel_score(self.gumbel_c_visit, self.gumbel_c_scale, max_visits_final, root_v_mix)
 
-        
         # Log Final Standings
         self._log_tournament_results(all_nodes, 'Final scores')
 
@@ -727,26 +767,25 @@ cdef class MCTSEngine:
             
 
     cdef _backpropagate(self, MCTSNode_c.MCTSNode node, double value, bint is_terminal):
-        """
-        Updates visit counts, value sums, and RAVE values along the path from a node up to the root.
-        Handles both terminal and inference-based backpropagation.
-        """
         cdef double time_backpropagation_start = time.perf_counter()
+        
+        # 1. Handle Tree Locking State
+        if is_terminal:
+            node.forced_outcome = int(value) 
+            node.distance_to_mate = 0
+            # CRITICAL: We do nothing to the selected flags. 
+            # The leaf stays selected forever, and the parent permanently loses 1 from its unselected_children counter.
+        else:
+            self._virtual_loss(node, is_applying=False)
+            # CRITICAL: Unmark the leaf, which safely cascades the counter restorations up the tree.
+            self._unmark_selected(node)
+
+        # 2. Standard Value Accumulation
         cdef MCTSNode_c.MCTSNode current_node = node
         cdef double value_for_backprop = value
-        
-        if is_terminal:
-            current_node.forced_outcome = int(value) 
-            current_node.distance_to_mate = 0
-        else:
-            self._virtual_loss(current_node, is_applying=False)
-
         current_node.raw_value = value
 
         while current_node is not None:
-            if not is_terminal:
-                current_node.selected = False 
-            
             current_node.visits += 1
             current_node.value_sum += value_for_backprop
             

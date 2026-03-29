@@ -27,7 +27,8 @@ data_generation:
   gumbel_c_visit: 50.0                               # Sigma used for gumbel score calucation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_noise: 1.0                                  # Gumbel noise value
-  gumbel_search_budget: [32,32,32,32]                # Search depth distribution (k = 2^number, search depth = sum)
+  gumbel_search_depth: 128                           # Search depth budget
+  gumbel_m: 16                                       # m value for sequential halving (top m moves sampled)
   temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
   temperature_top_move: 0.6                          # Probability the top move is played
   temperature_blunder_threshold: 0.3                 # Threshold for ignoring blunders

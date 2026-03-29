@@ -58,14 +58,16 @@ class DataGenerationGameWorker:
         total_simulations = 0
         total_entropy = 0
 
-        phase_budgets = self.data_generation_config['gumbel_search_budget']
-        self.logger.info(f"Game {game_number} will use a search depth of {sum(phase_budgets)}")
+        gumbel_search_depth = self.data_generation_config['gumbel_search_depth']
+        gumbel_m = self.data_generation_config['gumbel_m']
+        
+        self.logger.info(f"Game {game_number} will use a search depth of {gumbel_search_depth}")
 
         while not self.game_over:
             player = self.players[self.current_turn]
             current_board = self.board.copy()
 
-            move, policy_vector, simulation_count, move_entropy = player.get_move(current_board, ply_count, phase_budgets)
+            move, policy_vector, simulation_count, move_entropy = player.get_move(current_board, ply_count, gumbel_search_depth, gumbel_m)
             total_simulations += simulation_count
             total_entropy += move_entropy
 
