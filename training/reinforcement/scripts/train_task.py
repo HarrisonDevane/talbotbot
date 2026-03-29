@@ -9,7 +9,7 @@ import os
 import sys
 import time
 import numpy as np
-import h5py
+import lz4.frame
 
 # Ensure project root is in path for imports
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -17,11 +17,12 @@ project_root = os.path.abspath(os.path.join(current_script_dir, "../../.."))
 sys.path.insert(0, project_root)
 
 from src_shared.model import ChessAIModel
+import src_shared.utils as utils
 
 
 class TrainTask:
     def __init__(self, best_model_path: str, model_config: dict, 
-                 training_config: dict, state_config: dict, global_config: dict, hdf5_path: str):
+                 training_config: dict, state_config: dict, global_config: dict, lmdb_path: str, env):
         
         self.training_config = training_config
         self.best_model_path = best_model_path
@@ -30,7 +31,7 @@ class TrainTask:
         self.global_config = global_config
         self.output_dir = None
         self.logger = None
-        self.hdf5_path = hdf5_path
+        self.lmdb_path = lmdb_path
         
         self.last_log_dir = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -54,6 +55,8 @@ class TrainTask:
             momentum=self.training_config['momentum_rate'],
             weight_decay=float(self.training_config['weight_decay'])
         )
+
+        self.env = env
 
         self.scaler = GradScaler('cuda')
 
@@ -91,11 +94,11 @@ class TrainTask:
 
     def run_single_step(self, current_log_dir, state_config):
         """
-        Performs exactly one gradient update using high-speed HDF5 bulk reading.
+        Performs exactly one gradient update using high-speed LMDB + LZ4 random access.
         """
         self.state_config = state_config['state']
 
-        # 1. Logging Rotation
+        # 1. Logging Rotation (Handles TensorBoard and Folder logic)
         if current_log_dir != self.last_log_dir:
             self.output_dir = current_log_dir
             self.logger = self._setup_logger()
@@ -107,39 +110,62 @@ class TrainTask:
 
             self.last_log_dir = current_log_dir
 
-        # 2. Get Fresh Data (Bulk Read + Replacement)
+        # 2. Get Fresh Data (Random Key Access)
         data_start = time.perf_counter()
         
         batch_size = self.training_config['batch_size']
         total_positions = self.state_config['buffer']['count']
+
+        # Generate batch_size random indices within the current valid buffer range
+        indices = np.random.randint(0, total_positions, size=batch_size)
         
-        if total_positions == 0:
-            raise ValueError("Replay buffer is empty. Cannot perform training step.")
+        boards, policies, values, masks = [], [], [], []
 
-        # True random sample WITH replacement
-        raw_indices = np.random.choice(total_positions, size=batch_size, replace=True)
-        
-        # Extract unique indices for HDF5, and get the inverse map to rebuild the duplicates
-        unique_indices, inverse_indices = np.unique(raw_indices, return_inverse=True)
+        with self.env.begin(write=False, buffers=True) as txn:
+            for idx in indices:
+                key = f"{idx}".encode('ascii')
+                compressed_blob = txn.get(key)
+                
+                # FIX: Re-sample until we get a valid key to maintain exact batch size
+                while not compressed_blob:
+                    new_idx = np.random.randint(0, total_positions)
+                    compressed_blob = txn.get(f"{new_idx}".encode('ascii'))
 
-        # Do ONE massive disk read using only the unique, sorted indices
-        with h5py.File(self.hdf5_path, 'r') as hf:
-            boards_unique = hf['inputs'][unique_indices]
-            policies_unique = hf['policies'][unique_indices]
-            values_unique = hf['values'][unique_indices]
-            masks_unique = hf['legal_masks'][unique_indices]
+                # Decompress to raw buffer
+                buf = lz4.frame.decompress(compressed_blob)
+                
+                # 1. Read Header and set offsets correctly
+                num_moves = np.frombuffer(buf[0:2], dtype=np.uint16)[0]
 
-        # Expand the unique data back to the full batch size (restoring duplicates & random order)
-        boards_np = boards_unique[inverse_indices]
-        policies_np = policies_unique[inverse_indices]
-        values_np = values_unique[inverse_indices]
-        masks_np = masks_unique[inverse_indices]
+                off_board = 2 + utils.BOARD_BYTES
+                off_mask  = off_board + utils.MASK_BYTES
+                off_idx   = off_mask  + (2 * num_moves)
+                off_val   = off_idx   + (2 * num_moves)
 
-        # Convert to PyTorch and send directly to VRAM
-        board_tensors = torch.from_numpy(boards_np).float().to(self.device, non_blocking=True)
-        policy_target = torch.from_numpy(policies_np).float().to(self.device, non_blocking=True)
-        value_targets = torch.tensor(values_np, dtype=torch.float32).to(self.device, non_blocking=True)
-        true_legal_masks = torch.from_numpy(masks_np).bool().to(self.device, non_blocking=True)
+                # 2. Reconstruct Board (Now buf[2:554] will correctly pull the board)
+                board_bits = np.frombuffer(buf[2:off_board], dtype=np.uint8)
+                board = np.unpackbits(board_bits)[:utils.TOTAL_INPUT_SIZE]
+                boards.append(board.reshape(utils.INPUT_CHANNELS, 8, 8).astype(np.float32))
+
+                # 3. Reconstruct Mask
+                mask_bits = np.frombuffer(buf[off_board:off_mask], dtype=np.uint8)
+                masks.append(np.unpackbits(mask_bits)[:utils.TOTAL_POLICY_MOVES].astype(np.bool_))
+
+                # 4. Reconstruct Policy (Scatter)
+                pi_vec = np.zeros(utils.TOTAL_POLICY_MOVES, dtype=np.float32)
+                pi_vec[np.frombuffer(buf[off_mask:off_idx], dtype=np.uint16)] = \
+                    np.frombuffer(buf[off_idx:off_val], dtype=np.float16)
+                policies.append(pi_vec)
+
+                # 5. Value
+                values.append(np.frombuffer(buf[off_val:off_val+2], dtype=np.float16))
+
+
+        # Stack lists into batch tensors for the GPU
+        board_tensors = torch.from_numpy(np.stack(boards)).to(self.device, non_blocking=True)
+        policy_target = torch.from_numpy(np.stack(policies)).to(self.device, non_blocking=True)
+        value_targets = torch.from_numpy(np.stack(values)).float().to(self.device, non_blocking=True).flatten()
+        true_legal_masks = torch.from_numpy(np.stack(masks)).to(self.device, non_blocking=True)
         
         data_time = (time.perf_counter() - data_start) * 1000
 
@@ -158,8 +184,8 @@ class TrainTask:
         with torch.amp.autocast('cuda'):
             policy_logits, value_outputs = self.model(board_tensors)
 
-        # Step outside autocast for numerically sensitive ops
-        policy_logits = policy_logits.float()  # promote to FP32
+        # Numerical Stability: Step outside autocast and promote to FP32
+        policy_logits = policy_logits.float() 
         policy_logits = policy_logits.masked_fill(~true_legal_masks, -1e9)
         policy_log_softmax = F.log_softmax(policy_logits, dim=1)
 
@@ -169,13 +195,10 @@ class TrainTask:
         total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
                     (value_loss * self.training_config['value_loss_weight'])
             
-        # Additional Stats Calculation (No Grad)
+        # Stats Calculation
         with torch.no_grad():
-            # Entropy: sum(-p * log(p))
             policy_probs = torch.exp(policy_log_softmax)
             policy_entropy = -(policy_probs * policy_log_softmax).sum(dim=1).mean()
-            
-            # Value Means
             v_out_mean = value_outputs.mean()
             v_tar_mean = value_targets.mean()
             
@@ -185,7 +208,6 @@ class TrainTask:
         bw_start = time.perf_counter()
         self.scaler.scale(total_loss).backward()
         
-        # Unscale before computing grad norm
         self.scaler.unscale_(self.optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), float('inf'))
         
@@ -197,37 +219,22 @@ class TrainTask:
             f"Step {global_step+1} | "
             f"Loss: T={total_loss.item():.4f} (P={(policy_loss.item() * self.training_config['policy_loss_weight']):.4f}, V={(value_loss.item() * self.training_config['value_loss_weight']):.4f}) | "
             f"P_Ent={policy_entropy.item():.4f} | "
-            f"V_Out(mean)={v_out_mean.item():.4f} | "
-            f"V_Tar(mean)={v_tar_mean.item():.4f} | "
-            f"GradNorm={grad_norm.item():.2f} | "
-            f"LR={self.optimizer.param_groups[0]['lr']:.4f} | "
+            f"V_Out={v_out_mean.item():.4f} | V_Tar={v_tar_mean.item():.4f} | "
+            f"Grad={grad_norm.item():.2f} | LR={self.optimizer.param_groups[0]['lr']:.4f} | "
             f"ms: Data={data_time:.1f} FW={fw_time:.1f} BW={bw_time:.1f}"
         )
 
         if self.tb_writer:
-            # Losses
             self.tb_writer.add_scalar('Loss/Total', total_loss.item(), global_step)
-            self.tb_writer.add_scalar('Loss/Policy', (policy_loss.item() * self.training_config['policy_loss_weight']), global_step)
-            self.tb_writer.add_scalar('Loss/Value', (value_loss.item() * self.training_config['value_loss_weight']), global_step)
-            
-            # Key AlphaZero Metrics
             self.tb_writer.add_scalar('Metrics/Policy_Entropy', policy_entropy.item(), global_step)
-            self.tb_writer.add_scalar('Metrics/Value_Target_Mean', v_tar_mean.item(), global_step)
-            self.tb_writer.add_scalar('Metrics/Value_Output_Mean', v_out_mean.item(), global_step)
-            
-            # System / Optimizer Health
-            self.tb_writer.add_scalar('System/GradNorm', grad_norm.item(), global_step)
-            self.tb_writer.add_scalar('System/LearningRate', self.optimizer.param_groups[0]['lr'], global_step)
-            
-            # Hardware Bottleneck Tracking
             self.tb_writer.add_scalar('Hardware_MS/Data_Load', data_time, global_step)
-            self.tb_writer.add_scalar('Hardware_MS/Forward_Pass', fw_time, global_step)
-            self.tb_writer.add_scalar('Hardware_MS/Backward_Pass', bw_time, global_step)
 
-        # 6. Save Weights directly from VRAM
+        # 6. Save Weights (Final step)
         updated_model_path = os.path.join(self.output_dir, "updated_weights.pth")
-        torch.save({'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'scaler_state_dict': self.scaler.state_dict()}, updated_model_path)
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scaler_state_dict': self.scaler.state_dict()
+        }, updated_model_path)
 
         return updated_model_path

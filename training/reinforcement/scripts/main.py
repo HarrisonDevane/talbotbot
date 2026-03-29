@@ -3,12 +3,13 @@ import time
 import yaml
 import logging
 import numpy as np
-import h5py
 import shutil
 import random
 import torch
 import textwrap
 import multiprocessing as mp
+import lmdb
+import lz4.frame
 
 from data_generation_task import DataGenerationTask
 from train_task import TrainTask
@@ -17,6 +18,7 @@ current_script_dir = os.path.dirname(os.path.abspath(__file__))
 rl_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 
 from src_shared.model import ChessAIModel
+import src_shared.utils as utils
 
 RL_DIR = os.path.abspath(os.path.join(rl_dir, "rl_dir"))
 CONFIG_RL_STATE_FILE = os.path.abspath(os.path.join(rl_dir, "config", "rl_state.yaml"))
@@ -80,8 +82,14 @@ class RLOrchestrator:
             self._create_new_model()
 
         # Get buffer path from the global config file and make it absolute
-        buffer_file_name = os.path.abspath(os.path.join(RL_DIR, "replay_memory.hdf5"))
-        self.buffer_file_path = buffer_file_name
+        self.buffer_file_path = os.path.abspath(os.path.join(RL_DIR, "replay_memory.lmdb"))
+        self.env = lmdb.open(
+            self.buffer_file_path,
+            map_size=1024 * 1024 * 1024 * 128,
+            writemap=True,
+            map_async=True,
+            max_dbs=1
+        )
 
     def _create_new_model(self):
         random.seed(self.params_config['training']['seed'])
@@ -159,99 +167,44 @@ class RLOrchestrator:
 
     def _update_circular_buffer(self, new_data):
         max_positions = self.get_dynamic_buffer_limit()
-        
-        boards = np.array([item['board_state'] for item in new_data], dtype=np.float16)
-        policies = np.array([item['policy'] for item in new_data], dtype=np.float32)
-        values = np.array([item['value_target'] for item in new_data], dtype=np.float16)
-        masks = np.array([item['legal_mask'] for item in new_data], dtype=np.bool_)
-
-        self.logger.debug(f"Appending new data ({len(new_data)} positions) to the circular buffer: {self.buffer_file_path}")
-
-        # Proceed with the original, efficient in-place modification
-        current_size = self.state_config['state']['buffer']['count']
         current_write_head = self.state_config['state']['buffer']['head_ptr']
-        
-        with h5py.File(self.buffer_file_path, 'a') as hf:
-            if 'inputs' in hf and 'policies' in hf and 'values' in hf:
-                self.logger.debug(f"Existing datasets (headers) are: {list(hf.keys())}.")
+        current_size = self.state_config['state']['buffer']['count']
 
-                inputs_dset = hf['inputs']
-                policies_dset = hf['policies']
-                values_dset = hf['values']
-                masks_dset = hf['legal_masks']
+        with self.env.begin(write=True) as txn:
+            for item in new_data:
+                # 1. Bit-pack Binary Tensors
+                p_board = np.packbits(item['board_state'].astype(np.bool_)).tobytes()
+                p_mask = np.packbits(item['legal_mask'].astype(np.bool_)).tobytes()
 
-                if inputs_dset.shape[0] < max_positions:
-                    self.logger.debug(f"Resizing HDF5 datasets to {max_positions}")
-                    inputs_dset.resize(max_positions, axis=0)
-                    policies_dset.resize(max_positions, axis=0)
-                    values_dset.resize(max_positions, axis=0)
-                    masks_dset.resize(max_positions, axis=0)
+                # 2. Sparse Policy
+                policy = item['policy'].astype(np.float32)
+                idx = np.where(policy > 0)[0].astype(np.uint16)
+                val = policy[idx].astype(np.float16)
 
+                # 3. Manual Byte Packing (No Pickle)
+                # Header (2 bytes) + Board (552) + Mask (584) + Indices + Values + Value (2)
+                raw_payload = (
+                    np.uint16(len(idx)).tobytes() + 
+                    p_board + 
+                    p_mask + 
+                    idx.tobytes() + 
+                    val.tobytes() + 
+                    np.float16(item['value_target']).tobytes()
+                )
 
-                num_remaining = len(boards)
-                
-                # Check if the new data fits contiguously without wrapping
-                # (e.g. Ptr=395k, Data=10k, Max=410k -> 405k <= 410k -> Fits!)
-                if current_write_head + num_remaining <= max_positions:
-                    # Case A: No Wrap (or flows into new space)
-                    inputs_dset[current_write_head : current_write_head + num_remaining] = boards
-                    policies_dset[current_write_head : current_write_head + num_remaining] = policies
-                    values_dset[current_write_head : current_write_head + num_remaining] = values
-                    masks_dset[current_write_head : current_write_head + num_remaining] = masks
+                # 4. Compress and Put
+                compressed_blob = lz4.frame.compress(raw_payload)
+                key = f"{current_write_head}".encode('ascii')
+                txn.put(key, compressed_blob)
 
-                    # Pointer simply moves forward
-                    current_write_head += num_remaining
-                    new_count = max(current_size, current_write_head)
-                
+                current_write_head = (current_write_head + 1) % max_positions
+                if current_size < max_positions:
+                    current_size += 1
                 else:
-                    # Case B: Wrap Around
-                    # (e.g. Ptr=405k, Data=10k, Max=410k -> 415k > 410k -> Split)
-                    first_part_len = max_positions - current_write_head
-                    second_part_len = num_remaining - first_part_len
-
-                    # Write to the end (filling the new space)
-                    inputs_dset[current_write_head:] = boards[:first_part_len]
-                    policies_dset[current_write_head:] = policies[:first_part_len]
-                    values_dset[current_write_head:] = values[:first_part_len]
-                    masks_dset[current_write_head:] = masks[:first_part_len]
-
-
-                    # Wrap the rest to 0 (overwriting oldest data)
-                    inputs_dset[:second_part_len] = boards[first_part_len:]
-                    policies_dset[:second_part_len] = policies[first_part_len:]
-                    values_dset[:second_part_len] = values[first_part_len:]
-                    masks_dset[:second_part_len] = masks[first_part_len:]
-
-                    # Pointer wraps to the end of the second part
-                    current_write_head = second_part_len
-                    new_count = max_positions
                     self.state_config['state']['buffer']['wraps'] += 1
 
-                # --- 3. UPDATE STATE ---
-                # Ensure the pointer is strictly modulo the size (safety)
-                current_write_head = current_write_head % max_positions
-                
-                self.state_config['state']['buffer']['head_ptr'] = current_write_head
-                self.state_config['state']['buffer']['count'] = new_count
-
-            else:
-                # File is brand new or was just created
-                self.logger.info("Creating new HDF5 datasets for the buffer with explicit chunking.")
-                hdf5_chunk_size = self.params_config['global']['hdf5_chunk_size']
-                
-                # Use the shape of the first data chunk to define the rest of the dimensions
-                board_shape = boards.shape[1:]
-                policy_shape = policies.shape[1:]
-                
-                # Create datasets with an explicit chunk shape
-                hf.create_dataset('inputs', data=boards, maxshape=(None, *board_shape), dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size, *board_shape))
-                hf.create_dataset('policies', data=policies, maxshape=(None, *policy_shape), dtype=np.float32, compression='gzip', chunks=(hdf5_chunk_size, *policy_shape))
-                hf.create_dataset('values', data=values, maxshape=(None,),dtype=np.float16, compression='gzip', chunks=(hdf5_chunk_size,))
-                hf.create_dataset('legal_masks', data=masks, maxshape=(None, 4672), dtype=np.bool_, compression='gzip', chunks=(hdf5_chunk_size, 4672))
-                
-                # Update the new state variables
-                self.state_config['state']['buffer']['count'] = len(new_data)
-                self.state_config['state']['buffer']['head_ptr'] = len(new_data) % max_positions
+        self.state_config['state']['buffer']['head_ptr'] = current_write_head
+        self.state_config['state']['buffer']['count'] = current_size
 
 
     def run(self):
@@ -275,11 +228,12 @@ class RLOrchestrator:
             training_config=self.params_config['training'],
             state_config=self.state_config['state'],
             global_config=self.params_config['global'],
-            hdf5_path=self.buffer_file_path,
+            lmdb_path=self.buffer_file_path,
+            env=self.env
         )
 
         # 2. Start the generator
-        data_iterator = self.data_gen_task.run_persistently(chunk_size=int(self.params_config['training']['batch_size'] / self.params_config['training']['sampling_ratio']))
+        data_iterator = self.data_gen_task.run_persistently()
         current_log_dir = None
 
         while self.current_steps.value < self.total_steps:
@@ -294,11 +248,24 @@ class RLOrchestrator:
                 self.logger = self._setup_persistent_logger(current_log_dir)
                 self.logger.info(f"New logging phase started at step {self.current_steps.value}")
 
-            # --- Step 1: Collect Data (1 Step worth) ---
-            new_data_chunk, games_in_chunk, chunk_entropy = next(data_iterator)
+            # --- Step 1: Collect Data ---
+            local_chunk = []
+            positions_collected = 0
+            games_in_chunk = 0
+            chunk_entropy = 0.0
+            chunk_size = self.params_config['training']['batch_size'] / self.params_config['training']['sampling_ratio']
+
+            while positions_collected < chunk_size:
+                # Get one game from worker (training_data, game_entropy)
+                new_game_data, game_entropy = next(data_iterator)
+                
+                local_chunk.extend(new_game_data)
+                positions_collected += len(new_game_data)
+                games_in_chunk += 1
+                chunk_entropy += game_entropy
 
             # --- Step 2: Update Buffer (SWMR) ---
-            self._update_circular_buffer(new_data_chunk)
+            self._update_circular_buffer(local_chunk)
 
             test_model_path = self.train_task.run_single_step(current_log_dir, self.state_config)
 
@@ -310,12 +277,12 @@ class RLOrchestrator:
                 self.current_steps.value += 1
 
             self.state_config['state']['lifetime']['training_steps'] = int(self.current_steps.value)
-            self.state_config['state']['lifetime']['samples_generated'] += int(len(new_data_chunk))
+            self.state_config['state']['lifetime']['samples_generated'] += int(len(local_chunk))
             self.state_config['state']['lifetime']['games_played'] += int(games_in_chunk)
             self.state_config['state']['lifetime']['self_play_entropy'] = round(
                 self.state_config['state']['lifetime']['self_play_entropy'] + float(chunk_entropy), 4)
 
-            self.state_config['state']['current_interval']['samples_generated'] += int(len(new_data_chunk))
+            self.state_config['state']['current_interval']['samples_generated'] += int(len(local_chunk))
             self.state_config['state']['current_interval']['games_played'] += int(games_in_chunk)
 
             self.state_config['state']['current_interval']['self_play_entropy'] = round(
@@ -339,11 +306,10 @@ class RLOrchestrator:
 
                 buffer_backup_path = os.path.join(
                     backup_dir, 
-                    f'step_{self.current_steps.value:06d}_replay_memory.hdf5'
+                    f'step_{self.current_steps.value:06d}_replay_memory.lmdb'
                 )
                 
                 self.logger.info(f"Creating periodic backup at step {self.current_steps.value}...")
-                shutil.copy(self.buffer_file_path, buffer_backup_path)
 
                 # Backup the state and config files as well
                 shutil.copy(CONFIG_RL_STATE_FILE, os.path.join(current_log_dir, f'step_{self.current_steps.value:06d}_state.yaml'))

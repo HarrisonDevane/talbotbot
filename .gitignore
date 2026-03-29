@@ -59,8 +59,8 @@ build/*
 *.c
 *.pyd
 *.log
-*.hdf5
 *.pth
+*.lmdb
 
 # Model paths
 training/supervised/v1_pol_mvplayed_val_result_nsearch/model/

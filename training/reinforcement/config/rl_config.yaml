@@ -5,7 +5,6 @@ global:
   min_buffer_size: 1024000                           # Minimum Replay Buffer Size
   max_buffer_size: 16384000                          # Max buffer size
   buffer_ramp_steps: 10000                           # Steps to reach max buffer size
-  hdf5_chunk_size: 16                                # HDF5 storage chunking. Small is better for random access reading.
 
 model:
   input_planes: 69                                   # 68-plane feature stack (P1 pieces, P2 pieces, reps, etc.)

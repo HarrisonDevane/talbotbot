@@ -297,7 +297,7 @@ class DataGenerationTask:
             
             # Use a non-blocking put or check stop_event to ensure we don't hang on shutdown
             try:
-                data_queue.put((training_data, game_time, game_entropy), timeout=1.0)
+                data_queue.put((training_data, game_entropy), timeout=1.0)
             except:
                 worker_logger.warning("Data queue full or shutdown initiated. Dropping game data.")
 
@@ -305,10 +305,9 @@ class DataGenerationTask:
             worker_logger.info(f"Worker {worker_id} received stop signal. Exiting.")
                 
 
-    def run_persistently(self, chunk_size: int):
+    def run_persistently(self):
             """
             Starts the multi-process pipeline and stays alive.
-            Yields data in chunks of 'chunk_size' indefinitely.
             """
             # Create a stop event for graceful shutdown
             self.stop_event = mp.Event()
@@ -363,20 +362,9 @@ class DataGenerationTask:
             while not self.stop_event.is_set():
                 try:
                     # Block until a game is finished by any worker
-                    game_data, game_time, game_entropy = self.data_queue.get(timeout=1.0)              
-                    
-                    games_in_chunk += 1
-                    chunk_entropy += game_entropy
-                    collected_data.extend(game_data)
-                    
-                    # Check if we have reached the threshold requested by main.py
-                    if len(collected_data) >= chunk_size:
-                        yield collected_data, games_in_chunk, chunk_entropy
-                        
-                        # Reset chunk-specific stats but keep processes running
-                        collected_data = []
-                        games_in_chunk = 0
-                        chunk_entropy = 0
+                    game_data, game_entropy = self.data_queue.get(timeout=1.0)              
+                    yield game_data, game_entropy
+
                 except queue.Empty:
                     continue
 
