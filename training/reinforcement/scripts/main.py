@@ -172,36 +172,30 @@ class RLOrchestrator:
 
         with self.env.begin(write=True) as txn:
             for item in new_data:
-                # 1. Bit-pack Binary Tensors
                 p_board = np.packbits(item['board_state'].astype(np.bool_)).tobytes()
                 p_mask = np.packbits(item['legal_mask'].astype(np.bool_)).tobytes()
-
-                # 2. Sparse Policy
+                
                 policy = item['policy'].astype(np.float32)
                 idx = np.where(policy > 0)[0].astype(np.uint16)
                 val = policy[idx].astype(np.float16)
-
-                # 3. Manual Byte Packing (No Pickle)
-                # Header (2 bytes) + Board (552) + Mask (584) + Indices + Values + Value (2)
+                
                 raw_payload = (
-                    np.uint16(len(idx)).tobytes() + 
-                    p_board + 
-                    p_mask + 
-                    idx.tobytes() + 
-                    val.tobytes() + 
-                    np.float16(item['value_target']).tobytes()
+                    np.uint16(len(idx)).tobytes() + p_board + p_mask + 
+                    idx.tobytes() + val.tobytes() + np.float16(item['value_target']).tobytes()
                 )
-
-                # 4. Compress and Put
                 compressed_blob = lz4.frame.compress(raw_payload)
+
                 key = f"{current_write_head}".encode('ascii')
                 txn.put(key, compressed_blob)
 
-                current_write_head = (current_write_head + 1) % max_positions
-                if current_size < max_positions:
+                if current_write_head == current_size:
                     current_size += 1
-                else:
+
+                current_write_head = (current_write_head + 1) % max_positions
+                
+                if current_write_head == 0:
                     self.state_config['state']['buffer']['wraps'] += 1
+                    
 
         self.state_config['state']['buffer']['head_ptr'] = current_write_head
         self.state_config['state']['buffer']['count'] = current_size

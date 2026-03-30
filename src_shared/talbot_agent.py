@@ -78,6 +78,7 @@ class TalbotAgent:
 
         # --- 2. ISOLATE NODE CLASSIFICATIONS (All Legal Moves) ---
         visited_nodes = [c for c in all_children if c.visits > 0]
+        root_v_mix = self.mcts.root.calculate_v_mix()
 
         winning_nodes = [c for c in all_children if c.forced_outcome == -1]
         losing_nodes = [c for c in all_children if c.forced_outcome == 1]
@@ -103,7 +104,7 @@ class TalbotAgent:
             final_probs = (1.0 - smoothing_factor) * base_probs + (smoothing_factor * minimax_probs)
             self.logger.info(f"{len(fastest_wins)} fastest win(s) found (DTM {min_dtm}).")
 
-        elif draw_nodes and (self.mcts.root.calculate_v_mix() <= self.talbot_config['draw_cutoff']):
+        elif draw_nodes and (root_v_mix <= self.talbot_config['draw_cutoff']):
             # Rule: Treat draw like a winning node if condition is satisfied
             minimax_probs = np.zeros(len(all_children), dtype=np.float32)
             prob_per_best = 1.0 / len(draw_nodes)
@@ -134,7 +135,7 @@ class TalbotAgent:
             best_move = random.choice([c.move for c in winning_nodes if c.distance_to_mate == min_dtm])
 
         # Rule B: If a move is drawing and the draw condition is satisfied, pick it
-        elif draw_nodes and (self.mcts.root.calculate_v_mix() <= self.talbot_config['draw_cutoff']):
+        elif draw_nodes and (root_v_mix <= self.talbot_config['draw_cutoff']):
             best_move = random.choice([c.move for c in draw_nodes])
             
         # Rule C: Filter losing moves out of the pool. Select from safe visited nodes.
@@ -189,15 +190,11 @@ class TalbotAgent:
                 best_move = random.choice(all_moves)
 
         # Check Resignation (After target generation, before return)
-        if (self.use_resignation and self.mcts.root.calculate_v_mix() < self.talbot_config['resignation_cutoff']):
+        if (self.use_resignation and root_v_mix < self.talbot_config['resignation_cutoff']):
             return None, np.zeros(src_shared.utils.TOTAL_POLICY_MOVES, dtype=np.float32), simulation_count, 0.0
 
         # --- 5. MAP TO GLOBAL POLICY TENSOR ---
-        policy_vector = np.zeros(src_shared.utils.TOTAL_POLICY_MOVES, dtype=np.float32)
-        for i, move in enumerate(all_moves):
-            from_row, from_col, channel = src_shared.utils.move_to_policy_components(move, board)
-            flat_index = src_shared.utils.policy_components_to_flat_index(from_row, from_col, channel)
-            policy_vector[flat_index] = final_probs[i]
+        policy_vector = src_shared.utils.map_policy_to_global_vector(all_moves, final_probs, board)
 
         entropy = -np.sum(final_probs * np.log(final_probs + 1e-10))
 
@@ -207,7 +204,7 @@ class TalbotAgent:
 
         self.logger.info(f"Total move time: {total_move_time:.4f}, with {simulation_speed:.4f} simulations per second")
         self.logger.info(f"Total entropy: {entropy:.4f}")
-        self.logger.info(f"Average root node value: {self.mcts.root.calculate_v_mix():.4f}")
+        self.logger.info(f"Average root node value: {root_v_mix:.4f}")
 
         return best_move, policy_vector, simulation_count, entropy
 

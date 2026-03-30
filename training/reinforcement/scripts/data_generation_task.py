@@ -60,6 +60,7 @@ class DataGenerationGameWorker:
 
         gumbel_search_depth = self.data_generation_config['gumbel_search_depth']
         gumbel_m = self.data_generation_config['gumbel_m']
+        max_ply = self.data_generation_config['max_ply_length']
         
         self.logger.info(f"Game {game_number} will use a search depth of {gumbel_search_depth}")
 
@@ -93,7 +94,7 @@ class DataGenerationGameWorker:
                 self.logger.info(f"Game {game_number} - Move made: {move.uci()}")
                 ply_count += 1
                         
-                self._check_game_over(game_number)
+                self._check_game_over(game_number, ply_count, max_ply)
 
 
         self._generate_pgn(game_number)
@@ -117,9 +118,9 @@ class DataGenerationGameWorker:
         return final_training_data, total_simulations, total_entropy
 
 
-    def _check_game_over(self, game_number):
+    def _check_game_over(self, game_number, ply_count, max_ply):
         """
-        Checks if the game has ended and logs the outcome.
+        Checks if the game has ended naturally or hit the hard ply limit.
         """
         if self.board.is_game_over(claim_draw=True):
             self.game_over = True
@@ -131,7 +132,12 @@ class DataGenerationGameWorker:
                 self.logger.info(f"Game {game_number} ended by 50-move rule claim.")
             else:
                 self.logger.info(f"Game {game_number} over. Result: {self.result}")
-
+        
+        # Hard cutoff to prevent endless wandering
+        elif ply_count >= max_ply:
+            self.game_over = True
+            self.result = "1/2-1/2"
+            self.logger.info(f"Game {game_number} forcibly drawn due to max ply cutoff ({max_ply}).")
 
     def _generate_pgn(self, game_number):
         game = chess.pgn.Game.from_board(self.board)

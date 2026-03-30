@@ -182,7 +182,8 @@ cdef class MCTSEngine:
 
     cpdef _select(self, MCTSNode_c.MCTSNode start_node, list simulation_path):
         """
-        Optimized Traversal: Single-pass selection with zero list allocations.
+        Optimized Traversal: Single-pass selection with zero list allocations
+        and cached exponentiations.
         """
         cdef double time_selection_start = time.perf_counter()
         
@@ -191,16 +192,19 @@ cdef class MCTSEngine:
         
         cdef double max_visits, sum_visits, v_mix
         cdef double max_score_logit, sum_score_exp, score
-        cdef double pi_prime, child_n_norm, deficit, best_deficit
+        cdef double pi_prime, child_n_norm, deficit, best_deficit, inv_sum_visits
         cdef int i
         cdef int num_children
+        
+        # Pre-allocate a C-array for the exp() cache (256 covers the max 218 chess moves)
+        cdef double exp_cache[256] 
         
         while True:
             # JUST-IN-TIME EXPANSION
             if node.pending_logits is not None:
                 self._expand(node, node.pending_logits)
                 node.pending_logits = None
-                
+               
             if not node.children or not node.expanded or node.selected:
                 break
 
@@ -210,8 +214,6 @@ cdef class MCTSEngine:
             # 1. First Pass: Get Max Visits and v_mix
             max_visits = 0.0
             sum_visits = 0.0
-
-
             num_children = len(node.child_list)
 
             for i in range(num_children):
@@ -222,10 +224,10 @@ cdef class MCTSEngine:
                 if child.visits > max_visits:
                     max_visits = child.visits
                 sum_visits += child.visits
-            
+       
             v_mix = node.calculate_v_mix()
             
-            # 2. Second Pass: Calculate Gumbel scores and find max logit for stable Softmax
+            # 2. Second Pass: Calculate Gumbel scores and find max logit
             max_score_logit = -1e20
             for i in range(num_children):
                 child = <MCTSNode_c.MCTSNode>node.child_list[i]
@@ -235,20 +237,26 @@ cdef class MCTSEngine:
                 if score > max_score_logit:
                     max_score_logit = score
             
-            # 3. Third Pass: Sum exps and find Best Deficit (Deterministic Policy Matching)
+            # 3. Third Pass: Cache exp() results and sum
+            inv_sum_visits = 1.0 / (1.0 + sum_visits)
             sum_score_exp = 0.0
+            
             for i in range(num_children):
                 child = <MCTSNode_c.MCTSNode>node.child_list[i]
                 if child.forced_outcome == 1:
                     continue
-                sum_score_exp += exp(child.gumbel_score - max_score_logit)
+                # Calculate exp() ONCE and store it in the C-array
+                exp_cache[i] = exp(child.gumbel_score - max_score_logit)
+                sum_score_exp += exp_cache[i]
 
             for i in range(num_children):
                 child = <MCTSNode_c.MCTSNode>node.child_list[i]
                 if child.forced_outcome == 1:
                     continue
-                pi_prime = exp(child.gumbel_score - max_score_logit) / sum_score_exp
-                child_n_norm = child.visits / (1.0 + sum_visits)
+                
+                # Fetch cached exp() value
+                pi_prime = exp_cache[i] / sum_score_exp
+                child_n_norm = child.visits * inv_sum_visits 
                 
                 deficit = pi_prime - child_n_norm
                 if deficit > best_deficit:
@@ -396,9 +404,6 @@ cdef class MCTSEngine:
         
         numpy_board = src_shared.utils.board_to_tensor_69(self.root_board)
         board_input = torch.from_numpy(numpy_board).float()
-        
-        if self.use_fp16:
-            board_input = board_input.half()
 
         self.shared_input_buffer[buffer_index].copy_(board_input)
 
@@ -516,10 +521,11 @@ cdef class MCTSEngine:
         cdef int num_cands
         cdef int i
         cdef int cutoff
-        cdef int phase_idx
+        cdef int phase_idx, num_all_nodes
         cdef double max_visits_phase
         cdef double max_visits_final
         cdef double root_v_mix
+        cdef double[:]  noise_view
         
         self.simulation_count = 0
         self.inference_sent = 0
@@ -546,11 +552,15 @@ cdef class MCTSEngine:
             self.root.pending_logits = None
 
         all_nodes = list(self.root.children.values())
+        num_all_nodes = len(all_nodes)
         active_candidates = []
         
-        # 2. Initialize Gumbel Noise
-        for child in all_nodes:
-            child.gumbel_noise = np.random.gumbel(0, self.gumbel_noise)
+        # 2. Vectorized Gumbel Noise (Single NumPy call, mapped to C-memory)
+        noise_view = np.random.gumbel(0, self.gumbel_noise, size=num_all_nodes)
+
+        for i in range(num_all_nodes):
+            child = <MCTSNode_c.MCTSNode>all_nodes[i]
+            child.gumbel_noise = noise_view[i]
             child.gumbel_score = child.gumbel_noise + child.raw_logit
 
             # Check for terminal nodes in all children
@@ -627,7 +637,11 @@ cdef class MCTSEngine:
             self._wait_for_inference() 
             
             # C. Update Global Stats 
-            max_visits_phase = max([c.visits for c in active_candidates if c.visits > 0], default=1.0)
+            max_visits_phase = 1.0
+            for i in range(num_cands):
+                child = <MCTSNode_c.MCTSNode>active_candidates[i]
+                if child.visits > max_visits_phase:
+                    max_visits_phase = child.visits
 
             # D. Update Scores on Nodes
             root_v_mix = self.root.calculate_v_mix()
@@ -651,7 +665,12 @@ cdef class MCTSEngine:
                     active_candidates = active_candidates[:cutoff]
 
         # 6. Final Score Update
-        max_visits_final = max([c.visits for c in all_nodes if c.visits > 0], default=1.0)
+        max_visits_final = 1.0
+        for i in range(num_all_nodes):
+            child = <MCTSNode_c.MCTSNode>all_nodes[i]
+            if child.visits > max_visits_final:
+                max_visits_final = child.visits
+                
         root_v_mix = self.root.calculate_v_mix()
 
         for child in all_nodes:
@@ -672,52 +691,38 @@ cdef class MCTSEngine:
         return self.simulation_count
 
 
-    cpdef _expand(self, MCTSNode_c.MCTSNode node, policy_logits: torch.Tensor):
+    cpdef _expand(self, MCTSNode_c.MCTSNode node, object policy_logits):
+        """
+        Pure Cython Expansion: Extracts logits directly from PyTorch memory via MemoryViews
+        to avoid Python object allocations and tensor indexing overhead.
+        """
         cdef double time_expansion_start = time.perf_counter()
         
         cdef list legal_moves = list(cython_chess.generate_legal_moves(self.root_board, chess.BB_ALL, chess.BB_ALL))
         cdef int num_moves = len(legal_moves)
         
-        cdef cnp.ndarray[cnp.int64_t, ndim=1] from_row_arr = np.empty(num_moves, dtype=np.int64)
-        cdef cnp.ndarray[cnp.int64_t, ndim=1] from_col_arr = np.empty(num_moves, dtype=np.int64)
-        cdef cnp.ndarray[cnp.int64_t, ndim=1] channel_arr = np.empty(num_moves, dtype=np.int64)
-        
-        cdef cnp.int64_t[:] from_row_view = from_row_arr
-        cdef cnp.int64_t[:] from_col_view = from_col_arr
-        cdef cnp.int64_t[:] channel_view = channel_arr
-
         cdef list child_nodes_in_order = [None] * num_moves
-        cdef int i
-        cdef int from_row_int, from_col_int, channel_int
+        cdef int i, from_row_int, from_col_int, channel_int, flat_index
         cdef object move
         cdef MCTSNode_c.MCTSNode child_node
 
+        # 1. Cast tensor to a contiguous 1D float32 MemoryView ONCE
+        if policy_logits.dtype == torch.float16:
+            policy_logits = policy_logits.float()
+        cdef float[:] logits_view = policy_logits.view(-1).numpy()
+
+        # 2. Extract values using pure C-math
         for i in range(num_moves):
             move = legal_moves[i]
             from_row_int, from_col_int, channel_int = src_shared.utils.move_to_policy_components(move, self.root_board)
+            flat_index = src_shared.utils.policy_components_to_flat_index(from_row_int, from_col_int, channel_int)
             
-            from_row_view[i] = from_row_int
-            from_col_view[i] = from_col_int
-            channel_view[i] = channel_int
-
             child_node = MCTSNode_c.MCTSNode(parent=node, move=move)
+            # Pull directly from C-memory array
+            child_node.raw_logit = logits_view[flat_index] 
+            
             node.children[move] = child_node
             child_nodes_in_order[i] = child_node
-
-        if num_moves > 0:
-            from_row_tensor = torch.from_numpy(from_row_arr)
-            from_col_tensor = torch.from_numpy(from_col_arr)
-            channel_tensor = torch.from_numpy(channel_arr)
-
-            indices_tensor = src_shared.utils.policy_components_to_flat_index_torch(
-                from_row_tensor, from_col_tensor, channel_tensor
-            )
-
-            raw_logits_for_legal_moves = policy_logits.flatten()[indices_tensor]
-
-            for i in range(num_moves):
-                current_child = <MCTSNode_c.MCTSNode>child_nodes_in_order[i]
-                current_child.raw_logit = float(raw_logits_for_legal_moves[i])
 
         node.num_unselected_children = num_moves
         node.expanded = True

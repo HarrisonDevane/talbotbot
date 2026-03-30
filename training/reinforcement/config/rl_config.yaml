@@ -8,20 +8,19 @@ global:
 
 model:
   input_planes: 69                                   # 68-plane feature stack (P1 pieces, P2 pieces, reps, etc.)
-  filters: 128                                       # Convolutional filters (Network "width")
+  filters: 256                                       # Convolutional filters (Network "width")
   resblocks: 16                                      # Total residual blocks (Network "depth")
-  bottleneck_channels: 64                            # Squeezed 3x3 convolution depth. Halving 'filters' here makes the network ~2x faster.
+  bottleneck_channels: 128                           # Squeezed 3x3 convolution depth. Halving 'filters' here makes the network ~2x faster.
   broadcast_reduction_ratio: 4                       # Shrinks the hidden FC layer in the Squeeze-and-Excitation block to prevent parameter bloat.
   broadcast_interval: 8                              # Replaces a standard block with a Global Broadcasting block every N layers for instant cross-board vision.
 
 data_generation:
   inference_worker_cores:                            # Dedicated CPU cores for the Batching Process (feeding the GPU)
-    - [14]
-    - [15]
+    - [14, 15]
   game_worker_cores: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
-  batch_size_per_worker:  8                          # Max positions a single worker sends at once
+  batch_size_per_worker:  16                         # Max positions a single worker sends at once
   batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
-  batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
+  batch_timeout: 0.005                               # How long the GPU batcher waits for more data before running partial batch
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   gumbel_c_visit: 50.0                               # Sigma used for gumbel score calucation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
@@ -33,10 +32,11 @@ data_generation:
   temperature_blunder_threshold: 0.3                 # Threshold for ignoring blunders
   minimax_smoothing_factor: 0.9                      # Smooth with standard MCTS distribution for forcing moves
   draw_cutoff: -0.25                                 # Value threshold to consider a game a draw (minimax)
+  max_ply_length: 400                                # Hard cutoff to force a draw
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.90                          # Bot resigns to save compute time
   main_logging_level: 20                             # INFO level
-  worker_logging_level: 50                           # CRITICAL only (only keeps PGN)
+  worker_logging_level: 20                           # CRITICAL only (only keeps PGN)
   inference_logging_level: 20                        # INFO level
 
 training:

@@ -7,16 +7,16 @@ game:
 model:
   model_path: 'training/reinforcement/rl_dir/best_models/best_model.pth'
   input_planes: 69                                   # 68-plane feature stack (P1 pieces, P2 pieces, reps, etc.)
-  filters: 128                                       # Convolutional filters (Network "width")
+  filters: 256                                       # Convolutional filters (Network "width")
   resblocks: 16                                      # Total residual blocks (Network "depth")
-  bottleneck_channels: 64                            # Squeezed 3x3 convolution depth. Halving 'filters' here makes the network ~2x faster.
+  bottleneck_channels: 128                           # Squeezed 3x3 convolution depth. Halving 'filters' here makes the network ~2x faster.
   broadcast_reduction_ratio: 4                       # Shrinks the hidden FC layer in the Squeeze-and-Excitation block to prevent parameter bloat.
   broadcast_interval: 8                              # Replaces a standard block with a Global Broadcasting block every N layers for instant cross-board vision.
 
 evaluation:
   inference_worker_cores:                            # Dedicated CPU cores for the Batching Process (feeding the GPU)
     - [12, 13, 14, 15]
-  batch_size_per_worker: 8                           # Max positions a single worker sends at once
+  batch_size_per_worker: 16                          # Max positions a single worker sends at once
   batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
   batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
@@ -30,8 +30,9 @@ evaluation:
   temperature_blunder_threshold: 0.1                 # Threshold for ignoring blunders
   minimax_smoothing_factor: 0                        # How much probability to assign to non-winning legal minimax moves
   draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
-  resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
-  resignation_cutoff: -1.0                           # Bot resigns to save compute time
+  max_ply_length: 0                                  # Hard cutoff to force a draw
+  resignation_probability: 0.0                       # Chance the bot checks for resignation allowed
+  resignation_cutoff: 0.0                            # Bot resigns to save compute time
   main_logging_level: 20                             # INFO level
   worker_logging_level: 20                           # CRITICAL only (only keeps PGN)
   inference_logging_level: 20                        # INFO level

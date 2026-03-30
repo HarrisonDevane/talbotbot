@@ -116,13 +116,17 @@ class InferenceBatcher:
         self.stop_event = stop_event
         self.current_steps = current_steps
         self.rotation_interval = rotation_interval
+        self.num_workers = len(result_queues)
 
         self._apply_process_settings(core_id)
         self._run_loop()
 
-
     def _run_loop(self):
         """The main loop for the batcher process."""
+        
+        # 0. CRITICAL: Prevent cuDNN from thrashing on dynamic batch sizes
+        torch.backends.cudnn.benchmark = False
+        
         if self.training:
             target_folder_step = (self.current_steps.value // self.rotation_interval) * self.rotation_interval
             self.log_dir = os.path.join(self.output_dir, f"run_step_{target_folder_step:06d}")
@@ -130,7 +134,7 @@ class InferenceBatcher:
             self._setup_logger()
             self.local_model_step = self.current_steps.value
         else:
-            self.log_dir = os.path.join(self.output_dir, f"inference")
+            self.log_dir = os.path.join(self.output_dir, "inference")
             os.makedirs(self.log_dir, exist_ok=True)
             self._setup_logger()
 
@@ -147,6 +151,9 @@ class InferenceBatcher:
         interval_batches_processed = 0
         interval_total_processing_duration = 0.0
         interval_total_inferences = 0
+        
+        # Cache to avoid repeated lookups in the tight loop
+        num_workers = self.num_workers 
         
         while not self.stop_event.is_set():
             if self.training:
@@ -170,52 +177,43 @@ class InferenceBatcher:
 
             if requests:
                 batch_process_start_time = time.monotonic()
-
-                start_data_prep = time.monotonic()
                 
-                worker_ids = [req[0] for req in requests]
-                slot_indices = [req[1] for req in requests] 
+                # 1. Fast C-level Unpacking
+                worker_ids, slot_indices = zip(*requests)
+                slot_indices_list = list(slot_indices) 
                 
-                states_to_process = self.shared_input_buffer[slot_indices]
+                # Slice shared memory (Already FP16 from the workers)
+                states_to_process = self.shared_input_buffer[slot_indices_list]
                 
-                data_prep_duration = time.monotonic() - start_data_prep
-
-                with torch.cuda.stream(stream):
-                    start_gpu_transfer = time.monotonic()
+                # 2. Fire the GPU asynchronously (No redundant dtype checks)
+                with torch.cuda.stream(stream):          
                     states_gpu = states_to_process.to(self.device, non_blocking=True)
-                    if self.use_fp16 and states_gpu.dtype != torch.float16:
-                            states_gpu = states_gpu.half()
-                    
-                    gpu_transfer_duration = time.monotonic() - start_gpu_transfer
-
                     with torch.no_grad():
-                        start_inference = time.monotonic()
                         policy_gpu, value_gpu = self.model(states_gpu)
-                        inference_duration = time.monotonic() - start_inference
 
-                    start_cpu_transfer = time.monotonic()
-                    policy_cpu = policy_gpu.to('cpu', non_blocking=False)
-                    value_cpu = value_gpu.to('cpu', non_blocking=False)
-                    cpu_transfer_duration = time.monotonic() - start_cpu_transfer
+                # 3. --- CPU DOES WORK WHILE GPU COMPUTES ---
+                # O(1) Array Routing (replaces the slow dictionary)
+                worker_notifications = [[] for _ in range(num_workers)]
+                for w_id, s_idx in requests:
+                    worker_notifications[w_id].append(s_idx)
 
-                    if stream is not None:
-                        stream.synchronize()
-
-                start_write_and_notify = time.monotonic()
+                # 4. Now sync the CPU, ensuring GPU math is done
+                if stream is not None:
+                    stream.synchronize()
                 
-                # VECTORIZED SCATTER 
-                self.shared_policy_buffer[slot_indices] = policy_cpu.to(self.shared_policy_buffer.dtype)
-                self.shared_value_buffer[slot_indices] = value_cpu.to(self.shared_value_buffer.dtype)
+                # 5. SAFE VECTORIZED SCATTER 
+                # Transfer to CPU/dtype, then use direct assignment to trigger in-place scatter
+                policy_cpu = policy_gpu.to(device='cpu', dtype=self.shared_policy_buffer.dtype)
+                value_cpu = value_gpu.to(device='cpu', dtype=self.shared_value_buffer.dtype)
 
-                # BATCHED IPC NOTIFICATION
-                worker_notifications = {}
-                for w_id, s_idx in zip(worker_ids, slot_indices):
-                    worker_notifications.setdefault(w_id, []).append(s_idx)
+                self.shared_policy_buffer[slot_indices_list] = policy_cpu
+                self.shared_value_buffer[slot_indices_list] = value_cpu
 
-                for w_id, indices_list in worker_notifications.items():
-                    self.result_queues[w_id].put_nowait(indices_list)
-
-                write_and_notify_duration = time.monotonic() - start_write_and_notify
+                # 6. BATCHED IPC NOTIFICATION
+                for w_id in range(num_workers):
+                    indices_list = worker_notifications[w_id]
+                    if indices_list:
+                        self.result_queues[w_id].put_nowait(indices_list)
 
                 batch_total_duration = time.monotonic() - batch_process_start_time
                 

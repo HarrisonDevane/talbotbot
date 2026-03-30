@@ -68,13 +68,11 @@ PAWN_PROMO_MOVE_TYPES_LIST = list(PAWN_PROMO_MOVE_TYPES_MAPPING.keys())
 
 # --- Helper Functions (C-typed) ---
 
-cdef cnp.ndarray _get_piece_planes(object board_state, bint orientation_color):
+cdef void _fill_piece_planes(object board_state, bint orientation_color, cnp.float32_t[:, :, :] out_view):
     """
     Fills planes relative to orientation_color using fast bitboard scanning.
+    Writes directly into the provided MemoryView to avoid intermediate array allocations.
     """
-    cdef cnp.ndarray piece_planes = np.zeros((12, _BOARD_DIM, _BOARD_DIM), dtype=np.float32)
-    
-    # C-typed variables for the fast loop
     cdef unsigned long long bb, color_mask
     cdef int square, row, col, base_plane, plane_idx, pt_idx
     cdef bint is_me, color
@@ -110,12 +108,11 @@ cdef cnp.ndarray _get_piece_planes(object board_state, bint orientation_color):
                 row = 7 - (square >> 3) 
                 col = square & 7
                 
-                piece_planes[plane_idx, row, col] = 1.0
+                # Write directly to the provided memory view
+                out_view[plane_idx, row, col] = 1.0
                 
                 # Clear the lowest set bit to move to the next piece
                 bb &= (bb - 1)
-
-    return piece_planes
 
 
 cpdef cnp.ndarray board_to_tensor_69(object board):
@@ -124,22 +121,20 @@ cpdef cnp.ndarray board_to_tensor_69(object board):
     Fully Relative Representation with Spatial Invariance (Vertical Mirror).
     """
     cdef cnp.ndarray planes = np.zeros((_INPUT_CHANNELS, _BOARD_DIM, _BOARD_DIM), dtype=np.float32)
+    cdef cnp.float32_t[:, :, :] planes_view = planes # Create fast Cython view
     
     # --- Local C-Typed variables ---
     cdef int ep_file, start_plane_idx, i
-    cdef object temp_board, hist_piece_planes, current_planes
+    cdef object temp_board
     cdef bint us, them
 
     # 1. Current Board State (Planes 0-11)
-    current_planes = _get_piece_planes(board, board.turn)
-    planes[0:12, :, :] = current_planes
+    _fill_piece_planes(board, board.turn, planes_view[0:12, :, :])
 
     # 2. Auxiliary Planes (12-17)
     planes[12, :, :] = 1.0 if board.turn == chess.WHITE else 0.0
 
     # Planes 13-16: Castling Rights
-    # Since we strictly vertically mirror, Kingside is ALWAYS right (+x) 
-    # and Queenside is ALWAYS left (-x) for both colors.
     us = board.turn
     them = not board.turn
 
@@ -149,7 +144,6 @@ cpdef cnp.ndarray board_to_tensor_69(object board):
     planes[16, :, :] = 1.0 if board.has_queenside_castling_rights(them) else 0.0
 
     # Plane 17: En Passant
-    # We DO NOT pre-flip. The global flip later handles this correctly.
     if board.ep_square is not None:
         ep_file = chess.square_file(board.ep_square) 
         planes[17, :, ep_file] = 1.0
@@ -162,10 +156,8 @@ cpdef cnp.ndarray board_to_tensor_69(object board):
         temp_board.pop()
         
         # History relative to ROOT player (trajectory consistency)
-        hist_piece_planes = _get_piece_planes(temp_board, board.turn)
-        
         start_plane_idx = 18 + (i * 12)
-        planes[start_plane_idx : start_plane_idx + 12, :, :] = hist_piece_planes
+        _fill_piece_planes(temp_board, board.turn, planes_view[start_plane_idx : start_plane_idx + 12, :, :])
 
     # 4. Repetition Channels (Planes 66-67)
     planes[66, :, :] = 1.0 if board.is_repetition(count=2) else 0.0
@@ -176,7 +168,7 @@ cpdef cnp.ndarray board_to_tensor_69(object board):
 
     # 6. Spatial Flip (Vertical Mirror ONLY)
     if board.turn == chess.BLACK:
-        # axis=1 mirrors ranks, leaving files identical. 
+        # axis=1 mirrors ranks, leaving files identical.
         planes = np.flip(planes, axis=1).copy()
 
     return planes
@@ -470,3 +462,22 @@ cpdef cnp.ndarray get_legal_move_mask(object board):
         mask[flat_index] = True
         
     return mask
+
+
+cpdef cnp.ndarray map_policy_to_global_vector(list moves, cnp.ndarray[cnp.float32_t, ndim=1] probs, object board):
+    """
+    Maps a list of legal moves and their corresponding probabilities into 
+    the flat 4672-length global policy tensor, executing the loop entirely in C.
+    """
+    cdef cnp.ndarray[cnp.float32_t, ndim=1] policy_vector = np.zeros(_TOTAL_POLICY_MOVES, dtype=np.float32)
+    cdef int i, from_row, from_col, channel, flat_index
+    cdef int num_moves = len(moves)
+    cdef object move
+    
+    for i in range(num_moves):
+        move = moves[i]
+        from_row, from_col, channel = move_to_policy_components(move, board)
+        flat_index = policy_components_to_flat_index(from_row, from_col, channel)
+        policy_vector[flat_index] = probs[i]
+        
+    return policy_vector

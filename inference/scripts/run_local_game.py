@@ -375,18 +375,21 @@ def main():
     
     # Max batch size for a single worker
     max_batch_size = evaluation_config['batch_size_per_worker'] * evaluation_config['batch_size_factor']
+
+    use_fp16 = torch.cuda.is_available()
+    input_dtype = torch.float16 if use_fp16 else torch.float32
     
-    # Shared Input Buffer (float32)
+    # Shared Input Buffer
     shared_input_buffer = torch.zeros(
-        max_batch_size, utils.INPUT_CHANNELS, utils.BOARD_DIM, utils.BOARD_DIM, dtype=torch.float32
+        max_batch_size, utils.INPUT_CHANNELS, utils.BOARD_DIM, utils.BOARD_DIM, dtype=input_dtype
     ).share_memory_()
 
-    # Shared Policy Buffer (float16)
+    # Shared Policy Buffer
     shared_policy_buffer = torch.zeros(
-        max_batch_size, utils.TOTAL_POLICY_MOVES, dtype=torch.float16
+        max_batch_size, utils.TOTAL_POLICY_MOVES, dtype=torch.float32
     ).share_memory_()
     
-    # Shared Value Buffer (float32)
+    # Shared Value Buffer
     shared_value_buffer = torch.zeros(
         max_batch_size, 1, dtype=torch.float32
     ).share_memory_()
