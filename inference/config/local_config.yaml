@@ -6,7 +6,7 @@ game:
 
 model:
   model_path: 'training/reinforcement/rl_dir/best_models/best_model.pth'
-  input_planes: 69                                   # 68-plane feature stack (P1 pieces, P2 pieces, reps, etc.)
+  input_planes: 69                                   # Plane feature stack (P1 pieces, P2 pieces, reps, etc.)
   filters: 256                                       # Convolutional filters (Network "width")
   resblocks: 16                                      # Total residual blocks (Network "depth")
   bottleneck_channels: 128                           # Squeezed 3x3 convolution depth. Halving 'filters' here makes the network ~2x faster.
@@ -17,8 +17,8 @@ evaluation:
   inference_worker_cores:                            # Dedicated CPU cores for the Batching Process (feeding the GPU)
     - [12, 13, 14, 15]
   batch_size_per_worker: 16                          # Max positions a single worker sends at once
-  batch_size_factor: 10                              # Multiplier to determine max GPU batch size (Workers * Batch * Factor)
-  batch_timeout: 0.001                               # How long the GPU batcher waits for more data before running partial batch
+  batch_size_factor: 10                              # Multiplier to determine max slots available in RAM
+  batch_timeout: 0.005                               # How long the GPU batcher waits for more data before running partial batch
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   gumbel_c_visit: 50.0                               # Sigma used for gumbel score calucation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
@@ -28,11 +28,11 @@ evaluation:
   temperature_ply_cutoff: 0                          # Sample proportional to visit count for first moves
   temperature_top_move: 0.5                          # Probability the top move is played
   temperature_blunder_threshold: 0.1                 # Threshold for ignoring blunders
-  minimax_smoothing_factor: 0                        # How much probability to assign to non-winning legal minimax moves
-  draw_cutoff: -0.5                                  # Value threshold to consider a game a draw (minimax)
+  minimax_smoothing_factor: 0.0                      # Smooth minimax with standard MCTS distribution for forcing moves
+  draw_cutoff: -0.5                                  # Value threshold to consider a game a draw
   max_ply_length: 0                                  # Hard cutoff to force a draw
   resignation_probability: 0.0                       # Chance the bot checks for resignation allowed
-  resignation_cutoff: 0.0                            # Bot resigns to save compute time
+  resignation_cutoff: 0.0                            # Value head cutoff for resignation
   main_logging_level: 20                             # INFO level
   worker_logging_level: 20                           # CRITICAL only (only keeps PGN)
   inference_logging_level: 20                        # INFO level
