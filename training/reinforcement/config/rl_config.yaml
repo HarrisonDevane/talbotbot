@@ -36,7 +36,7 @@ data_generation:
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.90                          # Bot resigns to save compute time
   main_logging_level: 20                             # INFO level
-  worker_logging_level: 20                           # CRITICAL only (only keeps PGN)
+  worker_logging_level: 50                           # CRITICAL only (only keeps PGN)
   inference_logging_level: 20                        # INFO level
 
 training:
