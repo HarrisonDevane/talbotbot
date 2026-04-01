@@ -452,6 +452,7 @@ cdef class MCTSEngine:
 
             start_path_len = len(simulation_path)
             leaf = self._select(start_node, simulation_path)
+            self.logger.debug(f"Selected node {leaf.move.uci()}")
 
             if self.root_board.is_game_over(claim_draw=True):
                 self._handle_terminal_node(leaf)
@@ -503,14 +504,14 @@ cdef class MCTSEngine:
         
         self.logger.info("-" * 95)
             
-
     cpdef run_simulations(self, int search_depth, int max_m):
         """
         Executes the Gumbel MuZero 'Sequential Halving' search dynamically.
         Instead of a hardcoded list, it allocates the simulation budget
-        across log2(m) phases.
+        across log2(m) phases and absorbs ghost sims from forced losses.
         """
-        cdef int sims_per_candidate
+        cdef int current_phase_budget
+        cdef int active_idx
         cdef list all_nodes
         cdef list active_candidates
         cdef MCTSNode_c.MCTSNode child
@@ -527,7 +528,6 @@ cdef class MCTSEngine:
         cdef double root_v_mix
         cdef double[:]  noise_view
         
-        self.simulation_count = 0
         self.inference_sent = 0
         self.inference_received = 0
         self.batch_buffer = []
@@ -550,6 +550,8 @@ cdef class MCTSEngine:
         if self.root.pending_logits is not None:
             self._expand(self.root, self.root.pending_logits)
             self.root.pending_logits = None
+
+        self.simulation_count = 0
 
         all_nodes = list(self.root.children.values())
         num_all_nodes = len(all_nodes)
@@ -612,32 +614,48 @@ cdef class MCTSEngine:
                 self._submit_batch()
                 self._wait_for_inference()
 
-            # Calculate exact visits for this phase
+            # Dynamic Budget Calculation
             if phase_idx == num_phases - 1:
-                # The final phase consumes all remaining extra visits to exactly hit n
-                sims_per_candidate = remaining_search_depth // num_cands
+                current_phase_budget = remaining_search_depth
             else:
-                # Standard phase follows max(1, floor(budget / candidates))
-                sims_per_candidate = max(1, phase_budget // num_cands)
-                
-                # Deduct the 1 visit we already spent on expansion during Phase 0
+                current_phase_budget = phase_budget
                 if phase_idx == 0:
-                    sims_per_candidate = max(0, sims_per_candidate - 1)
+                    current_phase_budget = max(0, current_phase_budget - num_cands)
 
-            # Safety bound to never exceed remaining budget
-            sims_per_candidate = max(0, min(sims_per_candidate, remaining_search_depth // num_cands))
+            current_phase_budget = max(0, min(current_phase_budget, remaining_search_depth))
 
-            # A. Run Batch Simulations
-            for i in range(sims_per_candidate):
-                for child in active_candidates:
-                    self._run_single_async_simulation(child)
-                    remaining_search_depth -= 1
+            # A. Run Batch Simulations (DYNAMIC ALLOCATION)
+            active_idx = 0
+            while current_phase_budget > 0 and num_cands > 0:
+                child = <MCTSNode_c.MCTSNode>active_candidates[active_idx]
+                
+                # Check for asynchronous exact-solver forced children
+                if child.forced_outcome is not None:
+                    active_candidates.pop(active_idx)
+                    num_cands = len(active_candidates)
+                    if num_cands == 0:
+                        break
+                    # Wrap index if we popped the last item
+                    if active_idx >= num_cands:
+                        active_idx = 0
+                    continue
+
+                # Run simulation
+                self._run_single_async_simulation(child)
+                remaining_search_depth -= 1
+                current_phase_budget -= 1
+                
+                # Round-robin
+                active_idx += 1
+                if active_idx >= num_cands:
+                    active_idx = 0
 
             # B. Sync Barrier
             self._wait_for_inference() 
             
             # C. Update Global Stats 
             max_visits_phase = 1.0
+            num_cands = len(active_candidates) # Refresh after wait barrier
             for i in range(num_cands):
                 child = <MCTSNode_c.MCTSNode>active_candidates[i]
                 if child.visits > max_visits_phase:
