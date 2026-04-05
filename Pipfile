@@ -26,6 +26,8 @@ setuptools = "<70"
 hdf5plugin = "*"
 lmdb = "*"
 lz4 = "*"
+onnx = "*"
+onnxscript = "*"
 
 [dev-packages]
 
