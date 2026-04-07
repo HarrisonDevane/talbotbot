@@ -24,10 +24,17 @@ public:
         std::vector<uint8_t> serialized_data;
     };
 
-    // Main entry point for the background thread
+    // Main entry point for a full rebuild
     static std::unique_ptr<EngineResult> build_engine(
         const std::string& onnx_path, 
         int max_batch_size, 
+        Logger& logger
+    );
+
+    // Fast path: Updates weights of an existing engine
+    static std::unique_ptr<EngineResult> refit_engine(
+        const std::string& onnx_path, 
+        const std::string& engine_path,
         Logger& logger
     );
 

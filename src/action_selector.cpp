@@ -10,7 +10,7 @@ ActionSelector::ActionSelector(
     std::string name, int worker_id, ActionSelectorConfig config, 
     const ModelConfig& model_cfg, 
     Logger& logger,
-    ThreadSafeQueue<std::vector<std::pair<int, int>>>& i_queue,
+    moodycamel::ConcurrentQueue<std::pair<int, int>>& i_queue,
     ThreadSafeQueue<std::vector<int>>& r_queue,
     std::vector<torch::Tensor>& in_buffer,
     std::vector<torch::Tensor>& p_buffer,
@@ -23,7 +23,8 @@ ActionSelector::ActionSelector(
     shared_value_buffer(v_buffer), buffer_free_slots(free_slots) 
 {
     std::random_device rd;
-    rng.seed(rd());
+    auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    rng.seed(rd() ^ worker_id ^ time_seed);
     
     chess::Board dummy;
     dummy.setFen(chess::constants::STARTPOS);
@@ -66,7 +67,6 @@ SelectionResult ActionSelector::select_action(const chess::Board& board, const s
     mcts->reset(board, history);
     result.simulation_count = mcts->run_simulations(gumbel_search_depth, gumbel_m);
 
-    // FETCHING THE CHILDREN CONTIGUOUSLY
     std::vector<MCTSNode*> all_children;
     for(int i = 0; i < mcts->root->num_children; ++i) {
         all_children.push_back(mcts->root->first_child + i);
@@ -109,6 +109,7 @@ SelectionResult ActionSelector::select_action(const chess::Board& board, const s
 
     std::vector<float> final_probs(num_children, 0.0f);
     std::vector<float> minimax_probs(num_children, 0.0f);
+    float smoothing_factor = config.minimax_smoothing_factor;
     
     if (!winning_nodes.empty()) {
         int min_dtm = 999999;
@@ -127,7 +128,11 @@ SelectionResult ActionSelector::select_action(const chess::Board& board, const s
                 minimax_probs[i] = prob_per_best;
             }
         }
+        for (int i = 0; i < num_children; ++i) {
+            final_probs[i] = (1.0f - smoothing_factor) * base_probs[i] + (smoothing_factor * minimax_probs[i]);
+        }
         logger.log("INFO", std::to_string(count_best) + " fastest win(s) found (DTM " + std::to_string(min_dtm) + ").");
+
     } else if (!draw_nodes.empty() && root_v_mix <= config.draw_cutoff) {
         float prob_per_best = 1.0f / draw_nodes.size();
         for (int i = 0; i < num_children; ++i) {
@@ -135,7 +140,11 @@ SelectionResult ActionSelector::select_action(const chess::Board& board, const s
                 minimax_probs[i] = prob_per_best;
             }
         }
+        for (int i = 0; i < num_children; ++i) {
+            final_probs[i] = (1.0f - smoothing_factor) * base_probs[i] + (smoothing_factor * minimax_probs[i]);
+        }
         logger.log("INFO", "Forced draw condition met for " + std::to_string(draw_nodes.size()) + " nodes.");
+
     } else if (!losing_nodes.empty() && !non_forced_nodes.empty()) {
         float prob_per_best = 1.0f / non_forced_nodes.size();
         for (int i = 0; i < num_children; ++i) {
@@ -143,18 +152,16 @@ SelectionResult ActionSelector::select_action(const chess::Board& board, const s
                 minimax_probs[i] = prob_per_best;
             }
         }
-        logger.log("INFO", std::to_string(losing_nodes.size()) + " forced loss(es) found. Smoothing over safe moves.");
-    } else {
-        minimax_probs = base_probs; 
-    }
+        for (int i = 0; i < num_children; ++i) {
+            final_probs[i] = (1.0f - smoothing_factor) * base_probs[i] + (smoothing_factor * minimax_probs[i]);
+        }
+        logger.log("INFO", std::to_string(losing_nodes.size()) + " forced loss(es) found.");
 
-    for (int i = 0; i < num_children; ++i) {
-        final_probs[i] = (1.0f - config.minimax_smoothing_factor) * base_probs[i] + 
-                         (config.minimax_smoothing_factor * minimax_probs[i]);
+    } else {
+        final_probs = base_probs; 
     }
 
     if (!winning_nodes.empty()) {
-        logger.log("DEBUG", "Applying Move Rule A: Selecting lowest DTM win.");
         int min_dtm = 999999;
         for (MCTSNode* c : winning_nodes) if (c->distance_to_mate.value() < min_dtm) min_dtm = c->distance_to_mate.value();
         std::vector<chess::Move> best_moves;
@@ -164,12 +171,10 @@ SelectionResult ActionSelector::select_action(const chess::Board& board, const s
         result.best_move = best_moves[dist(rng)];
 
     } else if (!draw_nodes.empty() && root_v_mix <= config.draw_cutoff) {
-        logger.log("DEBUG", "Applying Move Rule B: Selecting forced draw to avoid loss.");
         std::uniform_int_distribution<> dist(0, draw_nodes.size() - 1);
         result.best_move = draw_nodes[dist(rng)]->move;
 
     } else if (!non_forced_visited.empty()) {
-        logger.log("DEBUG", "Applying Move Rule C: Normal Selection from safe visited nodes.");
         if (ply_count <= config.temperature_ply_cutoff) {
             std::sort(non_forced_visited.begin(), non_forced_visited.end(), [](MCTSNode* a, MCTSNode* b) {
                 if (a->visits != b->visits) return a->visits > b->visits;
@@ -219,7 +224,6 @@ SelectionResult ActionSelector::select_action(const chess::Board& board, const s
             std::discrete_distribution<> d(act_probs.begin(), act_probs.end());
             result.best_move = valid_nodes[d(rng)]->move;
         } else {
-            logger.log("DEBUG", "Late game detected. Applying greedy selection.");
             std::sort(non_forced_visited.begin(), non_forced_visited.end(), [](MCTSNode* a, MCTSNode* b) {
                 if (a->visits != b->visits) return a->visits > b->visits;
                 return a->gumbel_score > b->gumbel_score;
@@ -229,7 +233,6 @@ SelectionResult ActionSelector::select_action(const chess::Board& board, const s
             result.best_move = (m1->gumbel_score > m2->gumbel_score) ? m1->move : m2->move;
         }
     } else {
-        logger.log("DEBUG", "Applying Move Rule D: Forced into bad state.");
         if (!draw_nodes.empty()) {
             std::uniform_int_distribution<> dist(0, draw_nodes.size() - 1);
             result.best_move = draw_nodes[dist(rng)]->move;
@@ -269,6 +272,7 @@ SelectionResult ActionSelector::select_action(const chess::Board& board, const s
              total_move_time, sim_speed, result.entropy, root_v_mix);
     
     logger.log("INFO", buffer);
+    logger.log("INFO", "Selected move: " + chess::uci::moveToUci(result.best_move));
 
     return result;
 }

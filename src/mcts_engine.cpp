@@ -12,7 +12,7 @@
 #define ELAPSED(start, end) std::chrono::duration<double>(end - start).count()
 
 MCTSEngine::MCTSEngine(
-    int node_pool_capacity, int worker_batch_size, ThreadSafeQueue<std::vector<std::pair<int, int>>>& my_inference_shard, 
+    int node_pool_capacity, int worker_batch_size, moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue, 
     ThreadSafeQueue<std::vector<int>>& result_queue, int worker_id, double virtual_loss,
     double draw_cutoff, double gumbel_c_visit, double gumbel_c_scale, double gumbel_noise, 
     const chess::Board& board, const std::vector<chess::Board>& base_history, Logger& logger, 
@@ -23,7 +23,7 @@ MCTSEngine::MCTSEngine(
 ) : worker_batch_size(worker_batch_size), worker_id(worker_id), virtual_loss(virtual_loss),
     draw_cutoff(draw_cutoff), gumbel_c_visit(gumbel_c_visit), gumbel_c_scale(gumbel_c_scale), 
     gumbel_noise(gumbel_noise), root_board(board), base_history(base_history), 
-    node_pool(node_pool_capacity), logger(logger), my_inference_shard(my_inference_shard), result_queue(result_queue), 
+    node_pool(node_pool_capacity), logger(logger), inference_queue(inference_queue), result_queue(result_queue), 
     buffer_free_slots(buffer_free_slots), shared_input_buffer(shared_input_buffer), 
     shared_policy_buffer(shared_policy_buffer), shared_value_buffer(shared_value_buffer),
     model_config(model_cfg) 
@@ -38,6 +38,8 @@ MCTSEngine::MCTSEngine(
     simulation_count = 0;
     inference_sent = 0;
     inference_received = 0;
+    std::random_device rd;
+    rng.seed(rd() ^ worker_id ^ std::chrono::high_resolution_clock::now().time_since_epoch().count());
 }
 
 void MCTSEngine::reset(const chess::Board& board, const std::vector<chess::Board>& history) {
@@ -257,12 +259,15 @@ void MCTSEngine::_retrieve_inference(bool block) {
 
 void MCTSEngine::_submit_batch() {
     auto start_time = NOW();
-    int batch_size = batch_buffer.size();
-    if (batch_size == 0) return;
+    int b_size = batch_buffer.size();
+    if (b_size == 0) return;
 
-    logger.log("DEBUG", "Submitting batch of " + std::to_string(batch_size) + " states to inference queue.");
-    my_inference_shard.push(batch_buffer);
-    inference_sent += batch_size;
+    logger.log("DEBUG", "Submitting batch of " + std::to_string(b_size) + " states to inference queue.");
+    
+    // Lock-free bulk push. Insanely fast.
+    inference_queue.enqueue_bulk(batch_buffer.data(), b_size);
+    
+    inference_sent += b_size;
     batch_buffer.clear();
 
     time_queueing += ELAPSED(start_time, NOW());
@@ -275,10 +280,10 @@ void MCTSEngine::_handle_terminal_node(MCTSNode* leaf) {
     double value = 0.0;
     std::string term_type = "Draw";
 
-    if (result.second == chess::GameResult::WIN) {
+    if (result.second == chess::GameResult::LOSE) {
         value = -1.0; 
         term_type = "Loss (Mate)";
-    } else if (result.second == chess::GameResult::DRAW) {
+    } else if (result.second == chess::GameResult::DRAW || root_board.isRepetition(3)) {
         value = 0.0;
     }
 
@@ -295,18 +300,15 @@ void MCTSEngine::_queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCT
     auto start_time = NOW();
     int buffer_index;
 
-    // 1. Acquire a slot in the shared buffer
     while (!buffer_free_slots.try_pop(buffer_index)) {
         _retrieve_inference(false);
         if (!batch_buffer.empty()) _submit_batch();
-        // Reduced sleep to minimize latency now that we are pushing for 100k+
         std::this_thread::sleep_for(std::chrono::microseconds(100)); 
     }
 
     in_flight_nodes[buffer_index] = leaf;
     _mark_selected(leaf);
     
-    // 2. Expand Node (Generate legal moves)
     auto exp_start = NOW();
     chess::Movelist moves;
     chess::movegen::legalmoves(moves, root_board);
@@ -326,7 +328,6 @@ void MCTSEngine::_queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCT
     }
     time_expansion += ELAPSED(exp_start, NOW());
 
-    // 3. Construct History (Unmake moves to get past boards)
     std::vector<chess::Board> combined_history;
     std::vector<chess::Move> unmade_moves;
 
@@ -340,17 +341,13 @@ void MCTSEngine::_queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCT
         combined_history.push_back(base_history[i]);
     }
 
-    // Remake moves to restore current board state
     for (int i = (int)unmade_moves.size() - 1; i >= 0; --i) {
         root_board.makeMove(unmade_moves[i]);
     }
 
-    // 4. DIRECT MEMORY WRITE (The "Turbo" switch)
-    // No temporary vectors, no LibTorch tensor wrapping.
     c10::Half* destination_ptr = shared_input_buffer[buffer_index].data_ptr<c10::Half>();
     board_to_tensor_69(root_board, combined_history, destination_ptr);
 
-    // 5. Queue for Batcher
     batch_buffer.push_back({worker_id, buffer_index});
     _virtual_loss(leaf, true);
 
@@ -383,7 +380,7 @@ void MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
 
         MCTSNode* leaf = _select(start_node, simulation_path);
 
-        if (root_board.isGameOver().second != chess::GameResult::NONE) {
+        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(3)) {
             _handle_terminal_node(leaf);
             break;
         }
@@ -461,6 +458,7 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
     _queue_leaf_for_inference(root, {}); 
     _submit_batch();
     _wait_for_inference();
+    simulation_count++;
 
     std::vector<MCTSNode*> all_nodes;
     for(int i = 0; i < root->num_children; ++i) {
@@ -468,16 +466,15 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
     }
     std::vector<MCTSNode*> active_candidates;
 
-    std::mt19937 gen(1337); 
     std::uniform_real_distribution<double> dist(0.0, 1.0);
 
     for (MCTSNode* child : all_nodes) {
-        double u = dist(gen);
+        double u = dist(rng);
         child->gumbel_noise = -gumbel_noise * std::log(-std::log(u));
         child->gumbel_score = child->gumbel_noise + child->raw_logit;
 
         root_board.makeMove(child->move);
-        if (root_board.isGameOver().second != chess::GameResult::NONE) {
+        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(3)) {
             _handle_terminal_node(child);
         } else {
             active_candidates.push_back(child);
@@ -507,7 +504,7 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
             for (MCTSNode* child : active_candidates) {
                 remaining_search_depth -= 1;
                 root_board.makeMove(child->move);
-                if (root_board.isGameOver().second == chess::GameResult::NONE) {
+                if (root_board.isGameOver().second == chess::GameResult::NONE && !root_board.isRepetition(3)) {
                     _queue_leaf_for_inference(child, {child}); 
                 }
                 root_board.unmakeMove(child->move);

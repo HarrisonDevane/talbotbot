@@ -73,48 +73,31 @@ void InferenceBatcher::load_initial_engine(Logger& logger) {
 }
 
 std::vector<std::pair<int, int>> InferenceBatcher::collect_batch(
-    std::vector<ThreadSafeQueue<std::vector<std::pair<int, int>>>*>& shards,
+    moodycamel::ConcurrentQueue<std::pair<int, int>>& queue,
     Logger& logger,
     std::atomic<bool>& stop_event
 ) {
     std::vector<std::pair<int, int>> requests;
     requests.reserve(batch_size);
     auto start_poll = std::chrono::steady_clock::now();
-    static int last_shard = 0;
 
     while ((int)requests.size() < batch_size) {
         if (stop_event.load()) break;
-        bool activity = false;
         
-        for (size_t i = 0; i < shards.size(); ++i) {
-            int idx = (last_shard + i) % shards.size();
-            std::vector<std::pair<int, int>> incoming;
+        size_t current_size = requests.size();
+        size_t space_left = batch_size - current_size;
+        
+        requests.resize(batch_size); 
+        size_t dequeued = queue.try_dequeue_bulk(requests.data() + current_size, space_left);
+        requests.resize(current_size + dequeued); 
 
-            if (shards[idx]->try_pop(incoming)) {
-                activity = true;
-                size_t space = (size_t)batch_size - requests.size();
-                
-                if (incoming.size() <= space) {
-                    requests.insert(requests.end(), incoming.begin(), incoming.end());
-                } else {
-                    requests.insert(requests.end(), incoming.begin(), incoming.begin() + space);
-                    std::vector<std::pair<int, int>> left(incoming.begin() + space, incoming.end());
-                    shards[idx]->push(std::move(left));
-                }
-                
-                if ((int)requests.size() >= batch_size) {
-                    last_shard = (idx + 1) % shards.size();
-                    return requests;
-                }
+        if (dequeued > 0) {
+            if ((int)requests.size() >= batch_size) {
+                return requests;
             }
-        }
-
-        if (!requests.empty()) {
+        } else {
             double elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_poll).count();
-            if (elapsed_ms >= (double)timeout_ms) break;
-        }
-
-        if (!activity) {
+            if (elapsed_ms >= (double)timeout_ms && !requests.empty()) break;
             _mm_pause();
         }
     }
@@ -122,7 +105,7 @@ std::vector<std::pair<int, int>> InferenceBatcher::collect_batch(
 }
 
 void InferenceBatcher::run(
-    std::vector<ThreadSafeQueue<std::vector<std::pair<int, int>>>*>& shards,
+    moodycamel::ConcurrentQueue<std::pair<int, int>>& queue,    
     std::vector<ThreadSafeQueue<std::vector<int>>>& result_queues,
     std::vector<torch::Tensor>& shared_input_buffer,
     std::vector<torch::Tensor>& shared_policy_buffer,
@@ -278,8 +261,9 @@ void InferenceBatcher::run(
         int current_slot = 0;
         
         while (!stop_event.load()) {
-            if (pending_trt_reload.load()) {
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            // STOP FILLING IF A PAUSE IS REQUESTED
+            if (pending_trt_reload.load() || pause_requested.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
 
@@ -288,7 +272,7 @@ void InferenceBatcher::run(
             }
             if (stop_event.load()) break;
 
-            auto requests = collect_batch(shards, logger, stop_event);
+            auto requests = collect_batch(queue, logger, stop_event);
             if (requests.empty()) continue;
 
             auto batch_start = std::chrono::steady_clock::now();
@@ -296,17 +280,12 @@ void InferenceBatcher::run(
 
             slot_free[current_slot].store(false); 
 
-            // --- QUEUE LOGGING ADDED HERE ---
             if (logging_level <= 10) {
                 std::ostringstream q_log;
-                q_log << "Batch Size: " << req_size << " | Shard Backlogs: [";
-                for (size_t i = 0; i < shards.size(); ++i) {
-                    q_log << shards[i]->size() << (i == shards.size() - 1 ? "" : ", ");
-                }
-                q_log << "] | DispatchQ: " << dispatch_queue.size() << " | ScatterQ: " << scatter_queue.size();
+                q_log << "Batch Size: " << req_size << " | InferenceQ Approx: " << queue.size_approx() 
+                      << " | DispatchQ: " << dispatch_queue.size() << " | ScatterQ: " << scatter_queue.size();
                 logger.log("DEBUG", q_log.str());
             }
-            // --------------------------------
 
             c10::Half* staging_ptr = pinned_staging[current_slot].data_ptr<c10::Half>();
             for (size_t i = 0; i < req_size; ++i) {
@@ -319,33 +298,50 @@ void InferenceBatcher::run(
     });
 
     while (!stop_event.load()) {
+        // 1. Check for engine swap signal
         if (pending_trt_reload.load()) {
-            bool all_free = true;
-            for (int i = 0; i < NUM_SLOTS; ++i) {
-                if (!slot_free[i].load()) all_free = false;
+            std::lock_guard<std::mutex> lock(reload_mutex);
+            
+            // Extra safety to ensure hardware is entirely idle before deletion
+            cudaDeviceSynchronize();
+
+            for (int i = 0; i < 3; ++i) {
+                if (trt_contexts[i]) { delete trt_contexts[i]; trt_contexts[i] = nullptr; }
+            }
+            if (trt_engine) { delete trt_engine; trt_engine = nullptr; }
+            if (trt_runtime) { delete trt_runtime; trt_runtime = nullptr; }
+
+            trt_runtime = nvinfer1::createInferRuntime(gBatcherLogger);
+            trt_engine = trt_runtime->deserializeCudaEngine(pending_engine_data.data(), pending_engine_data.size());
+            
+            for (int i = 0; i < 3; ++i) {
+                trt_contexts[i] = trt_engine->createExecutionContext();
             }
             
-            if (all_free && dispatch_queue.empty()) {
-                std::lock_guard<std::mutex> lock(reload_mutex);
-                for (int i = 0; i < 3; ++i) {
-                    if (trt_contexts[i]) { delete trt_contexts[i]; trt_contexts[i] = nullptr; }
-                }
-                if (trt_engine) { delete trt_engine; trt_engine = nullptr; }
-                if (!trt_runtime) trt_runtime = nvinfer1::createInferRuntime(gBatcherLogger);
-
-                trt_engine = trt_runtime->deserializeCudaEngine(pending_engine_data.data(), pending_engine_data.size());
-                
-                for (int i = 0; i < 3; ++i) {
-                    trt_contexts[i] = trt_engine->createExecutionContext();
-                }
-                
-                logger.rotate(current_global_step.load(), rotation_interval);
-                logger.log("INFO", "Hot swap complete. Executing on new TRT Engine.");
-                pending_trt_reload.store(false);
-            } else {
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
-            }
+            logger.rotate(current_global_step.load(), rotation_interval);
+            logger.log("INFO", "Hot swap complete. Resuming Inference.");
+            
+            // Unpause the system
+            pending_trt_reload.store(false);
+            is_paused.store(false); 
+            pause_requested.store(false); 
             continue;
+        }
+
+        // 2. Check if we need to enter a Paused State
+        bool all_free = true;
+        for (int i = 0; i < NUM_SLOTS; ++i) {
+            if (!slot_free[i].load()) all_free = false;
+        }
+
+        if (pause_requested.load()) {
+            if (all_free && dispatch_queue.empty()) {
+                // Pipeline is completely drained. Raise the flag and wait.
+                is_paused.store(true);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue; 
+            }
+            // If not all_free or empty, fall through and let remaining items process
         }
 
         if (!trt_contexts[0]) {
@@ -353,6 +349,7 @@ void InferenceBatcher::run(
             continue;
         }
 
+        // 3. Normal Dispatch Operation
         PipelineJob job;
         if (dispatch_queue.try_pop(job)) {
             int current_slot = job.slot;

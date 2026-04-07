@@ -11,27 +11,13 @@
 
 inline std::mutex console_mutex;
 
-inline int get_step_from_yaml(const std::string& filepath, int last_known_step) {
-    // ... exactly the same ...
-    std::ifstream file(filepath);
-    if (!file.is_open()) return last_known_step;
-    std::string line;
-    while (std::getline(file, line)) {
-        size_t pos = line.find("training_steps:");
-        if (pos != std::string::npos) {
-            try { return std::stoi(line.substr(pos + 15)); } catch (...) { return last_known_step; }
-        }
-    }
-    return last_known_step;
-}
-
 class Logger {
 private:
     std::string name;
     std::ofstream log_file;
     int current_rotation_step = -1;
     std::string rl_dir;
-    int min_log_level; // Added
+    int min_log_level;
 
     int parse_level(std::string level_str) {
         std::transform(level_str.begin(), level_str.end(), level_str.begin(), ::toupper);
@@ -40,11 +26,10 @@ private:
         if (level_str == "WARNING") return 30;
         if (level_str == "ERROR") return 40;
         if (level_str == "CRITICAL") return 50;
-        return 20; // Default INFO
+        return 20;
     }
 
 public:
-    // Added min_log_level to constructor
     Logger(const std::string& name, const std::string& rl_dir, int min_log_level = 20) 
         : name(name), rl_dir(rl_dir), min_log_level(min_log_level) {}
     
@@ -53,7 +38,6 @@ public:
     }
 
     void rotate(int global_step, int rotation_interval) {
-        // ... exactly the same ...
         int target_folder_step = (global_step / rotation_interval) * rotation_interval;
         if (target_folder_step != current_rotation_step) {
             if (log_file.is_open()) log_file.close();
@@ -67,7 +51,6 @@ public:
     }
 
     void log(const std::string& level, const std::string& message) {
-        // Filter out logs below the configured threshold
         if (parse_level(level) < min_log_level) return;
 
         auto now = std::chrono::system_clock::now();

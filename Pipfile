@@ -24,10 +24,9 @@ torch = {version = "*", index = "pytorch_cuda_129"}
 tensorboard = "*"
 setuptools = "<70"
 hdf5plugin = "*"
-lmdb = "*"
-lz4 = "*"
 onnx = "*"
 onnxscript = "*"
+zstandard = "*"
 
 [dev-packages]
 

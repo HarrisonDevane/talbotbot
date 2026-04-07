@@ -7,9 +7,10 @@ import shutil
 import random
 import psutil
 import torch
-import textwrap
+import struct
 import lmdb
 import warnings
+import json
 
 from trainer import TrainTask
 from model import ChessAIModel, fuse_bn_for_export
@@ -18,49 +19,47 @@ current_script_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 
 RL_DIR = os.path.abspath(os.path.join(root_dir, "rl_dir"))
-RL_STATE_FILE = os.path.abspath(os.path.join(root_dir, "config", "rl_state.yaml"))
 RL_PARAMS_FILE = os.path.abspath(os.path.join(root_dir, "config", "rl_training.yaml"))
 MODEL_FILE = os.path.abspath(os.path.join(root_dir, "config", "model.yaml"))
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="torch.onnx")
 
+# Format matching the C++ structs
+CPP_STATE_FMT = 'QQdQQQ'  # games_played, samples_generated, lifetime_entropy, buffer_count, buffer_head_ptr, buffer_wraps
+PY_STATE_FMT = 'Qd'       # training_steps, hours_training
+
 class RLOrchestrator:
     def __init__(self):
         self.logger = None
+        self.state_logger = None
 
-        # Load configurations
         with open(RL_PARAMS_FILE, 'r') as f:
             self.params_config = yaml.safe_load(f)
         with open(MODEL_FILE, 'r') as f:
             self.model_config = yaml.safe_load(f)
 
-        if not os.path.exists(RL_STATE_FILE):            
-            default_state_yaml = textwrap.dedent("""
-                # Replay Buffer State
-                buffer:
-                    count: 0                    # Total valid positions currently in the buffer
-                    head_ptr: 0                 # Circular buffer index (where next sample goes)
-                    wraps: 0                    # Number of buffer wraps
+        self.buffer_file_path = os.path.abspath(os.path.join(RL_DIR, "replay_memory.lmdb"))
+        
+        # Determine if we need to initialize a fresh DB
+        db_is_new = not os.path.exists(self.buffer_file_path)
+        
+        if db_is_new:
+            os.makedirs(self.buffer_file_path, exist_ok=True)
 
-                # Lifetime Statistics (Global accumulators)
-                lifetime:
-                    training_steps: 0           # Tracks global gradient updates (batches trained)
-                    games_played: 0             # Total games played since inception
-                    samples_generated: 0        # Total positions generated (including overwritten ones)
-                    hours_training: 0           # Total hours spent updating weights
-                    self_play_entropy: 0.0
-                
-                # Statistics from current save interval                                  
-                current_interval:
-                    samples_generated: 0        # Positions generated in the current specific cycle
-                    games_played: 0             # Number of games played this cycle
-                    self_play_entropy: 0.0      # Entropy  from self play games
-            """).strip()
-            with open(RL_STATE_FILE, 'w') as f:
-                f.write(default_state_yaml)
+        # NOTE: lock=True and readonly=False allows us to safely write PyState
+        self.env = lmdb.open(
+            self.buffer_file_path,
+            map_size=1024 * 1024 * 1024 * 128, # 128GB Map Size
+            readonly=False,
+            lock=True,
+            readahead=False,
+        )
 
-        with open(RL_STATE_FILE, 'r') as f:
-            self.state_config = yaml.safe_load(f)
+        # If it's a brand new DB, we MUST initialize the blobs so C++ doesn't crash reading null
+        if db_is_new:
+            self._initialize_empty_lmdb()
+
+        self.state_config = self._read_state_from_lmdb()
 
         self.current_step = self.state_config['lifetime']['training_steps']
         self.total_steps = self.params_config['global']['total_training_steps']
@@ -71,79 +70,120 @@ class RLOrchestrator:
         initial_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:06d}")
 
         os.makedirs(initial_log_dir, exist_ok=True)
-        self.logger = self._setup_persistent_logger(initial_log_dir)
+        
+        self.logger = self._setup_logger(
+            log_dir=initial_log_dir, 
+            name="RLOrchestrator", 
+            filename="orchestrator_py.log", 
+            level=self.params_config['data_generation']['main_logging_level'], 
+            fmt="[%(asctime)s] [%(levelname)s] %(message)s"
+        )
+        
+        self.state_logger = self._setup_logger(
+            log_dir=initial_log_dir, 
+            name="StateLogger", 
+            filename="state_metrics.log", 
+            level=logging.INFO, 
+            fmt="[%(asctime)s] %(message)s"
+        )
 
         base_path = os.path.join(root_dir, self.params_config['global']['model_path'])
-        self.best_model_pth = os.path.abspath(base_path + ".pth")
+        self.model_pth = os.path.abspath(base_path + ".pth")
         
-        if not os.path.exists(self.best_model_pth):
+        if not os.path.exists(self.model_pth):
             self._create_seed_models()
+            
+    def _initialize_empty_lmdb(self):
+        """Writes the initial zeroed-out state to a fresh LMDB to prevent C++ read errors."""
+        cpp_blob = struct.pack(CPP_STATE_FMT, 0, 0, 0.0, 0, 0, 0)
+        py_blob = struct.pack(PY_STATE_FMT, 0, 0.0)
+        
+        with self.env.begin(write=True) as txn:
+            txn.put(b"__CPP_STATE", cpp_blob)
+            txn.put(b"__PY_STATE", py_blob)
 
-        self.buffer_file_path = os.path.abspath(os.path.join(RL_DIR, "replay_memory.lmdb"))
+    def _read_state_from_lmdb(self):
+        with self.env.begin(write=False) as txn:
+            cpp_blob = txn.get(b"__CPP_STATE")
+            py_blob = txn.get(b"__PY_STATE")
 
-        if not os.path.exists(self.buffer_file_path):
-            tmp_env = lmdb.open(self.buffer_file_path, map_size=1024*1024*1024*128)
-            tmp_env.close()
+        # Fallback if somehow keys are missing despite initialization
+        if not cpp_blob or not py_blob:
+            return {
+                'buffer': {'count': 0, 'head_ptr': 0, 'wraps': 0},
+                'lifetime': {
+                    'training_steps': 0, 
+                    'games_played': 0, 
+                    'samples_generated': 0, 
+                    'hours_training': 0.0, 
+                    'self_play_entropy': 0.0
+                }
+            }
 
-        self.env = lmdb.open(
-            self.buffer_file_path,
-            map_size=1024 * 1024 * 1024 * 128,
-            readonly=True,
-            lock=False,
-            readahead=False
+        cpp_state = struct.unpack(CPP_STATE_FMT, cpp_blob)
+        py_state = struct.unpack(PY_STATE_FMT, py_blob)
+
+        return {
+            'buffer': {
+                'count': cpp_state[3],
+                'head_ptr': cpp_state[4],
+                'wraps': cpp_state[5]
+            },
+            'lifetime': {
+                'training_steps': py_state[0],
+                'games_played': cpp_state[0],
+                'samples_generated': cpp_state[1],
+                'hours_training': py_state[1],
+                'self_play_entropy': cpp_state[2]
+            }
+        }
+
+    def _write_py_state_to_lmdb(self):
+        blob = struct.pack(
+            PY_STATE_FMT, 
+            self.state_config['lifetime']['training_steps'], 
+            self.state_config['lifetime']['hours_training']
         )
+        with self.env.begin(write=True) as txn:
+            txn.put(b"__PY_STATE", blob)
 
     def _create_seed_models(self):
         random.seed(self.params_config['training']['seed'])
         torch.manual_seed(self.params_config['training']['seed'])
         model = ChessAIModel(self.model_config)
         os.makedirs(os.path.join(RL_DIR, 'best_models'), exist_ok=True)
-        torch.save({'model_state_dict': model.state_dict()}, self.best_model_pth)
+        torch.save({'model_state_dict': model.state_dict()}, self.model_pth)
         self._export_to_cpp()
         self.logger.info("Seed models created successfully.")
     
-    def _setup_persistent_logger(self, log_dir):
-        logger = logging.getLogger("RLOrchestrator")
-        logger.setLevel(self.params_config['data_generation']['main_logging_level'])
+    def _setup_logger(self, log_dir, name, filename, level, fmt):
+        logger = logging.getLogger(name)
+        logger.setLevel(level)
         logger.propagate = False
-
         if logger.hasHandlers():
             logger.handlers.clear()
-            
-        formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
-        log_filepath = os.path.join(log_dir, "orchestrator_py.log")
-        
+        formatter = logging.Formatter(fmt)
+        log_filepath = os.path.join(log_dir, filename)
         file_handler = logging.FileHandler(log_filepath, mode='a')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-        
         return logger
 
-    def _get_lmdb_entry_count(self):
-        return self.env.stat()['entries']
-
-    def _save_state(self):
-        with open(RL_STATE_FILE, 'w') as f:
-            yaml.safe_dump(self.state_config, f)
-
     def run(self):
-        # 1. Threading & Library Optimization
         training_cores = self.params_config['training']['training_cores']
         num_threads = len(training_cores)
         
-        for var in ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", 
-                    "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"]:
+        for var in ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"]:
             os.environ[var] = str(num_threads)
             
         torch.set_num_threads(num_threads)
         
-        # 2. Briefly unlock all cores so subprocess can inherit full visibility
         proc = psutil.Process()
         all_cores = list(range(psutil.cpu_count()))
         proc.cpu_affinity(all_cores)
         
         self.train_task = TrainTask(
-            best_model_path=self.best_model_pth,
+            model_path=self.model_pth,
             model_config=self.model_config,
             training_config=self.params_config['training'],
             state_config=self.state_config,
@@ -152,24 +192,20 @@ class RLOrchestrator:
             env=self.env
         )
 
-        engine_exe = os.path.abspath(os.path.join(root_dir, "build", "talbot_engine.exe"))
+        engine_exe = os.path.abspath(os.path.join(root_dir, "build", "Release", "talbot_engine.exe"))
         self.logger.info(f"Launching C++ Engine: {engine_exe}")
         cmd = [
             engine_exe,
             "--rl_dir", RL_DIR,
-            "--state_file", RL_STATE_FILE,
             "--config_file", RL_PARAMS_FILE,
             "--model_file", MODEL_FILE,
             "--db_path", self.buffer_file_path
         ]
         
-        # 3. Launch Engine
         engine_process = subprocess.Popen(cmd)
 
-        # 4. Pin Python to training silo and elevate priority
         proc.cpu_affinity(training_cores)
         proc.nice(psutil.HIGH_PRIORITY_CLASS)
-            
         self.logger.info(f"Python Orchestrator pinned to cores {training_cores}.")
 
         rotation_interval = self.params_config['global']['logging_rotation_steps']
@@ -178,6 +214,28 @@ class RLOrchestrator:
 
         try:
             while self.current_step < self.total_steps:
+                
+                self.state_config = self._read_state_from_lmdb()
+                buffer_size = self.state_config['buffer']['count']
+                samples_generated = self.state_config['lifetime']['samples_generated']
+                
+                samples_per_step = self.params_config['training']['batch_size'] / self.params_config['training']['sampling_ratio']
+                
+                # Prevent division by zero if sampling_ratio configuration is malformed
+                if samples_per_step <= 0:
+                    samples_per_step = 1 
+                    
+                target_steps = int(samples_generated // samples_per_step)
+
+                if self.current_step >= target_steps:
+                    time.sleep(0.5)
+                    continue
+
+                min_required = self.params_config['training']['batch_size']
+                if buffer_size < min_required:
+                    time.sleep(0.5)
+                    continue
+
                 step_start_time = time.time()
 
                 target_folder_step = (self.current_step // rotation_interval) * rotation_interval
@@ -186,54 +244,55 @@ class RLOrchestrator:
                 if new_log_dir != current_log_dir:
                     os.makedirs(new_log_dir, exist_ok=True)
                     current_log_dir = new_log_dir
-                    self.logger = self._setup_persistent_logger(current_log_dir)
+                    
+                    self.logger = self._setup_logger(
+                        log_dir=current_log_dir, 
+                        name="RLOrchestrator", 
+                        filename="orchestrator_py.log", 
+                        level=self.params_config['data_generation']['main_logging_level'], 
+                        fmt="[%(asctime)s] [%(levelname)s] %(message)s"
+                    )
+                    
+                    self.state_logger = self._setup_logger(
+                        log_dir=current_log_dir, 
+                        name="StateLogger", 
+                        filename="state_metrics.log", 
+                        level=logging.INFO, 
+                        fmt="[%(asctime)s] %(message)s"
+                    )
+                    
                     self.logger.info(f"New logging phase started at step {self.current_step}")
-
-                buffer_size = self._get_lmdb_entry_count()
-                min_required = self.params_config['training']['batch_size']
-
-                if buffer_size < min_required:
-                    self.logger.debug(f"Waiting for data... ({buffer_size}/{min_required} in LMDB)")
-                    time.sleep(1)
-                    continue
-
-                self.logger.info(f"Starting Step {self.current_step + 1}. Buffer size: {buffer_size}")
 
                 self.train_task.run_single_step(current_log_dir, self.state_config)
                 self.current_step += 1
                 self.state_config['lifetime']['training_steps'] = self.current_step
 
-                if self.current_step % self.params_config['global']['new_model_interval_steps'] == 0:
-                    self.train_task.save_checkpoint(self.best_model_pth)
+                if self.current_step % self.params_config['global']['new_model_refit_steps'] == 0:
+                    self.train_task.save_checkpoint(self.model_pth)
                     self._export_to_cpp()
 
                 total_time = time.time() - step_start_time
                 self.state_config['lifetime']['hours_training'] = round(
                     self.state_config['lifetime'].get('hours_training', 0.0) + (total_time / 3600), 6)
 
-                self.logger.info(
+                self.logger.debug(
                     f"Step {self.current_step} complete | "
                     f"Buffer: {buffer_size} | "
                     f"Step time: {total_time:.2f}s"
                 )
 
-                if self.current_step // self.save_interval > (self.current_step - 1) // self.save_interval:
+                self._write_py_state_to_lmdb()
+
+                # Write single-line state config JSON to the dedicated logger every step
+                self.state_logger.info(json.dumps(self.state_config))
+
+                if (self.current_step // self.save_interval > (self.current_step - 1) // self.save_interval):
                     backup_dir = os.path.join(RL_DIR, 'backup')
                     os.makedirs(backup_dir, exist_ok=True)
-
                     model_backup_path = os.path.join(backup_dir, f'step_{self.current_step:06d}_model.pth')
-                    shutil.copy(self.best_model_pth, model_backup_path)
-
-                    shutil.copy(RL_STATE_FILE, os.path.join(current_log_dir, f'step_{self.current_step:06d}_state.yaml'))
+                    shutil.copy(self.model_pth, model_backup_path)
                     shutil.copy(RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_step:06d}_config.yaml'))
-
-                    self.state_config['current_interval']['samples_generated'] = 0
-                    self.state_config['current_interval']['games_played'] = 0
-                    self.state_config['current_interval']['self_play_entropy'] = 0.0
-
                     self.logger.info(f"Periodic backup saved at step {self.current_step}.")
-
-                self._save_state()
 
         finally:
             self.logger.info("Shutting down C++ engine...")
@@ -241,17 +300,14 @@ class RLOrchestrator:
             engine_process.wait()
 
     def _export_to_cpp(self):
-        # 1. Standard loading sequence
-        checkpoint = torch.load(self.best_model_pth, map_location='cpu', weights_only=True)
+        checkpoint = torch.load(self.model_pth, map_location='cpu', weights_only=True)
         model = ChessAIModel(self.model_config)
         model.load_state_dict(checkpoint['model_state_dict'])
         model.eval()
         
-        # 2. Fuse and cast to FP16
         model = fuse_bn_for_export(model)
         model = model.cuda().half() 
 
-        # 3. Create FP16 dummy input
         dummy_input = torch.zeros(
             1, 
             self.model_config['model']['input_planes'], 
@@ -260,24 +316,21 @@ class RLOrchestrator:
             dtype=torch.float16
         ).cuda()
 
-        onnx_path = self.best_model_pth.replace(".pth", ".onnx")
+        onnx_path = self.model_pth.replace(".pth", ".onnx")
         
-        # 4. Use the stable legacy exporter
-        torch.onnx.export(
-            model, 
-            dummy_input, 
-            onnx_path,
-            export_params=True,
-            opset_version=17,
-            do_constant_folding=True,
-            input_names=['input'],
-            output_names=['policy', 'value'],
-            dynamic_axes={
-                'input': {0: 'batch_size'},
-                'policy': {0: 'batch_size'},
-                'value': {0: 'batch_size'}
-            }
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*legacy TorchScript-based ONNX export.*")
+            torch.onnx.export(
+                model, 
+                dummy_input, 
+                onnx_path,
+                export_params=True,
+                opset_version=17,
+                do_constant_folding=True,
+                input_names=['input'],
+                output_names=['policy', 'value'],
+                dynamic_axes={'input': {0: 'batch_size'}, 'policy': {0: 'batch_size'}, 'value': {0: 'batch_size'}}
+            )
         self.logger.info(f"Stable FP16 ONNX export successful: {onnx_path}")
 
 if __name__ == "__main__":

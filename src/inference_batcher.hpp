@@ -11,6 +11,7 @@
 #include <c10/cuda/CUDAStream.h>
 #include "logger.hpp"
 #include "mcts_engine.hpp" 
+#include "concurrentqueue.h"
 
 class InferenceBatcher {
 private:
@@ -40,6 +41,11 @@ private:
     std::vector<uint8_t> pending_engine_data;
     std::mutex reload_mutex;
 
+    // --- NEW: Deterministic Drain Handshake ---
+    std::atomic<bool> pause_requested{false};
+    std::atomic<bool> is_paused{false};
+    // ------------------------------------------
+
     double interval_total_processing_duration = 0.0;
     int interval_batches_processed = 0;
     int interval_total_inferences = 0;
@@ -48,7 +54,7 @@ private:
     void load_initial_engine(Logger& logger);
 
     std::vector<std::pair<int, int>> collect_batch(
-        std::vector<ThreadSafeQueue<std::vector<std::pair<int, int>>>*>& shards,
+        moodycamel::ConcurrentQueue<std::pair<int, int>>& queue,
         Logger& logger,
         std::atomic<bool>& stop_event
     );
@@ -69,8 +75,17 @@ public:
         pending_trt_reload.store(true); 
     }
 
+    // --- NEW: Handshake Methods ---
+    void request_pause() { pause_requested.store(true); }
+    bool is_fully_paused() const { return is_paused.load(); }
+    void cancel_pause() { 
+        pause_requested.store(false); 
+        is_paused.store(false); 
+    }
+    // ------------------------------
+
     void run(
-        std::vector<ThreadSafeQueue<std::vector<std::pair<int, int>>>*>& shards,
+        moodycamel::ConcurrentQueue<std::pair<int, int>>& queue,    
         std::vector<ThreadSafeQueue<std::vector<int>>>& result_queues,
         std::vector<torch::Tensor>& shared_input_buffer,
         std::vector<torch::Tensor>& shared_policy_buffer,

@@ -66,3 +66,4 @@ build/*
 *.bat
 *.engine
 *.onnx
+rl_dir/*

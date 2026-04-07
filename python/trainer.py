@@ -8,27 +8,31 @@ import logging
 import os
 import time
 import numpy as np
-import lz4.frame
+import lmdb
+
+import zstandard as zstd
 
 from model import ChessAIModel
 
 class TrainTask:
-    def __init__(self, best_model_path: str, model_config: dict, training_config: dict,
+    def __init__(self, model_path: str, model_config: dict, training_config: dict,
                  state_config: dict, global_config: dict, lmdb_path: str, env):
         self.training_config = training_config
-        self.best_model_path = best_model_path
+        self.model_path = model_path
         self.model_config = model_config
         self.state_config = state_config
         self.global_config = global_config
         self.lmdb_path = lmdb_path
-        self.env = env
+        self.env = env 
+        
         self.output_dir = None
         self.logger = None
         self.last_log_dir = None
         self.tb_writer = None
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda")
+        
+        self.decompressor = zstd.ZstdDecompressor()
 
-        # 1. Extract physical dimensions directly from the YAML config
         m_cfg = self.model_config['model']
         c_cfg = self.model_config['chess']
 
@@ -37,11 +41,9 @@ class TrainTask:
         self.total_input_size = self.input_planes * self.board_dim * self.board_dim
         self.total_policy_moves = c_cfg['total_policy_moves']
 
-        # Calculate exactly how many bytes the C++ packbits operation used
         self.board_bytes = (self.total_input_size + 7) // 8
         self.mask_bytes = (self.total_policy_moves + 7) // 8
 
-        # 2. Initialize Model Architecture cleanly with the config dict
         self.model = ChessAIModel(self.model_config).to(self.device)
 
         self.optimizer = optim.SGD(
@@ -56,8 +58,7 @@ class TrainTask:
         self.policy_criterion = nn.KLDivLoss(reduction='batchmean')
         self.value_criterion = nn.MSELoss()
 
-        # 3. Load weights
-        checkpoint = torch.load(self.best_model_path, map_location=self.device, weights_only=True)
+        checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(checkpoint['model_state_dict'])
 
         if 'optimizer_state_dict' in checkpoint:
@@ -67,7 +68,7 @@ class TrainTask:
 
     def _setup_logger(self):
         logger = logging.getLogger("TrainTask")
-        logger.setLevel(self.training_config['main_logging_level'])
+        logger.setLevel(self.training_config['log_level'])
         logger.propagate = False
 
         if logger.hasHandlers():
@@ -82,7 +83,6 @@ class TrainTask:
         return logger
 
     def save_checkpoint(self, path: str):
-        """Called by the orchestrator to flush VRAM weights to SSD."""
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
@@ -90,12 +90,8 @@ class TrainTask:
         }, path)
 
     def run_single_step(self, current_log_dir: str, state_config: dict):
-        """
-        Pulls a random batch from LMDB, decompresses it, and performs a single gradient update in VRAM.
-        """
         self.state_config = state_config
 
-        # 1. Log rotation — handles TensorBoard and folder logic
         if current_log_dir != self.last_log_dir:
             self.output_dir = current_log_dir
             self.logger = self._setup_logger()
@@ -107,24 +103,29 @@ class TrainTask:
 
             self.last_log_dir = current_log_dir
 
-        # 2. Get fresh data
         data_start = time.perf_counter()
-
         batch_size = self.training_config['batch_size']
-        total_positions = self.state_config['buffer']['count']
-        indices = np.random.randint(0, total_positions, size=batch_size)
 
         boards, policies, values, masks = [], [], [], []
 
+        # Uses the shared environment. read-only transaction, so it doesn't block C++ writes.
         with self.env.begin(write=False, buffers=True) as txn:
+            actual_count = txn.stat()['entries']
+            indices = np.random.randint(0, actual_count, size=batch_size)
+
             for idx in indices:
                 compressed_blob = txn.get(f"{idx}".encode('ascii'))
 
-                while not compressed_blob:
-                    new_idx = np.random.randint(0, total_positions)
-                    compressed_blob = txn.get(f"{new_idx}".encode('ascii'))
+                if compressed_blob is None:
+                    for _ in range(10):
+                        new_idx = np.random.randint(0, actual_count)
+                        compressed_blob = txn.get(f"{new_idx}".encode('ascii'))
+                        if compressed_blob is not None:
+                            break
+                    if compressed_blob is None:
+                        continue
 
-                buf = lz4.frame.decompress(compressed_blob)
+                buf = self.decompressor.decompress(compressed_blob)
 
                 num_moves = np.frombuffer(buf[0:2], dtype=np.uint16)[0]
 
@@ -154,12 +155,10 @@ class TrainTask:
 
         data_time = (time.perf_counter() - data_start) * 1000
 
-        # 3. Dynamic LR update
         global_step = self.state_config['lifetime']['training_steps']
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = float(self.training_config['learning_rate'])
 
-        # 4. Forward pass
         self.model.train()
         self.optimizer.zero_grad()
 
@@ -167,7 +166,6 @@ class TrainTask:
         with torch.amp.autocast('cuda'):
             policy_logits, value_outputs = self.model(board_tensors)
 
-        # Masking outside autocast for numerical stability
         policy_logits = policy_logits.float().masked_fill(~true_legal_masks, -1e9)
         policy_log_softmax = F.log_softmax(policy_logits, dim=1)
 
@@ -185,7 +183,6 @@ class TrainTask:
 
         fw_time = (time.perf_counter() - fw_start) * 1000
 
-        # 5. Backward pass
         bw_start = time.perf_counter()
         self.scaler.scale(total_loss).backward()
         self.scaler.unscale_(self.optimizer)

@@ -7,6 +7,7 @@
 #include "chess.hpp"
 #include "mcts_engine.hpp"
 #include "logger.hpp"
+#include "concurrentqueue.h"
 
 struct ActionSelectorConfig {
     int node_pool_size;
@@ -47,10 +48,9 @@ private:
     ModelConfig model_config;
     std::mt19937 rng; 
     
-    // Persistent Engine to stop allocator thrashing
     std::unique_ptr<MCTSEngine> mcts;
 
-    ThreadSafeQueue<std::vector<std::pair<int, int>>>& inference_queue;
+    moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue;
     ThreadSafeQueue<std::vector<int>>& result_queue;
     std::vector<torch::Tensor>& shared_input_buffer;
     std::vector<torch::Tensor>& shared_policy_buffer;
@@ -64,7 +64,7 @@ public:
         ActionSelectorConfig config,
         const ModelConfig& model_cfg, 
         Logger& logger, 
-        ThreadSafeQueue<std::vector<std::pair<int, int>>>& i_queue,
+        moodycamel::ConcurrentQueue<std::pair<int, int>>& i_queue,
         ThreadSafeQueue<std::vector<int>>& r_queue,
         std::vector<torch::Tensor>& in_buffer,
         std::vector<torch::Tensor>& p_buffer,

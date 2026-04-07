@@ -7,9 +7,11 @@
 #include <memory>
 #include <chrono>
 #include <torch/torch.h>
+#include <random>
 #include "chess.hpp"
 #include "mcts_node.hpp"
 #include "logger.hpp"
+#include "concurrentqueue.h"
 
 struct ModelConfig {
     int input_planes;
@@ -94,6 +96,7 @@ public:
     double gumbel_c_visit;
     double gumbel_c_scale;
     double gumbel_noise;
+    std::mt19937 rng;
 
     ModelConfig model_config;
 
@@ -111,7 +114,7 @@ public:
     NodePool node_pool;
     Logger& logger;
 
-    ThreadSafeQueue<std::vector<std::pair<int, int>>>& my_inference_shard;
+    moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue;
     ThreadSafeQueue<std::vector<int>>& result_queue;
     ThreadSafeQueue<int>& buffer_free_slots;
 
@@ -128,7 +131,7 @@ public:
     MCTSEngine(
         int node_pool_capacity, 
         int worker_batch_size, 
-        ThreadSafeQueue<std::vector<std::pair<int, int>>>& my_inference_shard,
+        moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue,
         ThreadSafeQueue<std::vector<int>>& result_queue, 
         int worker_id, 
         double virtual_loss,
