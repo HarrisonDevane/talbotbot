@@ -38,6 +38,17 @@ public:
     }
 
     void rotate(int global_step, int rotation_interval) {
+        // FLAT DIRECTORY BYPASS: If rotation is <= 0, drop directly into rl_dir
+        if (rotation_interval <= 0) {
+            if (!log_file.is_open()) {
+                std::filesystem::create_directories(rl_dir);
+                std::string log_path = rl_dir + "/" + name + ".log";
+                log_file.open(log_path, std::ios::app);
+            }
+            return;
+        }
+
+        // ORIGINAL TRAINING LOGIC: Create run_step_XXXXXX folders
         int target_folder_step = (global_step / rotation_interval) * rotation_interval;
         if (target_folder_step != current_rotation_step) {
             if (log_file.is_open()) log_file.close();

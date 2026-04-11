@@ -1,17 +1,19 @@
 global:
   total_training_steps: 20000                        # Total gradient updates to perform
-  backup_interval_steps: 1000                        # How often to backup the best_model
-  new_model_refit_steps: 10                          # How often a new model is refitted and hotswapped
+  backup_interval_steps: 1000                        # How often to backup the model
   logging_rotation_steps: 1000                       # How often to make a new log folder
-  min_buffer_size: 1024000                           # Minimum Replay Buffer Size
+  min_buffer_size: 1024000                           # Minimum replay buffer size
   max_buffer_size: 16384000                          # Max buffer size
-  buffer_ramp_steps: 10000                           # Steps to reach max buffer size
-  model_path: 'rl_dir/best_models/model'             # Path to best model base name
+  buffer_ramp_steps: 10000                           # Steps to reach max buffer size (linear)
+  min_build_steps: 200                               # Minimum steps for a new engine build
+  max_build_steps: 1000                              # Max steps for a new engine build
+  build_ramp_steps: 10000                            # Steps to reach max engine build rate (linear)
+  model_path: 'rl_dir/models/model'                  # Path to best model base name
 
 inference:
   inference_worker_cores: [13, 14, 15]               # Dedicated CPU cores for the Batching Process (feeding the GPU)
   batch_size: 1024                                   # Max batch size during inference
-  batch_size_factor: 8                               # Multiplier for batch size to determine max slots available in RAM
+  batch_size_factor: 16                              # Multiplier for batch size to determine max slots available in RAM
   batch_timeout_ms: 10                               # How long the GPU batcher waits for more data before running partial batch
   logging_interval_sec: 60
   logging_level: 20
@@ -20,22 +22,23 @@ data_generation:
   data_generator_cores: [3]                          # Dedicated CPU cores for the main C++ orchestrator and data generator task
   io_write_cores: [4]
   game_worker_cores: [5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
-  workers_per_core: 8                                # Number of game workers to pin to each core
+  workers_per_core: 12                               # Number of game workers to pin to each core
   max_ply_length: 400                                # Hard cutoff to force a draw  main_logging_level: 20
   main_logging_level: 20
   worker_logging_level: 50
-  io_logging_level: 10
+  io_logging_level: 20
 
 mcts:
   node_pool_size: 100000                             # Capacity of the persistent MCTS node pool
-  worker_minibatch_size: 2                           # Max positions a single worker sends at once
+  worker_minibatch_size: 16                          # Max positions a single worker sends at once
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   gumbel_c_visit: 50.0                               # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_noise: 1.0                                  # Gumbel noise value
   gumbel_search_depth: 128                           # Search depth budget
   gumbel_m: 16                                       # m value for sequential halving (top m moves sampled)
-  minimax_smoothing_factor: 0.9                      # Smooth minimax with standard MCTS distribution for forcing moves
+  minimax_win_target: 0.95
+  minimax_loss_target: 0.001
 
 selection:
   temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
@@ -56,4 +59,4 @@ training:
   weight_decay: 1e-4                                 # L2 Regularization
   learning_rate: 1e-1                                # SGD Learning Rate
   momentum_rate: 0.9                                 # SGD Momentum
-  log_level: 20
+  logging_level: 20

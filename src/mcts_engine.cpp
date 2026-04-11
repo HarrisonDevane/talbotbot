@@ -79,47 +79,6 @@ void MCTSEngine::reset(const chess::Board& board, const std::vector<chess::Board
     time_retrieval = 0.0;
     time_queueing = 0.0;
     time_misc = 0.0;
-    time_wait_for_inference = 0.0;
-}
-
-void MCTSEngine::_wait_for_inference() {
-    auto start_time = NOW();
-
-    if (!batch_buffer.empty()) {
-        _submit_batch();
-    }
-
-    while (inference_received < inference_sent) {
-        std::vector<int> completed_indices = result_queue.pop_wait();
-
-        logger.log("DEBUG", "Received " + std::to_string(completed_indices.size()) + " inferences from batcher.");
-
-        for (int buffer_index : completed_indices) {
-            MCTSNode* node = in_flight_nodes[buffer_index];
-            in_flight_nodes[buffer_index] = nullptr;
-            inference_received++;
-
-            c10::Half* policy_ptr = shared_policy_buffer[buffer_index].data_ptr<c10::Half>();
-            float value_output = (float)shared_value_buffer[buffer_index].data_ptr<c10::Half>()[0];
-
-            buffer_free_slots.push(buffer_index);
-
-            if (node != nullptr) {
-                if (!node->expanded) {
-                    auto exp_start = NOW();
-                    for (int i = 0; i < node->num_children; ++i) {
-                        MCTSNode* child = node->first_child + i;
-                        child->raw_logit = policy_ptr[child->policy_flat_index];
-                    }
-                    node->expanded = true;
-                    time_expansion += ELAPSED(exp_start, NOW());
-                }
-
-                _backpropagate(node, (double)value_output, false);
-            }
-        }
-    }
-    time_wait_for_inference += ELAPSED(start_time, NOW());
 }
 
 MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simulation_path) {
@@ -128,7 +87,7 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
     double exp_cache[256];
 
     while (true) {
-        if (node->num_children == 0 || !node->expanded || node->selected) break;
+        if (node->num_children == 0 || !node->expanded || node->selected || node->forced_outcome.has_value()) break;
 
         MCTSNode* best_child = nullptr;
         double best_deficit = -1e20;
@@ -230,6 +189,8 @@ void MCTSEngine::_retrieve_inference(bool block) {
             if (!result_queue.try_pop(completed_indices)) break;
         }
 
+        logger.log("DEBUG", "Received " + std::to_string(completed_indices.size()) + " inferences from batcher.");
+
         for (int buffer_index : completed_indices) {
             MCTSNode* node = in_flight_nodes[buffer_index];
             in_flight_nodes[buffer_index] = nullptr;
@@ -264,7 +225,6 @@ void MCTSEngine::_submit_batch() {
 
     logger.log("DEBUG", "Submitting batch of " + std::to_string(b_size) + " states to inference queue.");
     
-    // Lock-free bulk push. Insanely fast.
     inference_queue.enqueue_bulk(batch_buffer.data(), b_size);
     
     inference_sent += b_size;
@@ -303,7 +263,7 @@ void MCTSEngine::_queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCT
     while (!buffer_free_slots.try_pop(buffer_index)) {
         _retrieve_inference(false);
         if (!batch_buffer.empty()) _submit_batch();
-        std::this_thread::sleep_for(std::chrono::microseconds(100)); 
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
 
     in_flight_nodes[buffer_index] = leaf;
@@ -351,7 +311,10 @@ void MCTSEngine::_queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCT
     batch_buffer.push_back({worker_id, buffer_index});
     _virtual_loss(leaf, true);
 
-    if (batch_buffer.size() >= (size_t)worker_batch_size) {
+    if (batch_buffer.size() >= (size_t)worker_batch_size) { 
+        while (inference_sent > inference_received) {
+            _retrieve_inference(true);
+        }
         _submit_batch();
     }
 
@@ -368,17 +331,30 @@ void MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
 
     while (true) {
         _retrieve_inference(false);
-        if (batch_buffer.size() >= (size_t)worker_batch_size) _submit_batch();
+        if (batch_buffer.size() >= (size_t)worker_batch_size) { 
+            while (inference_sent > inference_received) {
+                _retrieve_inference(true);
+            }
+            _submit_batch();
+        }
 
         if (start_node->selected) {
             if (!batch_buffer.empty()) _submit_batch();
             if (inference_received >= inference_sent) break;
             
-            std::this_thread::sleep_for(std::chrono::microseconds(1000));
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
             continue;
         }
 
         MCTSNode* leaf = _select(start_node, simulation_path);
+        std::string path_str = "";
+        MCTSNode* curr = leaf;
+        while (curr != nullptr && curr->move != chess::Move::NO_MOVE) {
+            path_str = chess::uci::moveToUci(curr->move) + (path_str.empty() ? "" : " ") + path_str;
+            curr = curr->parent;
+        }
+
+        logger.log("DEBUG", "Selected path: " + path_str);
 
         if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(3)) {
             _handle_terminal_node(leaf);
@@ -398,7 +374,7 @@ void MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
                 root_board.unmakeMove(simulation_path.back()->move);
                 simulation_path.pop_back();
             }
-            std::this_thread::sleep_for(std::chrono::microseconds(1000));
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
             continue;
         }
 
@@ -440,10 +416,13 @@ void MCTSEngine::_log_tournament_results(const std::vector<MCTSNode*>& candidate
         std::string outcome_str = node->forced_outcome.has_value() ? std::to_string(node->forced_outcome.value()) : "None";
         std::string dtm_str = node->distance_to_mate.has_value() ? std::to_string(node->distance_to_mate.value()) : "None";
 
+        double q_val = (node->visits > 0) ? (-node->value_sum / node->visits) : root_v_mix;
+        double q_norm = (q_val + 1.0) / 2.0;
+
         snprintf(line, sizeof(line), 
             "%-8s %8d %8.4f %8.4f %8.4f %8.4f %8.4f %8s %8s", 
             chess::uci::moveToUci(node->move).c_str(), node->visits, node->raw_logit, node->gumbel_noise,
-            node->q_val, node->q_norm, node->gumbel_score, outcome_str.c_str(), dtm_str.c_str()
+            q_val, q_norm, node->gumbel_score, outcome_str.c_str(), dtm_str.c_str()
         );
         logger.log("INFO", line);
     }
@@ -457,8 +436,9 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
 
     _queue_leaf_for_inference(root, {}); 
     _submit_batch();
-    _wait_for_inference();
-    simulation_count++;
+    while (inference_received < inference_sent) {
+        _retrieve_inference(true);
+    }
 
     std::vector<MCTSNode*> all_nodes;
     for(int i = 0; i < root->num_children; ++i) {
@@ -484,6 +464,7 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
 
     int m = std::min(max_m, (int)active_candidates.size());
     if (m == 0) return simulation_count;
+    _log_tournament_results(active_candidates, "Initial candidates:");
 
     std::sort(active_candidates.begin(), active_candidates.end(), [](MCTSNode* a, MCTSNode* b) {
         return a->gumbel_score > b->gumbel_score;
@@ -510,7 +491,10 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
                 root_board.unmakeMove(child->move);
             }
             _submit_batch();
-            _wait_for_inference();
+            while (inference_received < inference_sent) {
+                _retrieve_inference(true);
+            }
+            _log_tournament_results(active_candidates, "Round 0");
         }
 
         int current_phase_budget = (phase_idx == num_phases - 1) ? remaining_search_depth : phase_budget;
@@ -537,7 +521,9 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
             if (active_idx >= num_cands) active_idx = 0;
         }
 
-        _wait_for_inference();
+        while (inference_received < inference_sent) {
+            _retrieve_inference(true);
+        }
 
         double max_visits_phase = 1.0;
         for (MCTSNode* child : active_candidates) {
@@ -594,8 +580,9 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
     log_timer("Backpropagation time:", time_backpropagation);
     log_timer("Forced waiting for inference time:", time_wait_for_inference);
 
-    if (!batch_buffer.empty() || inference_received < inference_sent) {
-        _wait_for_inference();
+    if (!batch_buffer.empty()) _submit_batch();
+    while (inference_received < inference_sent) {
+        _retrieve_inference(true);
     }
 
     return simulation_count;
@@ -652,10 +639,13 @@ void MCTSEngine::_backpropagate(MCTSNode* node, double value, bool is_terminal) 
     MCTSNode* current_node = node;
     double value_for_backprop = value;
     current_node->raw_value = value;
+    logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " raw value: " + std::to_string(value));
 
     while (current_node != nullptr) {
         current_node->visits += 1;
         current_node->value_sum += value_for_backprop;
+
+        logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " value: " + std::to_string(value_for_backprop));
         
         _backpropagate_minimax(current_node);
 

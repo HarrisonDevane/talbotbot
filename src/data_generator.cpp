@@ -9,6 +9,7 @@
 #include <windows.h> 
 #include <cmath>
 
+// [Constructor remains identical...]
 DataGenerator::DataGenerator(
     const YAML::Node& global_cfg,
     const YAML::Node& data_gen_cfg, const YAML::Node& mcts_cfg, const YAML::Node& sel_cfg, const YAML::Node& model_cfg,
@@ -47,7 +48,8 @@ DataGenerator::DataGenerator(
     selector_config.gumbel_noise = mcts_cfg["gumbel_noise"].as<double>();
     selector_config.gumbel_search_depth = mcts_cfg["gumbel_search_depth"].as<int>();
     selector_config.gumbel_m = mcts_cfg["gumbel_m"].as<int>();
-    selector_config.minimax_smoothing_factor = mcts_cfg["minimax_smoothing_factor"].as<double>();
+    selector_config.minimax_win_target = mcts_cfg["minimax_win_target"].as<double>();
+    selector_config.minimax_loss_target = mcts_cfg["minimax_loss_target"].as<double>();
     selector_config.temperature_ply_cutoff = sel_cfg["temperature_ply_cutoff"].as<int>();
     selector_config.temperature_top_move = sel_cfg["temperature_top_move"].as<double>();
     selector_config.temperature_blunder_threshold = sel_cfg["temperature_blunder_threshold"].as<double>();
@@ -58,10 +60,8 @@ DataGenerator::DataGenerator(
     main_logger.log("INFO", "DataGenerator logic loop initialized.");
 }
 
-DataGenerator::~DataGenerator() {
-    stop();
-}
-
+// [Destructor, start, stop, _generate_pgn identical to current...]
+DataGenerator::~DataGenerator() { stop(); }
 void DataGenerator::start() {
     int logical_idx = 0;
     for (int i = 0; i < config.num_cores; ++i) {
@@ -72,7 +72,6 @@ void DataGenerator::start() {
         }
     }
 }
-
 void DataGenerator::stop() {
     stop_event.store(true);
     for (auto& t : workers) if (t.joinable()) t.join();
@@ -107,17 +106,25 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
 
     uint64_t local_step_cache = current_step.load(std::memory_order_relaxed);
 
-    Logger logger("game_worker_" + std::to_string(worker_id), config.rl_dir, config.worker_logging_level);
+    Logger logger("worker_" + std::to_string(worker_id), config.rl_dir, config.worker_logging_level);
     logger.rotate(local_step_cache, config.rotation_interval);
     
     logger.log("INFO", "=== GAME WORKER " + std::to_string(core_id) + " ===");
-    logger.log("INFO", "Worker " + std::to_string(worker_id) + " pinned to core: " + std::to_string(core_id));
     
-    ActionSelector agent("worker_" + std::to_string(worker_id), logical_idx, selector_config, 
-                         model_config, logger, 
-                         inference_queue, 
-                         result_queues[logical_idx], 
-                         shared_input_buffer, shared_policy_buffer, shared_value_buffer, buffer_free_slots);
+    // --- Coordinator takes ownership of the Engine ---
+    chess::Board dummy;
+    dummy.setFen(chess::constants::STARTPOS);
+    MCTSEngine mcts(
+        selector_config.node_pool_size, selector_config.batch_size_per_worker, 
+        inference_queue, result_queues[logical_idx], logical_idx,
+        selector_config.virtual_loss, selector_config.draw_cutoff, 
+        selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
+        selector_config.gumbel_noise, dummy, std::vector<chess::Board>(), logger,
+        shared_input_buffer, shared_policy_buffer, shared_value_buffer,
+        model_config, buffer_free_slots
+    );
+
+    ActionSelector agent("worker_" + std::to_string(worker_id), logical_idx, selector_config, logger);
 
     while (!stop_event.load()) {
         local_step_cache = current_step.load(std::memory_order_relaxed);
@@ -134,7 +141,6 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
         chess::Board board;
         board.setFen(chess::constants::STARTPOS);
         agent.reset_for_new_game();
-        agent.set_name("step_" + std::to_string(local_step_cache));
 
         bool game_over = false;
         int ply_count = 1;
@@ -147,9 +153,40 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
 
         while (!game_over && !stop_event.load()) {
             chess::Color current_turn = board.sideToMove();
-            SelectionResult move_result = agent.select_action(board, history, ply_count, 
-                                                              selector_config.gumbel_search_depth, 
-                                                              selector_config.gumbel_m);
+            int move_number = ((ply_count - 1) / 2) + 1;
+            std::string side_str = (current_turn == chess::Color::WHITE) ? "White" : "Black";
+            
+            char move_banner[512];
+            snprintf(move_banner, sizeof(move_banner), 
+                "\n============================================================\n"
+                "                    --- MOVE %d: %s, PLY %d STARTED ---\n"
+                "============================================================", 
+                move_number, side_str.c_str(), ply_count);
+            logger.log("INFO", move_banner);
+
+            auto move_start_time = std::chrono::high_resolution_clock::now();
+
+            // 1. Search
+            mcts.reset(board, history);
+            int sim_count = mcts.run_simulations(selector_config.gumbel_search_depth, selector_config.gumbel_m);
+            double root_v_mix = mcts.root->calculate_v_mix();
+
+            // 2. Generate Targets
+            TargetResult targets = TargetGenerator::generate_targets(
+                mcts.root, root_v_mix, board, selector_config, model_config, logger
+            );
+
+            // 3. Select Action
+            SelectionResult move_result = agent.select_move(mcts.root, root_v_mix, ply_count);
+
+            auto move_end_time = std::chrono::high_resolution_clock::now();
+            double total_move_time = std::chrono::duration<double>(move_end_time - move_start_time).count();
+            double sim_speed = (total_move_time > 0) ? (sim_count / total_move_time) : 0.0;
+
+            char timer_buffer[256];
+            snprintf(timer_buffer, sizeof(timer_buffer), "Time: %.4fs | Speed: %.1f sim/s | Entropy: %.4f | Value: %.4f", 
+                     total_move_time, sim_speed, targets.entropy, root_v_mix);
+            logger.log("INFO", timer_buffer);
 
             if (move_result.resigned || move_result.best_move == chess::Move::NO_MOVE) {
                 final_game_value = (current_turn == chess::Color::BLACK) ? 1.0 : -1.0; 
@@ -159,13 +196,15 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
                 break;
             }
 
-            game_entropy_sum += move_result.entropy;
+            logger.log("INFO", "Selected move: " + chess::uci::moveToUci(move_result.best_move));
+
+            game_entropy_sum += targets.entropy;
 
             GameTransition transition;
             transition.turn = current_turn;
             transition.move = move_result.best_move;
             transition.board_state.resize(total_input_size, 0);
-            transition.policy = move_result.policy_vector;
+            transition.policy = targets.policy_vector; // Passed from TargetGenerator
             
             board_to_tensor_69(board, history, transition.board_state.data());
             

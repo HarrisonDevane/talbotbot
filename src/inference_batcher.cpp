@@ -11,6 +11,7 @@
 #include <sstream>
 #include <thread>
 #include <fstream>
+#include <atomic>
 
 class BatcherTRTLogger : public nvinfer1::ILogger {
     void log(Severity severity, const char* msg) noexcept override {
@@ -110,7 +111,8 @@ void InferenceBatcher::run(
     std::vector<torch::Tensor>& shared_input_buffer,
     std::vector<torch::Tensor>& shared_policy_buffer,
     std::vector<torch::Tensor>& shared_value_buffer,
-    std::atomic<bool>& stop_event
+    std::atomic<bool>& stop_event,
+    ThreadSafeQueue<int>* buffer_free_slots
 ) {
     at::set_num_threads(1);
 
@@ -118,6 +120,8 @@ void InferenceBatcher::run(
     logger.rotate(current_global_step.load(), rotation_interval);
     logger.log("INFO", "=== INFERENCE BATCHER STARTED ===");
     
+    std::atomic<double> local_idle_time_sec{0.0};
+
     DWORD_PTR frontendMask = 0;
     DWORD_PTR backendMask = 0;
     DWORD_PTR fillerMask = 0;
@@ -158,13 +162,13 @@ void InferenceBatcher::run(
 
     const int NUM_SLOTS = 3;
     
-    torch::Tensor pinned_staging[NUM_SLOTS] = { torch::empty(batch_shape, pinned_opts), torch::empty(batch_shape, pinned_opts), torch::empty(batch_shape, pinned_opts) };
-    torch::Tensor policy_cpu[NUM_SLOTS]     = { torch::empty(policy_batch_shape, pinned_opts), torch::empty(policy_batch_shape, pinned_opts), torch::empty(policy_batch_shape, pinned_opts) };
-    torch::Tensor value_cpu[NUM_SLOTS]      = { torch::empty(value_batch_shape, pinned_opts), torch::empty(value_batch_shape, pinned_opts), torch::empty(value_batch_shape, pinned_opts) };
+    torch::Tensor pinned_staging[NUM_SLOTS] = { torch::zeros(batch_shape, pinned_opts), torch::zeros(batch_shape, pinned_opts), torch::zeros(batch_shape, pinned_opts) };
+    torch::Tensor policy_cpu[NUM_SLOTS]     = { torch::zeros(policy_batch_shape, pinned_opts), torch::zeros(policy_batch_shape, pinned_opts), torch::zeros(policy_batch_shape, pinned_opts) };
+    torch::Tensor value_cpu[NUM_SLOTS]      = { torch::zeros(value_batch_shape, pinned_opts), torch::zeros(value_batch_shape, pinned_opts), torch::zeros(value_batch_shape, pinned_opts) };
 
-    torch::Tensor gpu_policy_fp16[NUM_SLOTS] = { torch::empty(policy_batch_shape, gpu_opts_fp16), torch::empty(policy_batch_shape, gpu_opts_fp16), torch::empty(policy_batch_shape, gpu_opts_fp16) };
-    torch::Tensor gpu_value_fp16[NUM_SLOTS]  = { torch::empty(value_batch_shape, gpu_opts_fp16), torch::empty(value_batch_shape, gpu_opts_fp16), torch::empty(value_batch_shape, gpu_opts_fp16) };
-    torch::Tensor gpu_input_fp16[NUM_SLOTS]  = { torch::empty(batch_shape, gpu_opts_fp16), torch::empty(batch_shape, gpu_opts_fp16), torch::empty(batch_shape, gpu_opts_fp16) };
+    torch::Tensor gpu_policy_fp16[NUM_SLOTS] = { torch::zeros(policy_batch_shape, gpu_opts_fp16), torch::zeros(policy_batch_shape, gpu_opts_fp16), torch::zeros(policy_batch_shape, gpu_opts_fp16) };
+    torch::Tensor gpu_value_fp16[NUM_SLOTS]  = { torch::zeros(value_batch_shape, gpu_opts_fp16), torch::zeros(value_batch_shape, gpu_opts_fp16), torch::zeros(value_batch_shape, gpu_opts_fp16) };
+    torch::Tensor gpu_input_fp16[NUM_SLOTS]  = { torch::zeros(batch_shape, gpu_opts_fp16), torch::zeros(batch_shape, gpu_opts_fp16), torch::zeros(batch_shape, gpu_opts_fp16) };
 
     size_t input_bytes_per_tensor = shared_input_buffer[0].numel() * sizeof(uint16_t);
     size_t policy_bytes_per_tensor = shared_policy_buffer[0].numel() * sizeof(uint16_t);
@@ -194,6 +198,10 @@ void InferenceBatcher::run(
     std::thread collector_thread([&]() {
         SetThreadAffinityMask(GetCurrentThread(), backendMask);
         last_report_time = std::chrono::steady_clock::now();
+        
+        uint64_t previousTotalTicks = 0;
+        uint64_t previousIdleTicks = 0;
+
         while (true) {
             PipelineJob job;
             if (scatter_queue.try_pop(job)) {
@@ -235,17 +243,99 @@ void InferenceBatcher::run(
 
             if (elapsed_interval_time >= (double)logging_interval_sec) {
                 if (logging_level <= 20) {
-                    char buffer[256];
-                    snprintf(buffer, sizeof(buffer), "--- Inference Batcher Performance Report (%.2fs interval) ---", elapsed_interval_time);
-                    logger.log("INFO", buffer);
+                    
+                    size_t free_byte = 0, total_byte = 0;
+                    cudaError_t cuda_status = cudaMemGetInfo(&free_byte, &total_byte);
+                    double free_db = (double)free_byte / (1024.0 * 1024.0);
+                    double total_db = (double)total_byte / (1024.0 * 1024.0);
+                    double used_db = total_db - free_db;
 
-                    if (interval_batches_processed > 0) {
-                        double util_pct = (interval_total_processing_duration / NUM_SLOTS / elapsed_interval_time) * 100.0;
-                        logger.log("INFO", "  Batches processed:        " + std::to_string(interval_batches_processed));
-                        logger.log("INFO", "  Total inferences:         " + std::to_string(interval_total_inferences));
-                        logger.log("INFO", "  Avg batch process time:   " + std::to_string(interval_total_processing_duration / interval_batches_processed) + "s");
-                        logger.log("INFO", "  Overall Inferences/Sec:   " + std::to_string(interval_total_inferences / elapsed_interval_time));
-                        logger.log("INFO", "  Batcher Utilization:      " + std::to_string(util_pct) + "%");
+                    double idle_sec = local_idle_time_sec.exchange(0.0);
+                    double idle_pct = (idle_sec / elapsed_interval_time) * 100.0;
+                    
+                    double avg_batch_size = (interval_batches_processed > 0) ? (double)interval_total_inferences / interval_batches_processed : 0.0;
+                    double fill_rate_pct = (avg_batch_size / batch_size) * 100.0;
+                    
+                    double avg_process_time = (interval_batches_processed > 0) ? (interval_total_processing_duration / interval_batches_processed) : 0.0;
+                    double util_pct = (interval_total_processing_duration / NUM_SLOTS / elapsed_interval_time) * 100.0;
+                    double inf_per_sec = interval_total_inferences / elapsed_interval_time;
+
+                    // System CPU tracking
+                    FILETIME idleTime, kernelTime, userTime;
+                    float sys_cpu_pct = 0.0f;
+                    if (GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
+                        auto FileTimeToInt64 = [](const FILETIME& ft) {
+                            return (((uint64_t)ft.dwHighDateTime) << 32) | ((uint64_t)ft.dwLowDateTime);
+                        };
+                        uint64_t idleTicks = FileTimeToInt64(idleTime);
+                        uint64_t totalTicks = FileTimeToInt64(kernelTime) + FileTimeToInt64(userTime);
+                        
+                        uint64_t totalTicksSinceLastTime = totalTicks - previousTotalTicks;
+                        uint64_t idleTicksSinceLastTime  = idleTicks - previousIdleTicks;
+                        
+                        if (previousTotalTicks > 0 && totalTicksSinceLastTime > 0) {
+                            sys_cpu_pct = 100.0f * (1.0f - ((float)idleTicksSinceLastTime) / totalTicksSinceLastTime);
+                        }
+                        previousTotalTicks = totalTicks;
+                        previousIdleTicks = idleTicks;
+                    }
+
+                    // System RAM tracking
+                    MEMORYSTATUSEX memInfo;
+                    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+                    GlobalMemoryStatusEx(&memInfo);
+                    double sys_ram_used_gb = (memInfo.ullTotalPhys - memInfo.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
+                    double sys_ram_total_gb = memInfo.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
+                    
+                    // Queue profiling
+                    size_t input_queue_size = queue.size_approx();
+                    size_t dispatch_q_size = dispatch_queue.size();
+                    size_t scatter_q_size = scatter_queue.size();
+                    int current_free_slots = buffer_free_slots ? (int)buffer_free_slots->size() : -1;
+                    
+                    size_t total_result_items = 0;
+                    int active_result_queues = 0;
+                    for (auto& rq : result_queues) {
+                        size_t qs = rq.size();
+                        total_result_items += qs;
+                        if (qs > 0) active_result_queues++;
+                    }
+
+                    logger.log("INFO", "============================================================");
+                    logger.log("INFO", " INFERENCE BATCHER DIAGNOSTICS (" + std::to_string(elapsed_interval_time) + "s interval)");
+                    logger.log("INFO", "============================================================");
+                    
+                    logger.log("INFO", "  [SYSTEM HEALTH]");
+                    logger.log("INFO", "    System CPU Usage       : " + std::to_string(sys_cpu_pct) + "%");
+                    logger.log("INFO", "    System RAM Used        : " + std::to_string(sys_ram_used_gb) + " GB / " + std::to_string(sys_ram_total_gb) + " GB");
+                    logger.log("INFO", "    Buffer Free Slots      : " + std::to_string(current_free_slots));
+
+                    logger.log("INFO", "  [QUEUE HEALTH]");
+                    logger.log("INFO", "    Inference Q (Approx)   : " + std::to_string(input_queue_size));
+                    logger.log("INFO", "    Dispatch Q (To GPU)    : " + std::to_string(dispatch_q_size));
+                    logger.log("INFO", "    Scatter Q (From GPU)   : " + std::to_string(scatter_q_size));
+                    logger.log("INFO", "    Result Qs (To Workers) : " + std::to_string(total_result_items) + " items across " + std::to_string(active_result_queues) + " active worker queues");
+
+                    logger.log("INFO", "  [THROUGHPUT]");
+                    logger.log("INFO", "    Overall Inferences/Sec : " + std::to_string(inf_per_sec));
+                    logger.log("INFO", "    Batches Processed      : " + std::to_string(interval_batches_processed));
+                    logger.log("INFO", "    Total Inferences       : " + std::to_string(interval_total_inferences));
+                    
+                    logger.log("INFO", "  [BATCH HEALTH]");
+                    logger.log("INFO", "    Avg Batch Process Time : " + std::to_string(avg_process_time) + "s");
+                    logger.log("INFO", "    Avg Actual Batch Size  : " + std::to_string(avg_batch_size) + " / " + std::to_string(batch_size));
+                    logger.log("INFO", "    Batch Fill Rate        : " + std::to_string(fill_rate_pct) + "%");
+                    
+                    logger.log("INFO", "  [GPU PIPELINE]");
+                    logger.log("INFO", "    Batcher Utilization    : " + std::to_string(util_pct) + "%");
+                    logger.log("INFO", "    Filler IDLE Time       : " + std::to_string(idle_pct) + "% (Waiting for Workers)");
+                    
+                    if (cuda_status == cudaSuccess) {
+                        logger.log("INFO", "  [VRAM STATUS]");
+                        logger.log("INFO", "    VRAM Used : " + std::to_string(used_db) + " MB");
+                        logger.log("INFO", "    VRAM Free : " + std::to_string(free_db) + " MB");
+                    } else {
+                        logger.log("ERROR", "   [VRAM STATUS] Failed to query CUDA Memory.");
                     }
                 }
                 last_report_time = current_time;
@@ -261,7 +351,6 @@ void InferenceBatcher::run(
         int current_slot = 0;
         
         while (!stop_event.load()) {
-            // STOP FILLING IF A PAUSE IS REQUESTED
             if (pending_trt_reload.load() || pause_requested.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
@@ -272,7 +361,15 @@ void InferenceBatcher::run(
             }
             if (stop_event.load()) break;
 
+            auto wait_start = std::chrono::steady_clock::now();
             auto requests = collect_batch(queue, logger, stop_event);
+            auto wait_end = std::chrono::steady_clock::now();
+            
+            double wait_duration = std::chrono::duration<double>(wait_end - wait_start).count();
+            
+            double current_idle = local_idle_time_sec.load();
+            while(!local_idle_time_sec.compare_exchange_weak(current_idle, current_idle + wait_duration));
+
             if (requests.empty()) continue;
 
             auto batch_start = std::chrono::steady_clock::now();
@@ -298,11 +395,9 @@ void InferenceBatcher::run(
     });
 
     while (!stop_event.load()) {
-        // 1. Check for engine swap signal
         if (pending_trt_reload.load()) {
             std::lock_guard<std::mutex> lock(reload_mutex);
             
-            // Extra safety to ensure hardware is entirely idle before deletion
             cudaDeviceSynchronize();
 
             for (int i = 0; i < 3; ++i) {
@@ -314,6 +409,11 @@ void InferenceBatcher::run(
             trt_runtime = nvinfer1::createInferRuntime(gBatcherLogger);
             trt_engine = trt_runtime->deserializeCudaEngine(pending_engine_data.data(), pending_engine_data.size());
             
+            // --- FIX: CLEAR HOST RAM BUFFER AFTER DESERIALIZATION ---
+            pending_engine_data.clear();
+            pending_engine_data.shrink_to_fit();
+            // --------------------------------------------------------
+
             for (int i = 0; i < 3; ++i) {
                 trt_contexts[i] = trt_engine->createExecutionContext();
             }
@@ -321,14 +421,12 @@ void InferenceBatcher::run(
             logger.rotate(current_global_step.load(), rotation_interval);
             logger.log("INFO", "Hot swap complete. Resuming Inference.");
             
-            // Unpause the system
             pending_trt_reload.store(false);
             is_paused.store(false); 
             pause_requested.store(false); 
             continue;
         }
 
-        // 2. Check if we need to enter a Paused State
         bool all_free = true;
         for (int i = 0; i < NUM_SLOTS; ++i) {
             if (!slot_free[i].load()) all_free = false;
@@ -336,12 +434,10 @@ void InferenceBatcher::run(
 
         if (pause_requested.load()) {
             if (all_free && dispatch_queue.empty()) {
-                // Pipeline is completely drained. Raise the flag and wait.
                 is_paused.store(true);
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue; 
             }
-            // If not all_free or empty, fall through and let remaining items process
         }
 
         if (!trt_contexts[0]) {
@@ -349,7 +445,6 @@ void InferenceBatcher::run(
             continue;
         }
 
-        // 3. Normal Dispatch Operation
         PipelineJob job;
         if (dispatch_queue.try_pop(job)) {
             int current_slot = job.slot;
@@ -358,12 +453,15 @@ void InferenceBatcher::run(
             auto t_launch_start = std::chrono::steady_clock::now();
             c10::cuda::CUDAStreamGuard guard(*streams[current_slot]);
             cudaEventRecord(fw_start_events[current_slot], raw_streams[current_slot]);
-            
-            gpu_input_fp16[current_slot].slice(0, 0, req_size).copy_(pinned_staging[current_slot].slice(0, 0, req_size), true);
 
             int padded_size = (req_size + 63) & ~63;
+
             if (padded_size == 0) padded_size = 64;
             if (padded_size > batch_size) padded_size = batch_size;
+
+            gpu_input_fp16[current_slot].slice(0, 0, padded_size).zero_();
+            gpu_input_fp16[current_slot].slice(0, 0, req_size).copy_(pinned_staging[current_slot].slice(0, 0, req_size), true);
+
 
             cudaEventRecord(compute_start[current_slot], raw_streams[current_slot]);
             

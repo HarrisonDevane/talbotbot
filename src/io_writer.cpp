@@ -74,6 +74,14 @@ void IOWriter::run() {
     size_t uncommitted_games = 0;
     double uncommitted_entropy = 0.0;
 
+    MDB_dbi dbi;
+    MDB_txn* init_txn;
+    mdb_txn_begin(lmdb_env, nullptr, 0, &init_txn);
+    mdb_dbi_open(init_txn, nullptr, 0, &dbi);
+    mdb_txn_commit(init_txn);
+
+    logger.log("INFO", "=== IO WRITER STARTED ===");
+
     while (!stop_event.load()) {
         CompletedGame game;
         if (completed_games_queue.try_pop(game)) {
@@ -81,14 +89,14 @@ void IOWriter::run() {
             current_buffered_samples += game.transitions.size();
             game_buffer.push_back(std::move(game));
 
-            if (current_buffered_samples >= flush_threshold) {
+            while (current_buffered_samples >= flush_threshold) {
                 uint64_t local_step = current_step.load(std::memory_order_relaxed);
                 logger.rotate(local_step, rotation_interval);
 
+                // --- CRITICAL FIX: Begin the write transaction for this flush ---
                 MDB_txn* txn;
                 mdb_txn_begin(lmdb_env, nullptr, 0, &txn);
-                MDB_dbi dbi;
-                mdb_dbi_open(txn, nullptr, 0, &dbi);
+                // ----------------------------------------------------------------
 
                 size_t dynamic_max = get_dynamic_buffer_limit(local_step);
                 size_t current_head = write_head.load(std::memory_order_relaxed);
@@ -141,6 +149,7 @@ void IOWriter::run() {
                         std::string key_str = std::to_string(current_head);
                         MDB_val key_val = { key_str.size(), (void*)key_str.data() };
                         MDB_val data_val = { compressed_size, (void*)compressed_buf.data() };
+                        
                         mdb_put(txn, dbi, &key_val, &data_val, 0);
 
                         if (current_cnt < dynamic_max) current_cnt++;
@@ -184,12 +193,14 @@ void IOWriter::run() {
                 mdb_put(txn, dbi, &state_key, &state_val, 0);
 
                 mdb_txn_commit(txn);
+                // --------------------------------------------------
 
                 write_head.store(current_head, std::memory_order_relaxed);
                 buffer_count.store(current_cnt, std::memory_order_relaxed);
                 buffer_wraps.store(current_wraps, std::memory_order_relaxed);
 
                 logger.log("INFO", "Successfully flushed exactly " + std::to_string(flush_threshold) + " samples. LMDB Count: " + std::to_string(current_cnt));
+                logger.log("INFO", "Positions currently buffered awaiting next flush: " + std::to_string(current_buffered_samples));            
             }
         }
     }

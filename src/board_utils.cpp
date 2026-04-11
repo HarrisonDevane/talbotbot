@@ -135,8 +135,8 @@ void board_to_tensor_69(const Board& board, const std::vector<Board>& history_bo
     }
 
     // 6. Repetition (66-67)
-    c10::Half rep_2 = board.isRepetition(2) ? c10::Half(1.0f) : c10::Half(0.0f);
-    c10::Half rep_3 = board.isRepetition(3) ? c10::Half(1.0f) : c10::Half(0.0f);
+    c10::Half rep_2 = board.isRepetition(1) ? c10::Half(1.0f) : c10::Half(0.0f);
+    c10::Half rep_3 = board.isRepetition(2) ? c10::Half(1.0f) : c10::Half(0.0f);
     for(int i=0; i<64; ++i) {
         planes_out[66 * 64 + i] = rep_2;
         planes_out[67 * 64 + i] = rep_3;

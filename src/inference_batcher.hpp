@@ -75,14 +75,12 @@ public:
         pending_trt_reload.store(true); 
     }
 
-    // --- NEW: Handshake Methods ---
     void request_pause() { pause_requested.store(true); }
     bool is_fully_paused() const { return is_paused.load(); }
     void cancel_pause() { 
         pause_requested.store(false); 
         is_paused.store(false); 
     }
-    // ------------------------------
 
     void run(
         moodycamel::ConcurrentQueue<std::pair<int, int>>& queue,    
@@ -90,6 +88,7 @@ public:
         std::vector<torch::Tensor>& shared_input_buffer,
         std::vector<torch::Tensor>& shared_policy_buffer,
         std::vector<torch::Tensor>& shared_value_buffer,
-        std::atomic<bool>& stop_event
+        std::atomic<bool>& stop_event,
+        ThreadSafeQueue<int>* buffer_free_slots = nullptr
     );
 };

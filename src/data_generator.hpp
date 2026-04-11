@@ -12,6 +12,7 @@
 #include "mcts_engine.hpp"
 #include "action_selector.hpp"
 #include "logger.hpp"
+#include "target_generator.hpp"
 #include "concurrentqueue.h"
 
 struct DataGenConfig {

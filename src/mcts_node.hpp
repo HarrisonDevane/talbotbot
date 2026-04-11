@@ -19,8 +19,6 @@ struct MCTSNode {
     double value_sum = 0.0;
     double raw_logit = 0.0;
     double raw_value = 0.0;
-    double q_val = 0.0;
-    double q_norm = 0.0;
 
     double gumbel_noise = 0.0;
     double gumbel_score = 0.0;

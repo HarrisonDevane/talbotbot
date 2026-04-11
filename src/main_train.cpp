@@ -33,6 +33,21 @@ void signal_handler(int signum) {
     global_stop_event.store(true);
 }
 
+// Deterministic IPC signal check using the pre-opened DBI handle
+uint64_t check_trt_export_signal(MDB_env* env, MDB_dbi dbi) {
+    uint64_t step = 0;
+    MDB_txn* txn;
+    if (mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn) == MDB_SUCCESS) {
+        MDB_val key = { 19, (void*)"__TRT_EXPORT_SIGNAL" }; 
+        MDB_val data;
+        if (mdb_get(txn, dbi, &key, &data) == MDB_SUCCESS) {
+            step = *static_cast<uint64_t*>(data.mv_data);
+        }
+        mdb_txn_commit(txn);
+    }
+    return step;
+}
+
 int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
 
@@ -83,25 +98,30 @@ int main(int argc, char* argv[]) {
     mdb_env_set_mapsize(lmdb_env, (size_t)1024 * 1024 * 1024 * 128); 
     mdb_env_open(lmdb_env, db_path.c_str(), MDB_NOSYNC | MDB_NOTLS, 0664);
 
+    // Open the Database Handle ONCE globally
+    MDB_dbi shared_dbi;
+    MDB_txn* init_txn;
+    mdb_txn_begin(lmdb_env, nullptr, 0, &init_txn);
+    mdb_dbi_open(init_txn, nullptr, 0, &shared_dbi);
+    mdb_txn_commit(init_txn);
+
     uint64_t init_step = 0;
     size_t init_games = 0, init_samples = 0, write_head = 0, buffer_count = 0, buffer_wraps = 0;
     double init_entropy = 0.0;
 
     MDB_txn* txn;
     mdb_txn_begin(lmdb_env, nullptr, MDB_RDONLY, &txn);
-    MDB_dbi dbi;
-    mdb_dbi_open(txn, nullptr, 0, &dbi);
 
     MDB_val py_key = { 10, (void*)"__PY_STATE" };
     MDB_val py_data;
-    if (mdb_get(txn, dbi, &py_key, &py_data) == MDB_SUCCESS) {
+    if (mdb_get(txn, shared_dbi, &py_key, &py_data) == MDB_SUCCESS) {
         PyState* s = static_cast<PyState*>(py_data.mv_data);
         init_step = s->training_steps;
     }
 
     MDB_val cpp_key = { 11, (void*)"__CPP_STATE" };
     MDB_val cpp_data;
-    if (mdb_get(txn, dbi, &cpp_key, &cpp_data) == MDB_SUCCESS) {
+    if (mdb_get(txn, shared_dbi, &cpp_key, &cpp_data) == MDB_SUCCESS) {
         CppState* s = static_cast<CppState*>(cpp_data.mv_data);
         init_games = s->games_played;
         init_samples = s->samples_generated;
@@ -146,13 +166,32 @@ int main(int argc, char* argv[]) {
     ThreadSafeQueue<int> buffer_free_slots;
     for (int i = 0; i < total_slots; ++i) buffer_free_slots.push(i);
 
-    int trt_build_interval = config["global"]["new_model_refit_steps"].as<int>();
+    // CRITICAL FIX: Removed the yaml call for `new_model_build_steps` that was causing the crash
     std::string onnx_path = config["global"]["model_path"].as<std::string>() + ".onnx";
     std::string engine_path = config["global"]["model_path"].as<std::string>() + ".engine";
-    int last_build_step = current_step.load();
+    
+    uint64_t last_handled_export_step = check_trt_export_signal(lmdb_env, shared_dbi);
 
     main_logger.log("INFO", "[MAIN] Checking TensorRT Engine status...");
-    if (!fs::exists(engine_path) && fs::exists(onnx_path)) {
+    
+    // Timestamp Verification to bypass the "Already Handled" Trap
+    bool needs_initial_build = false;
+    if (fs::exists(onnx_path)) {
+        if (!fs::exists(engine_path)) {
+            needs_initial_build = true;
+        } else {
+            auto onnx_time = fs::last_write_time(onnx_path);
+            auto engine_time = fs::last_write_time(engine_path);
+            if (onnx_time > engine_time) {
+                main_logger.log("INFO", "ONNX file is newer than existing Engine. Forcing rebuild.");
+                needs_initial_build = true;
+            }
+        }
+    } else if (!fs::exists(engine_path)) {
+        throw std::runtime_error("Fatal: Neither ONNX nor Engine file exists.");
+    }
+
+    if (needs_initial_build) {
         main_logger.log("INFO", "[BUILD] TensorRT is cooking. Terminal will be silent for ~60s...");
         auto result = TRTBuilder::build_engine(onnx_path, inference_batch_size, main_logger);
         if (result) {
@@ -160,8 +199,6 @@ int main(int argc, char* argv[]) {
         } else {
             throw std::runtime_error("Initial TRT Build returned null result.");
         }
-    } else if (!fs::exists(engine_path) && !fs::exists(onnx_path)) {
-        throw std::runtime_error("Fatal: Neither ONNX nor Engine file exists.");
     }
 
     std::vector<int> batcher_cores;
@@ -181,7 +218,7 @@ int main(int argc, char* argv[]) {
     );
 
     std::thread batcher_thread([&]() {
-        batcher.run(inference_queue, result_queues, shared_input_buffer, shared_policy_buffer, shared_value_buffer, global_stop_event);
+        batcher.run(inference_queue, result_queues, shared_input_buffer, shared_policy_buffer, shared_value_buffer, global_stop_event, &buffer_free_slots);
     });
 
     main_logger.log("INFO", "[MAIN] Initializing Data Generator Workers...");
@@ -216,8 +253,7 @@ int main(int argc, char* argv[]) {
         
         uint64_t new_step = current_step.load(std::memory_order_relaxed);
         mdb_txn_begin(lmdb_env, nullptr, MDB_RDONLY, &txn);
-        mdb_dbi_open(txn, nullptr, 0, &dbi);
-        if (mdb_get(txn, dbi, &py_key, &py_data) == MDB_SUCCESS) {
+        if (mdb_get(txn, shared_dbi, &py_key, &py_data) == MDB_SUCCESS) {
             PyState* s = static_cast<PyState*>(py_data.mv_data);
             new_step = s->training_steps;
             if (new_step > current_step.load(std::memory_order_relaxed)) {
@@ -227,64 +263,49 @@ int main(int argc, char* argv[]) {
         }
         mdb_txn_commit(txn);
 
-        if (new_step >= (last_build_step + trt_build_interval) && !trt_build_in_progress.load()) {
-            main_logger.log("INFO", "Step threshold reached. Preparing TensorRT Engine update...");
-            last_build_step = new_step;
+        // We pass the pre-opened handle here
+        uint64_t exported_step = check_trt_export_signal(lmdb_env, shared_dbi);
+
+        if (exported_step > last_handled_export_step && !trt_build_in_progress.load()) {
+            main_logger.log("INFO", "ONNX export signal received for step " + std::to_string(exported_step) + ". Initiating FULL Engine rebuild...");
+            last_handled_export_step = exported_step;
             trt_build_in_progress.store(true);
 
-            std::thread([&batcher, &main_logger, onnx_path, engine_path, inference_batch_size, new_step]() {
-                auto start_time = std::chrono::steady_clock::now();
+            std::thread([&batcher, &main_logger, onnx_path, engine_path, inference_batch_size, new_step = exported_step]() {
+                
                 try {
-                    // Windows lock grace period for PyTorch ONNX export
-                    std::this_thread::sleep_for(std::chrono::seconds(3)); 
+                    auto start_time = std::chrono::steady_clock::now();
+                    
+                    main_logger.log("INFO", "Initiating Synchronous Pipeline Drain for TRT Build...");
+                    batcher.request_pause(); 
+                    
+                    while (!batcher.is_fully_paused() && !global_stop_event.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+
+                    std::unique_ptr<TRTBuilder::EngineResult> result = nullptr;
                     
                     if (fs::exists(onnx_path)) {
-                        std::unique_ptr<TRTBuilder::EngineResult> result = nullptr;
-                        
-                        if (fs::exists(engine_path)) {
-                            main_logger.log("INFO", "Initiating Synchronous Pipeline Drain for TRT Refit...");
-                            
-                            // 1. Demand a pause
-                            batcher.request_pause(); 
-                            
-                            // 2. Poll until Batcher guarantees pipeline is empty and GPU is idle
-                            while (!batcher.is_fully_paused() && !global_stop_event.load()) {
-                                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                            }
-                            
-                            main_logger.log("INFO", "Pipeline safely drained. Executing background TRT Refit...");
-                            result = TRTBuilder::refit_engine(onnx_path, engine_path, main_logger);
-                        }
-                        
-                        if (!result) {
-                            main_logger.log("WARNING", "Refit failed/unavailable. Initiating full rebuild (~60s)...");
-                            
-                            batcher.request_pause(); 
-                            while (!batcher.is_fully_paused() && !global_stop_event.load()) {
-                                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                            }
-                            
-                            result = TRTBuilder::build_engine(onnx_path, inference_batch_size, main_logger);
-                        }
-                        
-                        if (result) {
-                            // signal_trt_reload handles the swap and UNPAUSES the system internally
-                            batcher.signal_trt_reload(result->serialized_data, new_step);
-                            double duration = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
-                            main_logger.log("INFO", "Background TRT update (Refit/Build) finished in " + std::to_string(duration) + " seconds.");
-
-                            TRTBuilder::save_engine(*result, engine_path);
-                        } else {
-                            main_logger.log("CRITICAL", "TRT Update returned null. Resuming old engine.");
-                            batcher.cancel_pause(); // Fail-safe unpause
-                        }
-                    } else {
-                        batcher.cancel_pause(); // Fail-safe unpause
+                        main_logger.log("INFO", "Pipeline safely drained. Executing background TRT FULL BUILD (~60s)...");
+                        result = TRTBuilder::build_engine(onnx_path, inference_batch_size, main_logger);
                     }
+                    
+                    if (result) {
+                        batcher.signal_trt_reload(result->serialized_data, new_step);
+                        double duration = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+                        main_logger.log("INFO", "Background TRT build finished in " + std::to_string(duration) + " seconds.");
+
+                        TRTBuilder::save_engine(*result, engine_path);
+                    } else {
+                        main_logger.log("CRITICAL", "TRT Build returned null. Resuming old engine.");
+                        batcher.cancel_pause(); 
+                    }
+                    
                 } catch (const std::exception& e) {
                     main_logger.log("CRITICAL", std::string("TRT Background Process Failed: ") + e.what());
-                    batcher.cancel_pause(); // Fail-safe unpause
+                    batcher.cancel_pause(); 
                 }
+                
                 trt_build_in_progress.store(false);
             }).detach(); 
         }

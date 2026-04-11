@@ -11,6 +11,7 @@ import struct
 import lmdb
 import warnings
 import json
+import onnx
 
 from trainer import TrainTask
 from model import ChessAIModel, fuse_bn_for_export
@@ -40,30 +41,33 @@ class RLOrchestrator:
 
         self.buffer_file_path = os.path.abspath(os.path.join(RL_DIR, "replay_memory.lmdb"))
         
-        # Determine if we need to initialize a fresh DB
         db_is_new = not os.path.exists(self.buffer_file_path)
         
         if db_is_new:
             os.makedirs(self.buffer_file_path, exist_ok=True)
 
-        # NOTE: lock=True and readonly=False allows us to safely write PyState
         self.env = lmdb.open(
             self.buffer_file_path,
-            map_size=1024 * 1024 * 1024 * 128, # 128GB Map Size
+            map_size=1024 * 1024 * 1024 * 128, 
             readonly=False,
             lock=True,
             readahead=False,
         )
 
-        # If it's a brand new DB, we MUST initialize the blobs so C++ doesn't crash reading null
         if db_is_new:
             self._initialize_empty_lmdb()
 
         self.state_config = self._read_state_from_lmdb()
 
         self.current_step = self.state_config['lifetime']['training_steps']
+        self.total_hours_accumulator = self.state_config['lifetime']['hours_training'] 
+        
         self.total_steps = self.params_config['global']['total_training_steps']
         self.save_interval = self.params_config['global']['backup_interval_steps']
+
+        self.last_backup_step = (self.current_step // self.save_interval) * self.save_interval
+
+        self.next_build_step = self._calculate_next_build_step(self.current_step)
 
         rotation_interval = self.params_config['global']['logging_rotation_steps']
         target_folder_step = (self.current_step // rotation_interval) * rotation_interval
@@ -93,21 +97,39 @@ class RLOrchestrator:
         if not os.path.exists(self.model_pth):
             self._create_seed_models()
             
+    def _calculate_next_build_step(self, current_target_step):
+        min_build = self.params_config['global']['min_build_steps']
+        max_build = self.params_config['global']['max_build_steps']
+        ramp_steps = self.params_config['global']['build_ramp_steps']
+        
+        if current_target_step >= ramp_steps:
+            return ((current_target_step // max_build) + 1) * max_build
+
+        simulated_step = 0
+        while simulated_step <= current_target_step:
+            progress = min(1.0, simulated_step / ramp_steps)
+            interval = int(min_build + (max_build - min_build) * progress)
+            simulated_step += interval
+            
+            if simulated_step >= ramp_steps:
+                simulated_step = ((simulated_step // max_build) + 1) * max_build
+                
+        return simulated_step
+
     def _initialize_empty_lmdb(self):
-        """Writes the initial zeroed-out state to a fresh LMDB to prevent C++ read errors."""
         cpp_blob = struct.pack(CPP_STATE_FMT, 0, 0, 0.0, 0, 0, 0)
         py_blob = struct.pack(PY_STATE_FMT, 0, 0.0)
         
         with self.env.begin(write=True) as txn:
             txn.put(b"__CPP_STATE", cpp_blob)
             txn.put(b"__PY_STATE", py_blob)
+            txn.put(b"__TRT_EXPORT_SIGNAL", struct.pack('Q', 0))
 
     def _read_state_from_lmdb(self):
         with self.env.begin(write=False) as txn:
             cpp_blob = txn.get(b"__CPP_STATE")
             py_blob = txn.get(b"__PY_STATE")
 
-        # Fallback if somehow keys are missing despite initialization
         if not cpp_blob or not py_blob:
             return {
                 'buffer': {'count': 0, 'head_ptr': 0, 'wraps': 0},
@@ -151,7 +173,7 @@ class RLOrchestrator:
         random.seed(self.params_config['training']['seed'])
         torch.manual_seed(self.params_config['training']['seed'])
         model = ChessAIModel(self.model_config)
-        os.makedirs(os.path.join(RL_DIR, 'best_models'), exist_ok=True)
+        os.makedirs(os.path.join(RL_DIR, 'models'), exist_ok=True)
         torch.save({'model_state_dict': model.state_dict()}, self.model_pth)
         self._export_to_cpp()
         self.logger.info("Seed models created successfully.")
@@ -188,7 +210,6 @@ class RLOrchestrator:
             training_config=self.params_config['training'],
             state_config=self.state_config,
             global_config=self.params_config['global'],
-            lmdb_path=self.buffer_file_path,
             env=self.env
         )
 
@@ -212,27 +233,35 @@ class RLOrchestrator:
         target_folder_step = (self.current_step // rotation_interval) * rotation_interval
         current_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:06d}")
 
+        last_time_check = time.time()
+
         try:
             while self.current_step < self.total_steps:
                 
+                current_time = time.time()
+                self.total_hours_accumulator += (current_time - last_time_check) / 3600.0
+                last_time_check = current_time
+
                 self.state_config = self._read_state_from_lmdb()
+                self.state_config['lifetime']['hours_training'] = round(self.total_hours_accumulator, 6)
+
                 buffer_size = self.state_config['buffer']['count']
                 samples_generated = self.state_config['lifetime']['samples_generated']
                 
                 samples_per_step = self.params_config['training']['batch_size'] / self.params_config['training']['sampling_ratio']
-                
-                # Prevent division by zero if sampling_ratio configuration is malformed
                 if samples_per_step <= 0:
                     samples_per_step = 1 
                     
                 target_steps = int(samples_generated // samples_per_step)
 
                 if self.current_step >= target_steps:
+                    self._write_py_state_to_lmdb()
                     time.sleep(0.5)
                     continue
 
                 min_required = self.params_config['training']['batch_size']
                 if buffer_size < min_required:
+                    self._write_py_state_to_lmdb()
                     time.sleep(0.5)
                     continue
 
@@ -267,13 +296,21 @@ class RLOrchestrator:
                 self.current_step += 1
                 self.state_config['lifetime']['training_steps'] = self.current_step
 
-                if self.current_step % self.params_config['global']['new_model_refit_steps'] == 0:
+                if self.current_step >= self.next_build_step:
                     self.train_task.save_checkpoint(self.model_pth)
                     self._export_to_cpp()
+                    
+                    if (self.current_step - self.last_backup_step) >= self.save_interval:
+                        model_backup_path = os.path.join(RL_DIR, 'models', f'step_{self.current_step:06d}_model.pth')
+                        shutil.copy(self.model_pth, model_backup_path)
+                        shutil.copy(RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_step:06d}_config.yaml'))
+                        self.logger.info(f"Accurate periodic backup saved at exact build step {self.current_step}.")
+                        self.last_backup_step = self.current_step
+                    
+                    self.next_build_step = self._calculate_next_build_step(self.current_step)
+                    self.logger.info(f"TRT Engine Export sent. Next export scheduled at step {self.next_build_step}.")
 
                 total_time = time.time() - step_start_time
-                self.state_config['lifetime']['hours_training'] = round(
-                    self.state_config['lifetime'].get('hours_training', 0.0) + (total_time / 3600), 6)
 
                 self.logger.debug(
                     f"Step {self.current_step} complete | "
@@ -282,17 +319,7 @@ class RLOrchestrator:
                 )
 
                 self._write_py_state_to_lmdb()
-
-                # Write single-line state config JSON to the dedicated logger every step
                 self.state_logger.info(json.dumps(self.state_config))
-
-                if (self.current_step // self.save_interval > (self.current_step - 1) // self.save_interval):
-                    backup_dir = os.path.join(RL_DIR, 'backup')
-                    os.makedirs(backup_dir, exist_ok=True)
-                    model_backup_path = os.path.join(backup_dir, f'step_{self.current_step:06d}_model.pth')
-                    shutil.copy(self.model_pth, model_backup_path)
-                    shutil.copy(RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_step:06d}_config.yaml'))
-                    self.logger.info(f"Periodic backup saved at step {self.current_step}.")
 
         finally:
             self.logger.info("Shutting down C++ engine...")
@@ -317,13 +344,14 @@ class RLOrchestrator:
         ).cuda()
 
         onnx_path = self.model_pth.replace(".pth", ".onnx")
+        onnx_tmp_path = onnx_path + ".tmp"
         
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*legacy TorchScript-based ONNX export.*")
             torch.onnx.export(
                 model, 
                 dummy_input, 
-                onnx_path,
+                onnx_tmp_path,
                 export_params=True,
                 opset_version=17,
                 do_constant_folding=True,
@@ -331,7 +359,16 @@ class RLOrchestrator:
                 output_names=['policy', 'value'],
                 dynamic_axes={'input': {0: 'batch_size'}, 'policy': {0: 'batch_size'}, 'value': {0: 'batch_size'}}
             )
+        
+        os.replace(onnx_tmp_path, onnx_path) 
         self.logger.info(f"Stable FP16 ONNX export successful: {onnx_path}")
+
+        del model
+        del dummy_input
+        torch.cuda.empty_cache()
+
+        with self.env.begin(write=True) as txn:
+            txn.put(b"__TRT_EXPORT_SIGNAL", struct.pack('Q', self.current_step))
 
 if __name__ == "__main__":
     orchestrator = RLOrchestrator()

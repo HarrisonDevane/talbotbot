@@ -3,39 +3,14 @@
 #include <cmath>
 #include <numeric>
 #include <algorithm>
-#include "board_utils.hpp"
 #include <chrono>
 
 ActionSelector::ActionSelector(
-    std::string name, int worker_id, ActionSelectorConfig config, 
-    const ModelConfig& model_cfg, 
-    Logger& logger,
-    moodycamel::ConcurrentQueue<std::pair<int, int>>& i_queue,
-    ThreadSafeQueue<std::vector<int>>& r_queue,
-    std::vector<torch::Tensor>& in_buffer,
-    std::vector<torch::Tensor>& p_buffer,
-    std::vector<torch::Tensor>& v_buffer,
-    ThreadSafeQueue<int>& free_slots
-) : name(name), worker_id(worker_id), config(config), logger(logger),
-    model_config(model_cfg),
-    inference_queue(i_queue), result_queue(r_queue),
-    shared_input_buffer(in_buffer), shared_policy_buffer(p_buffer),
-    shared_value_buffer(v_buffer), buffer_free_slots(free_slots) 
-{
+    std::string name, int worker_id, ActionSelectorConfig config, Logger& logger
+) : name(name), worker_id(worker_id), config(config), logger(logger) {
     std::random_device rd;
     auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
     rng.seed(rd() ^ worker_id ^ time_seed);
-    
-    chess::Board dummy;
-    dummy.setFen(chess::constants::STARTPOS);
-    mcts = std::make_unique<MCTSEngine>(
-        config.node_pool_size, config.batch_size_per_worker, inference_queue, result_queue, worker_id,
-        config.virtual_loss, config.draw_cutoff, config.gumbel_c_visit, 
-        config.gumbel_c_scale, config.gumbel_noise, dummy, std::vector<chess::Board>(), logger,
-        shared_input_buffer, shared_policy_buffer, shared_value_buffer,
-        model_config, buffer_free_slots
-    );
-
     reset_for_new_game();
 }
 
@@ -45,122 +20,29 @@ void ActionSelector::reset_for_new_game() {
     logger.log("DEBUG", "Agent state reset. Resignation allowed: " + std::string(use_resignation ? "True" : "False"));
 }
 
-SelectionResult ActionSelector::select_action(const chess::Board& board, const std::vector<chess::Board>& history, int ply_count, int gumbel_search_depth, int gumbel_m) {
+SelectionResult ActionSelector::select_move(MCTSNode* root, double root_v_mix, int ply_count) {
     SelectionResult result;
-    result.policy_vector.resize(model_config.policy_moves, 0.0f);
-
-    int move_number = ((ply_count - 1) / 2) + 1;
-    std::string side_str = (board.sideToMove() == chess::Color::WHITE) ? "White" : "Black";
     
-    char banner[512];
-    snprintf(banner, sizeof(banner), 
-        "\n============================================================\n"
-        "                    --- MOVE %d: %s, PLY %d STARTED ---\n"
-        "============================================================", 
-        move_number, side_str.c_str(), ply_count);
-    
-    logger.log("INFO", banner);
-    logger.log("INFO", "Current player: " + name);
-    
-    auto move_start_time = std::chrono::high_resolution_clock::now();
-
-    mcts->reset(board, history);
-    result.simulation_count = mcts->run_simulations(gumbel_search_depth, gumbel_m);
+    int num_children = root->num_children;
+    if (num_children == 0) return result;
 
     std::vector<MCTSNode*> all_children;
-    for(int i = 0; i < mcts->root->num_children; ++i) {
-        all_children.push_back(mcts->root->first_child + i);
+    for(int i = 0; i < num_children; ++i) {
+        all_children.push_back(root->first_child + i);
     }
 
-    int num_children = all_children.size();
-    if (num_children == 0) return result; 
-
-    chess::Movelist all_moves;
-    std::vector<float> base_logits(num_children);
-    float max_logit = -1e20f;
-
-    for (int i = 0; i < num_children; ++i) {
-        all_moves.add(all_children[i]->move);
-        base_logits[i] = static_cast<float>(all_children[i]->gumbel_score - all_children[i]->gumbel_noise);
-        if (base_logits[i] > max_logit) max_logit = base_logits[i];
-    }
-
-    std::vector<float> base_probs(num_children, 0.0f);
-    float sum_exp = 0.0f;
-    for (int i = 0; i < num_children; ++i) {
-        base_probs[i] = std::exp(base_logits[i] - max_logit);
-        sum_exp += base_probs[i];
-    }
-    for (int i = 0; i < num_children; ++i) base_probs[i] /= sum_exp;
-
-    double root_v_mix = mcts->root->calculate_v_mix();
-    std::vector<MCTSNode*> winning_nodes, losing_nodes, draw_nodes, non_forced_nodes, non_forced_visited;
-    
+    std::vector<MCTSNode*> winning_nodes, losing_nodes, draw_nodes, non_forced_visited;
     for (MCTSNode* child : all_children) {
         if (child->forced_outcome.has_value()) {
             if (child->forced_outcome.value() == -1) winning_nodes.push_back(child);
             else if (child->forced_outcome.value() == 1) losing_nodes.push_back(child);
             else draw_nodes.push_back(child);
         } else {
-            non_forced_nodes.push_back(child);
             if (child->visits > 0) non_forced_visited.push_back(child);
         }
     }
 
-    std::vector<float> final_probs(num_children, 0.0f);
-    std::vector<float> minimax_probs(num_children, 0.0f);
-    float smoothing_factor = config.minimax_smoothing_factor;
-    
-    if (!winning_nodes.empty()) {
-        int min_dtm = 999999;
-        for (MCTSNode* child : winning_nodes) {
-            if (child->distance_to_mate.value() < min_dtm) min_dtm = child->distance_to_mate.value();
-        }
-        
-        int count_best = 0;
-        for (MCTSNode* child : winning_nodes) if (child->distance_to_mate.value() == min_dtm) count_best++;
-        
-        float prob_per_best = 1.0f / count_best;
-        for (int i = 0; i < num_children; ++i) {
-            if (all_children[i]->forced_outcome.has_value() && 
-                all_children[i]->forced_outcome.value() == -1 && 
-                all_children[i]->distance_to_mate.value() == min_dtm) {
-                minimax_probs[i] = prob_per_best;
-            }
-        }
-        for (int i = 0; i < num_children; ++i) {
-            final_probs[i] = (1.0f - smoothing_factor) * base_probs[i] + (smoothing_factor * minimax_probs[i]);
-        }
-        logger.log("INFO", std::to_string(count_best) + " fastest win(s) found (DTM " + std::to_string(min_dtm) + ").");
-
-    } else if (!draw_nodes.empty() && root_v_mix <= config.draw_cutoff) {
-        float prob_per_best = 1.0f / draw_nodes.size();
-        for (int i = 0; i < num_children; ++i) {
-            if (all_children[i]->forced_outcome.has_value() && all_children[i]->forced_outcome.value() == 0) {
-                minimax_probs[i] = prob_per_best;
-            }
-        }
-        for (int i = 0; i < num_children; ++i) {
-            final_probs[i] = (1.0f - smoothing_factor) * base_probs[i] + (smoothing_factor * minimax_probs[i]);
-        }
-        logger.log("INFO", "Forced draw condition met for " + std::to_string(draw_nodes.size()) + " nodes.");
-
-    } else if (!losing_nodes.empty() && !non_forced_nodes.empty()) {
-        float prob_per_best = 1.0f / non_forced_nodes.size();
-        for (int i = 0; i < num_children; ++i) {
-            if (!all_children[i]->forced_outcome.has_value()) {
-                minimax_probs[i] = prob_per_best;
-            }
-        }
-        for (int i = 0; i < num_children; ++i) {
-            final_probs[i] = (1.0f - smoothing_factor) * base_probs[i] + (smoothing_factor * minimax_probs[i]);
-        }
-        logger.log("INFO", std::to_string(losing_nodes.size()) + " forced loss(es) found.");
-
-    } else {
-        final_probs = base_probs; 
-    }
-
+    // Rule A: Win
     if (!winning_nodes.empty()) {
         int min_dtm = 999999;
         for (MCTSNode* c : winning_nodes) if (c->distance_to_mate.value() < min_dtm) min_dtm = c->distance_to_mate.value();
@@ -170,10 +52,12 @@ SelectionResult ActionSelector::select_action(const chess::Board& board, const s
         std::uniform_int_distribution<> dist(0, best_moves.size() - 1);
         result.best_move = best_moves[dist(rng)];
 
+    // Rule B: Draw
     } else if (!draw_nodes.empty() && root_v_mix <= config.draw_cutoff) {
         std::uniform_int_distribution<> dist(0, draw_nodes.size() - 1);
         result.best_move = draw_nodes[dist(rng)]->move;
 
+    // Rule C: Temperature / Safe Moves
     } else if (!non_forced_visited.empty()) {
         if (ply_count <= config.temperature_ply_cutoff) {
             std::sort(non_forced_visited.begin(), non_forced_visited.end(), [](MCTSNode* a, MCTSNode* b) {
@@ -232,6 +116,8 @@ SelectionResult ActionSelector::select_action(const chess::Board& board, const s
             MCTSNode* m2 = (non_forced_visited.size() > 1) ? non_forced_visited[1] : m1;
             result.best_move = (m1->gumbel_score > m2->gumbel_score) ? m1->move : m2->move;
         }
+        
+    // Rule D: Delay Mate
     } else {
         if (!draw_nodes.empty()) {
             std::uniform_int_distribution<> dist(0, draw_nodes.size() - 1);
@@ -252,27 +138,7 @@ SelectionResult ActionSelector::select_action(const chess::Board& board, const s
         logger.log("INFO", "Root Value (" + std::to_string(root_v_mix) + ") is below cutoff. Triggering Resignation.");
         result.resigned = true;
         result.best_move = chess::Move::NO_MOVE;
-        std::fill(result.policy_vector.begin(), result.policy_vector.end(), 0.0f);
-        return result;
     }
-
-    map_policy_to_global_vector(all_moves, final_probs.data(), board, result.policy_vector.data());
-    
-    result.entropy = 0.0;
-    for (float p : final_probs) {
-        if (p > 0) result.entropy -= (p * std::log(p + 1e-10f));
-    }
-
-    auto move_end_time = std::chrono::high_resolution_clock::now();
-    double total_move_time = std::chrono::duration<double>(move_end_time - move_start_time).count();
-    double sim_speed = (total_move_time > 0) ? (result.simulation_count / total_move_time) : 0.0;
-
-    char buffer[256];
-    snprintf(buffer, sizeof(buffer), "Time: %.4fs | Speed: %.1f sim/s | Entropy: %.4f | Value: %.4f", 
-             total_move_time, sim_speed, result.entropy, root_v_mix);
-    
-    logger.log("INFO", buffer);
-    logger.log("INFO", "Selected move: " + chess::uci::moveToUci(result.best_move));
 
     return result;
 }

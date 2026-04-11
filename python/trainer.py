@@ -16,13 +16,12 @@ from model import ChessAIModel
 
 class TrainTask:
     def __init__(self, model_path: str, model_config: dict, training_config: dict,
-                 state_config: dict, global_config: dict, lmdb_path: str, env):
+                 state_config: dict, global_config: str, env):
         self.training_config = training_config
         self.model_path = model_path
         self.model_config = model_config
         self.state_config = state_config
         self.global_config = global_config
-        self.lmdb_path = lmdb_path
         self.env = env 
         
         self.output_dir = None
@@ -68,7 +67,7 @@ class TrainTask:
 
     def _setup_logger(self):
         logger = logging.getLogger("TrainTask")
-        logger.setLevel(self.training_config['log_level'])
+        logger.setLevel(self.training_config['logging_level'])
         logger.propagate = False
 
         if logger.hasHandlers():
@@ -159,6 +158,24 @@ class TrainTask:
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = float(self.training_config['learning_rate'])
 
+        # --- BATCH VALUE COMPOSITION ANALYZER ---
+        with torch.no_grad():
+            v_tars = value_targets.cpu().numpy()
+            total_v = len(v_tars)
+            
+            # Assuming standard [-1, 1] bounds for chess
+            wins = np.sum(v_tars > 0.5)
+            draws = np.sum((v_tars >= -0.5) & (v_tars <= 0.5))
+            losses = np.sum(v_tars < -0.5)
+            
+            pct_w = (wins / total_v) * 100
+            pct_d = (draws / total_v) * 100
+            pct_l = (losses / total_v) * 100
+            
+            v_min = np.min(v_tars)
+            v_max = np.max(v_tars)
+        # ----------------------------------------
+
         self.model.train()
         self.optimizer.zero_grad()
 
@@ -196,6 +213,7 @@ class TrainTask:
             f"Loss: T={total_loss.item():.4f} "
             f"(P={(policy_loss.item() * self.training_config['policy_loss_weight']):.4f}, "
             f"V={(value_loss.item() * self.training_config['value_loss_weight']):.4f}) | "
+            f"Batch Vals (W/D/L): {pct_w:.1f}% / {pct_d:.1f}% / {pct_l:.1f}% (Range: {v_min:.2f} to {v_max:.2f}) | "
             f"P_Ent={policy_entropy.item():.4f} | "
             f"V_Out={v_out_mean.item():.4f} | V_Tar={v_tar_mean.item():.4f} | "
             f"Grad={grad_norm.item():.2f} | LR={self.optimizer.param_groups[0]['lr']:.6f} | "
@@ -210,6 +228,14 @@ class TrainTask:
             self.tb_writer.add_scalar('Metrics/Value_Output_Mean', v_out_mean.item(), global_step)
             self.tb_writer.add_scalar('Metrics/Value_Target_Mean', v_tar_mean.item(), global_step)
             self.tb_writer.add_scalar('Metrics/Grad_Norm', grad_norm.item(), global_step)
+            
+            # Log the new metrics to TensorBoard
+            self.tb_writer.add_scalar('Batch_Composition/Wins_Pct', pct_w, global_step)
+            self.tb_writer.add_scalar('Batch_Composition/Draws_Pct', pct_d, global_step)
+            self.tb_writer.add_scalar('Batch_Composition/Losses_Pct', pct_l, global_step)
+            self.tb_writer.add_scalar('Batch_Composition/Target_Min', v_min, global_step)
+            self.tb_writer.add_scalar('Batch_Composition/Target_Max', v_max, global_step)
+            
             self.tb_writer.add_scalar('Hardware_MS/Data_Load', data_time, global_step)
             self.tb_writer.add_scalar('Hardware_MS/Forward', fw_time, global_step)
             self.tb_writer.add_scalar('Hardware_MS/Backward', bw_time, global_step)

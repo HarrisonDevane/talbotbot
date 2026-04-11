@@ -1,30 +1,37 @@
-game:
-  white_player: 'talbot'
-  black_player: 'human'
-  initial_fen: Null
-  white_perspective: True
-  model_path: 'rl_dir/best_models/best_model.pth'
+global:
+  model_file: 'D:/Projects/talbot/config/model.yaml' # Path to the secondary architecture config
+  model_path: 'D:/Projects/talbot/rl_dir/models/model' # Path to best model base name
+  log_dir: 'D:/Projects/talbot/logs/local_inference' # Directory for all engine logs
+  main_logging_level: 10                             # Logging level for the UCI Orchestrator
 
 evaluation:
-  inference_worker_cores:                            # Dedicated CPU cores for the Batching Process (feeding the GPU)
-    - [12, 13, 14, 15]
-  batch_size_per_worker: 16                          # Max positions a single worker sends at once
-  batch_size_factor: 10                              # Multiplier to determine max slots available in RAM
-  batch_timeout: 0.005                               # How long the GPU batcher waits for more data before running partial batch
-  virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
-  gumbel_c_visit: 50.0                               # Sigma used for gumbel score calucation
+  main_cores: [3]                                    # Dedicated CPU cores for the main C++ orchestrator
+  game_worker_cores: [5, 6, 7, 8, 9, 10, 11, 12]
+  workers_per_core: 4                                # Number of game workers to pin to each core
+
+inference:
+  inference_worker_cores: [13, 14, 15]               # Dedicated CPU cores for the Batching Process
+  batch_size: 128                                    # Max batch size during inference
+  batch_size_factor: 8                               # Multiplier for batch size to determine max slots
+  batch_timeout_ms: 10                               # How long the GPU batcher waits
+  logging_interval_sec: 60
+  logging_level: 20                                  # Logging level for the Batcher Diagnostics
+
+mcts:
+  node_pool_size: 400000                             # Capacity of the persistent MCTS node pool
+  worker_minibatch_size: 16                          # Max positions sent to batcher at once
+  virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored
+  gumbel_c_visit: 50.0                               # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
-  gumbel_noise: 0.0                                  # Gumbel noise value
-  gumbel_search_depth: 10000                         # Search depth budget
-  gumbel_m: 32                                       # m value for sequential halving (top m moves sampled)
-  temperature_ply_cutoff: 0                          # Sample proportional to visit count for first moves
-  temperature_top_move: 0.5                          # Probability the top move is played
-  temperature_blunder_threshold: 0.1                 # Threshold for ignoring blunders
-  minimax_smoothing_factor: 0.0                      # Smooth minimax with standard MCTS distribution for forcing moves
-  draw_cutoff: -0.5                                  # Value threshold to consider a game a draw
-  max_ply_length: 0                                  # Hard cutoff to force a draw
-  resignation_probability: 0.0                       # Chance the bot checks for resignation allowed
-  resignation_cutoff: 0.0                            # Value head cutoff for resignation
-  main_logging_level: 20                             # INFO level
-  worker_logging_level: 20                           # CRITICAL only (only keeps PGN)
-  batcher_logging_level: 20                        # INFO level
+  gumbel_noise: 1.0                                  # 0.0 for deterministic tournament play
+  gumbel_search_depth: 100000                        # Default search depth if GUI doesn't specify
+  gumbel_m: 32                                       # m value for sequential halving
+  logging_level: 20                                  # Logging level for MCTS Search and Action Selection
+  
+selection:
+  temperature_ply_cutoff: 0                          # 0 for competitive play (always greedy)
+  temperature_top_move: 1.0                          # Probability the top move is played
+  temperature_blunder_threshold: 0.0
+  draw_cutoff: -0.25                                 # Value threshold to consider a game a draw
+  resignation_probability: 0.0                       # 0.0 disables resignation for pure inference
+  resignation_cutoff: -1.0
