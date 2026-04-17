@@ -89,6 +89,7 @@ class RLOrchestrator:
         base_path = os.path.join(root_dir, self.params_config['global']['model_path'])
         self.model_pth = os.path.abspath(base_path + ".pth")
         self.train_task = None
+        self.next_build_step = self._calculate_next_build_step(self.current_step)
         
         if self._get_lmdb_signal(b"__TRT_EXPORT_SIGNAL") is None:
             if not os.path.exists(self.model_pth):
