@@ -145,16 +145,23 @@ void IOWriter::run() {
                         std::vector<uint8_t> compressed_buf(max_dst_size);
                         size_t compressed_size = ZSTD_compress(compressed_buf.data(), max_dst_size, raw_payload.data(), raw_payload.size(), 1);
                         if (ZSTD_isError(compressed_size)) continue; 
-
+                        
                         std::string key_str = std::to_string(current_head);
                         MDB_val key_val = { key_str.size(), (void*)key_str.data() };
                         MDB_val data_val = { compressed_size, (void*)compressed_buf.data() };
-                        
+
                         mdb_put(txn, dbi, &key_val, &data_val, 0);
 
-                        if (current_cnt < dynamic_max) current_cnt++;
-                        current_head = (current_head + 1) % dynamic_max;
-                        if (current_head == 0) current_wraps++;
+                        if (current_head + 1 > current_cnt) {
+                            current_cnt = current_head + 1;
+                        }
+
+                        // 2. Advance head and detect wraps
+                        size_t next_head = (current_head + 1) % dynamic_max;
+                        if (next_head == 0) {
+                            current_wraps++;
+                        }
+                        current_head = next_head;
                     }
 
                     current_game_transition_idx += chunk_size;
@@ -193,7 +200,16 @@ void IOWriter::run() {
                 mdb_put(txn, dbi, &state_key, &state_val, 0);
 
                 mdb_txn_commit(txn);
-                // --------------------------------------------------
+                
+                static size_t sync_counter = 0;
+                sync_counter += flush_threshold;
+
+                if (sync_counter >= 100000) { 
+                    logger.log("INFO", "Moving " + std::to_string(sync_counter) + " positions to SSD");
+
+                    mdb_env_sync(lmdb_env, 0); 
+                    sync_counter = 0;
+}
 
                 write_head.store(current_head, std::memory_order_relaxed);
                 buffer_count.store(current_cnt, std::memory_order_relaxed);

@@ -23,11 +23,11 @@ RL_DIR = os.path.abspath(os.path.join(root_dir, "rl_dir"))
 RL_PARAMS_FILE = os.path.abspath(os.path.join(root_dir, "config", "rl_training.yaml"))
 MODEL_FILE = os.path.abspath(os.path.join(root_dir, "config", "model.yaml"))
 
-warnings.filterwarnings("ignore", category=DeprecationWarning, module="torch.onnx")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"torch.onnx.*")
 
 # Format matching the C++ structs
-CPP_STATE_FMT = 'QQdQQQ'  # games_played, samples_generated, lifetime_entropy, buffer_count, buffer_head_ptr, buffer_wraps
-PY_STATE_FMT = 'Qd'       # training_steps, hours_training
+CPP_STATE_FMT = 'QQdQQQ'  
+PY_STATE_FMT = 'Qd'       
 
 class RLOrchestrator:
     def __init__(self):
@@ -67,7 +67,7 @@ class RLOrchestrator:
 
         self.last_backup_step = (self.current_step // self.save_interval) * self.save_interval
 
-        self.next_build_step = self._calculate_next_build_step(self.current_step)
+        self.build_interval = self.params_config['global']['build_interval_steps']
 
         rotation_interval = self.params_config['global']['logging_rotation_steps']
         target_folder_step = (self.current_step // rotation_interval) * rotation_interval
@@ -93,28 +93,13 @@ class RLOrchestrator:
 
         base_path = os.path.join(root_dir, self.params_config['global']['model_path'])
         self.model_pth = os.path.abspath(base_path + ".pth")
+        self.train_task = None
         
-        if not os.path.exists(self.model_pth):
-            self._create_seed_models()
-            
-    def _calculate_next_build_step(self, current_target_step):
-        min_build = self.params_config['global']['min_build_steps']
-        max_build = self.params_config['global']['max_build_steps']
-        ramp_steps = self.params_config['global']['build_ramp_steps']
-        
-        if current_target_step >= ramp_steps:
-            return ((current_target_step // max_build) + 1) * max_build
+        if self._get_lmdb_signal(b"__TRT_EXPORT_SIGNAL") is None:
+            if not os.path.exists(self.model_pth):
+                self._create_seed_models()
 
-        simulated_step = 0
-        while simulated_step <= current_target_step:
-            progress = min(1.0, simulated_step / ramp_steps)
-            interval = int(min_build + (max_build - min_build) * progress)
-            simulated_step += interval
-            
-            if simulated_step >= ramp_steps:
-                simulated_step = ((simulated_step // max_build) + 1) * max_build
-                
-        return simulated_step
+        self._export_to_cpp(self.current_step)
 
     def _initialize_empty_lmdb(self):
         cpp_blob = struct.pack(CPP_STATE_FMT, 0, 0, 0.0, 0, 0, 0)
@@ -123,7 +108,31 @@ class RLOrchestrator:
         with self.env.begin(write=True) as txn:
             txn.put(b"__CPP_STATE", cpp_blob)
             txn.put(b"__PY_STATE", py_blob)
-            txn.put(b"__TRT_EXPORT_SIGNAL", struct.pack('Q', 0))
+
+    def _get_lmdb_signal(self, key: bytes):
+        with self.env.begin(write=False) as txn:
+            blob = txn.get(key)
+            if blob:
+                return struct.unpack('Q', blob)[0]
+            return None
+
+    def _wait_for_trt_engine(self):
+        target_step = self._get_lmdb_signal(b"__TRT_EXPORT_SIGNAL")
+        if target_step is None:
+            raise RuntimeError("Fatal: __TRT_EXPORT_SIGNAL is missing.")
+
+        ready_step = self._get_lmdb_signal(b"__TRT_ENGINE_READY")
+        
+        if ready_step is None or ready_step < target_step:
+            self.logger.info(f"Waiting for C++ to build TRT Engine for step {target_step}...")
+
+            while True:
+                ready_step = self._get_lmdb_signal(b"__TRT_ENGINE_READY")
+                if ready_step is not None and ready_step >= target_step:
+                    break
+                time.sleep(1.0)
+            
+            self.logger.info(f"TRT Engine for step {target_step} is ready.")
 
     def _read_state_from_lmdb(self):
         with self.env.begin(write=False) as txn:
@@ -175,7 +184,7 @@ class RLOrchestrator:
         model = ChessAIModel(self.model_config)
         os.makedirs(os.path.join(RL_DIR, 'models'), exist_ok=True)
         torch.save({'model_state_dict': model.state_dict()}, self.model_pth)
-        self._export_to_cpp()
+        self._export_to_cpp(export_step=0)
         self.logger.info("Seed models created successfully.")
     
     def _setup_logger(self, log_dir, name, filename, level, fmt):
@@ -203,15 +212,6 @@ class RLOrchestrator:
         proc = psutil.Process()
         all_cores = list(range(psutil.cpu_count()))
         proc.cpu_affinity(all_cores)
-        
-        self.train_task = TrainTask(
-            model_path=self.model_pth,
-            model_config=self.model_config,
-            training_config=self.params_config['training'],
-            state_config=self.state_config,
-            global_config=self.params_config['global'],
-            env=self.env
-        )
 
         engine_exe = os.path.abspath(os.path.join(root_dir, "build", "Release", "talbot_engine.exe"))
         self.logger.info(f"Launching C++ Engine: {engine_exe}")
@@ -224,6 +224,19 @@ class RLOrchestrator:
         ]
         
         engine_process = subprocess.Popen(cmd)
+
+        self._wait_for_trt_engine()
+
+        self.logger.info("Initializing PyTorch TrainTask...")
+        self.train_task = TrainTask(
+            model_path=self.model_pth,
+            model_config=self.model_config,
+            training_config=self.params_config['training'],
+            state_config=self.state_config,
+            global_config=self.params_config['global'],
+            env=self.env,
+            db_path=self.buffer_file_path 
+        )
 
         proc.cpu_affinity(training_cores)
         proc.nice(psutil.HIGH_PRIORITY_CLASS)
@@ -296,9 +309,17 @@ class RLOrchestrator:
                 self.current_step += 1
                 self.state_config['lifetime']['training_steps'] = self.current_step
 
-                if self.current_step >= self.next_build_step:
+                if self.current_step % self.build_interval == 0:
                     self.train_task.save_checkpoint(self.model_pth)
-                    self._export_to_cpp()
+                    
+                    self.train_task.cleanup()
+                    del self.train_task
+                    self.train_task = None
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    
+                    self._export_to_cpp(self.current_step)
+                    self._wait_for_trt_engine()
                     
                     if (self.current_step - self.last_backup_step) >= self.save_interval:
                         model_backup_path = os.path.join(RL_DIR, 'models', f'step_{self.current_step:06d}_model.pth')
@@ -306,9 +327,17 @@ class RLOrchestrator:
                         shutil.copy(RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_step:06d}_config.yaml'))
                         self.logger.info(f"Accurate periodic backup saved at exact build step {self.current_step}.")
                         self.last_backup_step = self.current_step
-                    
-                    self.next_build_step = self._calculate_next_build_step(self.current_step)
-                    self.logger.info(f"TRT Engine Export sent. Next export scheduled at step {self.next_build_step}.")
+                                        
+                    self.logger.info("Reinitializing PyTorch TrainTask...")
+                    self.train_task = TrainTask(
+                        model_path=self.model_pth,
+                        model_config=self.model_config,
+                        training_config=self.params_config['training'],
+                        state_config=self.state_config,
+                        global_config=self.params_config['global'],
+                        env=self.env,
+                        db_path=self.buffer_file_path
+                    )
 
                 total_time = time.time() - step_start_time
 
@@ -326,7 +355,7 @@ class RLOrchestrator:
             engine_process.terminate()
             engine_process.wait()
 
-    def _export_to_cpp(self):
+    def _export_to_cpp(self, export_step):
         checkpoint = torch.load(self.model_pth, map_location='cpu', weights_only=True)
         model = ChessAIModel(self.model_config)
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -344,23 +373,22 @@ class RLOrchestrator:
         ).cuda()
 
         onnx_path = self.model_pth.replace(".pth", ".onnx")
-        onnx_tmp_path = onnx_path + ".tmp"
         
         with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message=".*legacy TorchScript-based ONNX export.*")
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
             torch.onnx.export(
                 model, 
                 dummy_input, 
-                onnx_tmp_path,
+                onnx_path,
                 export_params=True,
                 opset_version=17,
                 do_constant_folding=True,
                 input_names=['input'],
                 output_names=['policy', 'value'],
-                dynamic_axes={'input': {0: 'batch_size'}, 'policy': {0: 'batch_size'}, 'value': {0: 'batch_size'}}
+                dynamic_axes={'input': {0: 'batch_size'}, 'policy': {0: 'batch_size'}, 'value': {0: 'batch_size'}},
+                dynamo=False
             )
         
-        os.replace(onnx_tmp_path, onnx_path) 
         self.logger.info(f"Stable FP16 ONNX export successful: {onnx_path}")
 
         del model
@@ -368,7 +396,7 @@ class RLOrchestrator:
         torch.cuda.empty_cache()
 
         with self.env.begin(write=True) as txn:
-            txn.put(b"__TRT_EXPORT_SIGNAL", struct.pack('Q', self.current_step))
+            txn.put(b"__TRT_EXPORT_SIGNAL", struct.pack('Q', export_step))
 
 if __name__ == "__main__":
     orchestrator = RLOrchestrator()

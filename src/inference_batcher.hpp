@@ -16,6 +16,7 @@
 class InferenceBatcher {
 private:
     std::string model_path; 
+    std::string onnx_path;  // NEW: Store ONNX path for refit
     int batch_size;
     int timeout_ms;
     int num_workers;
@@ -37,14 +38,19 @@ private:
     std::optional<c10::cuda::CUDAStream> stream_a;
     std::optional<c10::cuda::CUDAStream> stream_b;
     
+    // Engine reload (full rebuild path - kept for fallback)
     std::atomic<bool> pending_trt_reload{false}; 
     std::vector<uint8_t> pending_engine_data;
     std::mutex reload_mutex;
 
-    // --- NEW: Deterministic Drain Handshake ---
+    // NEW: Refit request (fast path)
+    std::atomic<bool> pending_refit{false};
+    std::string pending_onnx_path;
+    std::mutex refit_mutex;
+
+    // Deterministic Drain Handshake
     std::atomic<bool> pause_requested{false};
     std::atomic<bool> is_paused{false};
-    // ------------------------------------------
 
     double interval_total_processing_duration = 0.0;
     int interval_batches_processed = 0;
@@ -68,12 +74,24 @@ public:
 
     ~InferenceBatcher();
 
+    // Full engine reload (slow path - fallback)
     void signal_trt_reload(const std::vector<uint8_t>& engine_data, int new_step) { 
         std::lock_guard<std::mutex> lock(reload_mutex);
         current_global_step.store(new_step);
         pending_engine_data = engine_data;
         pending_trt_reload.store(true); 
     }
+
+    // Called from main thread after ONNX export is confirmed complete
+    void request_refit(const std::string& onnx_file, int new_step) {
+        std::lock_guard<std::mutex> lock(refit_mutex);
+        current_global_step.store(new_step);
+        pending_onnx_path = onnx_file;
+        pending_refit.store(true);
+    }
+
+    // Returns true if last refit succeeded (check after is_fully_paused becomes false)
+    std::atomic<bool> last_refit_success{true};
 
     void request_pause() { pause_requested.store(true); }
     bool is_fully_paused() const { return is_paused.load(); }

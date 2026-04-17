@@ -65,41 +65,56 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, double root_v_mix, i
                 return a->gumbel_score > b->gumbel_score;
             });
 
-            MCTSNode* top_node = non_forced_visited[0];
-            if (non_forced_visited.size() > 1 && non_forced_visited[1]->gumbel_score > top_node->gumbel_score) {
-                top_node = non_forced_visited[1];
-            }
+            MCTSNode* m1 = non_forced_visited[0];
+            MCTSNode* m2 = (non_forced_visited.size() > 1) ? non_forced_visited[1] : m1;
+            
+            // Pick the one with the higher score as top_node baseline
+            MCTSNode* top_node = (m1->gumbel_score > m2->gumbel_score) ? m1 : m2;
 
             double best_q_val = -top_node->calculate_v_mix();
             std::vector<MCTSNode*> valid_nodes;
+            
             double sum_other_visits = 0.0;
+            double total_valid_visits = top_node->visits;
 
             for (MCTSNode* node : non_forced_visited) {
-                if ((best_q_val - (-node->calculate_v_mix())) <= config.temperature_blunder_threshold) {
+                // 1. Calculate the absolute Q-drop for this candidate
+                double q_drop = best_q_val - (-node->calculate_v_mix());
+                
+                // 2. Calculate the dynamic threshold using the candidate's noise
+                double dynamic_threshold = config.temperature_blunder_q_threshold + 
+                                           (config.temperature_blunder_noise_weight * node->gumbel_noise);
+                
+                // 3. Clamp it so negative noise doesn't artificially shrink the threshold below baseline
+                dynamic_threshold = std::max(config.temperature_blunder_q_threshold, dynamic_threshold);
+
+                // 4. Evaluate against the dynamic threshold
+                if (q_drop <= dynamic_threshold) {
                     valid_nodes.push_back(node);
-                    if (node != top_node) sum_other_visits += node->visits;
+                    if (node != top_node) {
+                        sum_other_visits += node->visits;
+                        total_valid_visits += node->visits;
+                    }
                 }
             }
 
             std::vector<double> act_probs(valid_nodes.size(), 0.0);
-            double top_prob = config.temperature_top_move;
-            double remaining_prob = 1.0 - top_prob;
-            
             int top_idx_in_valid = -1;
             for(size_t i = 0; i < valid_nodes.size(); ++i) {
                 if(valid_nodes[i] == top_node) top_idx_in_valid = i;
             }
 
-            if (remaining_prob > 0.0 && valid_nodes.size() > 1) {
-                if (sum_other_visits > 0.0) {
-                    act_probs[top_idx_in_valid] = top_prob;
-                    for (size_t i = 0; i < valid_nodes.size(); ++i) {
-                        if (i != top_idx_in_valid) {
-                            act_probs[i] = (valid_nodes[i]->visits / sum_other_visits) * remaining_prob;
-                        }
+            if (valid_nodes.size() > 1 && sum_other_visits > 0.0) {
+                // NEW LOGIC: Calculate natural probability, apply config as a floor
+                double natural_top_prob = static_cast<double>(top_node->visits) / total_valid_visits;
+                double actual_top_prob = std::max(config.top_move_probability, natural_top_prob);
+                double remaining_prob = 1.0 - actual_top_prob;
+
+                act_probs[top_idx_in_valid] = actual_top_prob;
+                for (size_t i = 0; i < valid_nodes.size(); ++i) {
+                    if (i != top_idx_in_valid) {
+                        act_probs[i] = (valid_nodes[i]->visits / sum_other_visits) * remaining_prob;
                     }
-                } else {
-                    act_probs[top_idx_in_valid] = 1.0;
                 }
             } else {
                 act_probs[top_idx_in_valid] = 1.0;
@@ -108,6 +123,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, double root_v_mix, i
             std::discrete_distribution<> d(act_probs.begin(), act_probs.end());
             result.best_move = valid_nodes[d(rng)]->move;
         } else {
+            // [Existing non-temperature logic remains the same]
             std::sort(non_forced_visited.begin(), non_forced_visited.end(), [](MCTSNode* a, MCTSNode* b) {
                 if (a->visits != b->visits) return a->visits > b->visits;
                 return a->gumbel_score > b->gumbel_score;

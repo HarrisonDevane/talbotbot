@@ -153,6 +153,7 @@ public:
     int run_simulations(int search_depth, int max_m);
 
 private:
+    void _wait_for_inference();
     MCTSNode* _select(MCTSNode* start_node, std::vector<MCTSNode*>& simulation_path);
     void _backpropagate_minimax(MCTSNode* node);
     void _backpropagate(MCTSNode* node, double value, bool is_terminal);

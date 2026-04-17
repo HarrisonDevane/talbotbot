@@ -97,7 +97,7 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
 
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
-            if (child->forced_outcome.has_value() && child->forced_outcome.value() == 1) continue;
+            if ((child->forced_outcome.has_value() && child->forced_outcome.value() == 1) || child->selected) continue;
             if (child->visits > max_visits) max_visits = child->visits;
             sum_visits += child->visits;
         }
@@ -107,7 +107,7 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
 
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
-            if (child->forced_outcome.has_value() && child->forced_outcome.value() == 1) continue;
+            if ((child->forced_outcome.has_value() && child->forced_outcome.value() == 1) || child->selected) continue;
             double score = child->calculate_gumbel_score(gumbel_c_visit, gumbel_c_scale, max_visits, v_mix);
             if (score > max_score_logit) max_score_logit = score;
         }
@@ -115,7 +115,7 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
         double sum_score_exp = 0.0;
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
-            if (child->forced_outcome.has_value() && child->forced_outcome.value() == 1) {
+            if ((child->forced_outcome.has_value() && child->forced_outcome.value() == 1) || child->selected) {
                 exp_cache[i] = 0.0;
                 continue;
             }
@@ -189,7 +189,9 @@ void MCTSEngine::_retrieve_inference(bool block) {
             if (!result_queue.try_pop(completed_indices)) break;
         }
 
-        logger.log("DEBUG", "Received " + std::to_string(completed_indices.size()) + " inferences from batcher.");
+        if (logger.get_level() <= 10) {
+            logger.log("DEBUG", "Received " + std::to_string(completed_indices.size()) + " inferences from batcher.");
+        }
 
         for (int buffer_index : completed_indices) {
             MCTSNode* node = in_flight_nodes[buffer_index];
@@ -223,7 +225,9 @@ void MCTSEngine::_submit_batch() {
     int b_size = batch_buffer.size();
     if (b_size == 0) return;
 
-    logger.log("DEBUG", "Submitting batch of " + std::to_string(b_size) + " states to inference queue.");
+    if (logger.get_level() <= 10) {
+        logger.log("DEBUG", "Submitting batch of " + std::to_string(b_size) + " states to inference queue.");
+    }
     
     inference_queue.enqueue_bulk(batch_buffer.data(), b_size);
     
@@ -247,7 +251,9 @@ void MCTSEngine::_handle_terminal_node(MCTSNode* leaf) {
         value = 0.0;
     }
 
-    logger.log("DEBUG", "Terminal node reached during search. Result: " + term_type);
+    if (logger.get_level() <= 10) {
+        logger.log("DEBUG", "Terminal node reached during search. Result: " + term_type);
+    }
 
     _mark_selected(leaf);
     time_expansion += ELAPSED(start_time, NOW());
@@ -263,7 +269,7 @@ void MCTSEngine::_queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCT
     while (!buffer_free_slots.try_pop(buffer_index)) {
         _retrieve_inference(false);
         if (!batch_buffer.empty()) _submit_batch();
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        std::this_thread::yield();
     }
 
     in_flight_nodes[buffer_index] = leaf;
@@ -312,10 +318,10 @@ void MCTSEngine::_queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCT
     _virtual_loss(leaf, true);
 
     if (batch_buffer.size() >= (size_t)worker_batch_size) { 
+        _submit_batch();
         while (inference_sent > inference_received) {
             _retrieve_inference(true);
         }
-        _submit_batch();
     }
 
     time_misc += ELAPSED(start_time, NOW());
@@ -338,43 +344,32 @@ void MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
             _submit_batch();
         }
 
-        if (start_node->selected) {
+        if (start_node->selected || buffer_free_slots.empty()) {
             if (!batch_buffer.empty()) _submit_batch();
             if (inference_received >= inference_sent) break;
             
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            std::this_thread::yield();
             continue;
         }
 
         MCTSNode* leaf = _select(start_node, simulation_path);
-        std::string path_str = "";
-        MCTSNode* curr = leaf;
-        while (curr != nullptr && curr->move != chess::Move::NO_MOVE) {
-            path_str = chess::uci::moveToUci(curr->move) + (path_str.empty() ? "" : " ") + path_str;
-            curr = curr->parent;
-        }
 
-        logger.log("DEBUG", "Selected path: " + path_str);
+        if (logger.get_level() <= 10) {
+            std::string path_str = "";
+            MCTSNode* curr = leaf;
+            while (curr != nullptr && curr->move != chess::Move::NO_MOVE) {
+                path_str = chess::uci::moveToUci(curr->move) + (path_str.empty() ? "" : " ") + path_str;
+                curr = curr->parent;
+            }
+            logger.log("DEBUG", "Selected path: " + path_str);
+        }
 
         if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(3)) {
             _handle_terminal_node(leaf);
             break;
         }
 
-        if (leaf->selected || buffer_free_slots.empty()) {
-            if (!batch_buffer.empty()) _submit_batch();
-
-            if (leaf->selected && inference_received >= inference_sent) {
-                _backpropagate(leaf, leaf->calculate_v_mix(), false);
-                simulation_count++;
-                break;
-            }
-
-            while (simulation_path.size() > start_path_len) {
-                root_board.unmakeMove(simulation_path.back()->move);
-                simulation_path.pop_back();
-            }
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        if (start_node->selected) {
             continue;
         }
 
@@ -389,6 +384,8 @@ void MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
 }
 
 void MCTSEngine::_log_tournament_results(const std::vector<MCTSNode*>& candidates, const std::string& phase_name) {
+    if (logger.get_level() > 20) return; // INSTANTLY BYPASS EXPENSIVE LOGIC IF NOT NEEDED
+    
     double root_v_mix = root->calculate_v_mix();
     
     logger.log("INFO", ""); 
@@ -432,7 +429,9 @@ void MCTSEngine::_log_tournament_results(const std::vector<MCTSNode*>& candidate
 }
 
 int MCTSEngine::run_simulations(int search_depth, int max_m) {
-    logger.log("INFO", "Starting Sequential Halving MCTS. Budget: " + std::to_string(search_depth));
+    if (logger.get_level() <= 20) {
+        logger.log("INFO", "Starting Sequential Halving MCTS. Budget: " + std::to_string(search_depth));
+    }
 
     _queue_leaf_for_inference(root, {}); 
     _submit_batch();
@@ -464,7 +463,6 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
 
     int m = std::min(max_m, (int)active_candidates.size());
     if (m == 0) return simulation_count;
-    _log_tournament_results(active_candidates, "Initial candidates:");
 
     std::sort(active_candidates.begin(), active_candidates.end(), [](MCTSNode* a, MCTSNode* b) {
         return a->gumbel_score > b->gumbel_score;
@@ -479,7 +477,9 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
         int num_cands = active_candidates.size();
         if (num_cands <= 1) break;
 
-        logger.log("DEBUG", "Starting Phase " + std::to_string(phase_idx) + " with " + std::to_string(num_cands) + " candidates.");
+        if (logger.get_level() <= 10) {
+            logger.log("DEBUG", "Starting Phase " + std::to_string(phase_idx) + " with " + std::to_string(num_cands) + " candidates.");
+        }
 
         if (phase_idx == 0) {
             for (MCTSNode* child : active_candidates) {
@@ -564,21 +564,24 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
     }
 
     _log_tournament_results(all_nodes, "Final scores");
-    logger.log("INFO", "Simulations complete. Total: " + std::to_string(simulation_count));
-    logger.log("INFO", "--- Gumbel Search (" + std::to_string(simulation_count) + " sims) Timings ---");
     
-    char buffer[128];
-    auto log_timer = [&](const char* label, double value) {
-        snprintf(buffer, sizeof(buffer), "%-35s %.4f", label, value);
-        logger.log("INFO", buffer);
-    };
+    if (logger.get_level() <= 20) {
+        logger.log("INFO", "Simulations complete. Total: " + std::to_string(simulation_count));
+        logger.log("INFO", "--- Gumbel Search (" + std::to_string(simulation_count) + " sims) Timings ---");
+        
+        char buffer[128];
+        auto log_timer = [&](const char* label, double value) {
+            snprintf(buffer, sizeof(buffer), "%-35s %.4f", label, value);
+            logger.log("INFO", buffer);
+        };
 
-    log_timer("Selection time:", time_selection);
-    log_timer("Queueing time:", time_queueing);
-    log_timer("Retrieving time:", time_retrieval);
-    log_timer("Expansion time:", time_expansion);
-    log_timer("Backpropagation time:", time_backpropagation);
-    log_timer("Forced waiting for inference time:", time_wait_for_inference);
+        log_timer("Selection time:", time_selection);
+        log_timer("Queueing time:", time_queueing);
+        log_timer("Retrieving time:", time_retrieval);
+        log_timer("Expansion time:", time_expansion);
+        log_timer("Backpropagation time:", time_backpropagation);
+        log_timer("Forced waiting for inference time:", time_wait_for_inference);
+    }
 
     if (!batch_buffer.empty()) _submit_batch();
     while (inference_received < inference_sent) {
@@ -639,13 +642,18 @@ void MCTSEngine::_backpropagate(MCTSNode* node, double value, bool is_terminal) 
     MCTSNode* current_node = node;
     double value_for_backprop = value;
     current_node->raw_value = value;
-    logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " raw value: " + std::to_string(value));
+    
+    if (logger.get_level() <= 10) {
+        logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " raw value: " + std::to_string(value));
+    }
 
     while (current_node != nullptr) {
         current_node->visits += 1;
         current_node->value_sum += value_for_backprop;
 
-        logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " value: " + std::to_string(value_for_backprop));
+        if (logger.get_level() <= 10) {
+            logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " value: " + std::to_string(value_for_backprop));
+        }
         
         _backpropagate_minimax(current_node);
 

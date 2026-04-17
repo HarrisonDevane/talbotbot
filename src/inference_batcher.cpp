@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "inference_batcher.hpp"
+#include "trt_builder.hpp"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
@@ -55,7 +56,9 @@ InferenceBatcher::~InferenceBatcher() {
 void InferenceBatcher::load_initial_engine(Logger& logger) {
     std::ifstream file(model_path, std::ios::binary | std::ios::ate);
     if (!file) {
-        logger.log("WARNING", "No initial TRT engine found at " + model_path + ". Waiting for background build...");
+        if (logger.get_level() <= 30) {
+            logger.log("WARNING", "No initial TRT engine found at " + model_path + ". Waiting for background build...");
+        }
         return;
     }
 
@@ -69,7 +72,9 @@ void InferenceBatcher::load_initial_engine(Logger& logger) {
         for (int i = 0; i < 3; ++i) {
             trt_contexts[i] = trt_engine->createExecutionContext();
         }
-        logger.log("INFO", "Initial TRT Engine successfully loaded from disk.");
+        if (logger.get_level() <= 20) {
+            logger.log("INFO", "Initial TRT Engine successfully loaded from disk.");
+        }
     }
 }
 
@@ -96,6 +101,7 @@ std::vector<std::pair<int, int>> InferenceBatcher::collect_batch(
             if ((int)requests.size() >= batch_size) {
                 return requests;
             }
+            start_poll = std::chrono::steady_clock::now();
         } else {
             double elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_poll).count();
             if (elapsed_ms >= (double)timeout_ms && !requests.empty()) break;
@@ -118,7 +124,10 @@ void InferenceBatcher::run(
 
     Logger logger("inference_batcher", rl_dir, logging_level);
     logger.rotate(current_global_step.load(), rotation_interval);
-    logger.log("INFO", "=== INFERENCE BATCHER STARTED ===");
+    
+    if (logger.get_level() <= 20) {
+        logger.log("INFO", "=== INFERENCE BATCHER STARTED ===");
+    }
     
     std::atomic<double> local_idle_time_sec{0.0};
 
@@ -133,15 +142,21 @@ void InferenceBatcher::run(
         
         if (core_ids.size() >= 3) {
             fillerMask = (static_cast<DWORD_PTR>(1) << core_ids[2]);
-            logger.log("INFO", "Dispatcher pinned to core " + std::to_string(core_ids[0]) + 
-                               ", Collector pinned to core " + std::to_string(core_ids[1]) + 
-                               ", Filler pinned to core " + std::to_string(core_ids[2]));
+            if (logger.get_level() <= 20) {
+                logger.log("INFO", "Dispatcher pinned to core " + std::to_string(core_ids[0]) + 
+                                   ", Collector pinned to core " + std::to_string(core_ids[1]) + 
+                                   ", Filler pinned to core " + std::to_string(core_ids[2]));
+            }
         } else {
-            logger.log("INFO", "Dispatcher and Filler sharing core " + std::to_string(core_ids[0]) + 
-                               ", Collector pinned to core " + std::to_string(core_ids[1]));
+            if (logger.get_level() <= 20) {
+                logger.log("INFO", "Dispatcher and Filler sharing core " + std::to_string(core_ids[0]) + 
+                                   ", Collector pinned to core " + std::to_string(core_ids[1]));
+            }
         }
     } else {
-        logger.log("CRITICAL", "Insufficient cores provided for pipelined batcher.");
+        if (logger.get_level() <= 50) {
+            logger.log("CRITICAL", "Insufficient cores provided for pipelined batcher.");
+        }
         return;
     }
 
@@ -207,7 +222,7 @@ void InferenceBatcher::run(
             if (scatter_queue.try_pop(job)) {
                 cudaStreamSynchronize(raw_streams[job.slot]); 
                 
-                if (logging_level <= 10) {
+                if (logger.get_level() <= 10) {
                     float total_ms = 0.0f, compute_ms = 0.0f;
                     cudaEventElapsedTime(&total_ms, fw_start_events[job.slot], fw_stop_events[job.slot]);
                     cudaEventElapsedTime(&compute_ms, compute_start[job.slot], compute_stop[job.slot]);
@@ -242,7 +257,7 @@ void InferenceBatcher::run(
             double elapsed_interval_time = std::chrono::duration<double>(current_time - last_report_time).count();
 
             if (elapsed_interval_time >= (double)logging_interval_sec) {
-                if (logging_level <= 20) {
+                if (logger.get_level() <= 20) {
                     
                     size_t free_byte = 0, total_byte = 0;
                     cudaError_t cuda_status = cudaMemGetInfo(&free_byte, &total_byte);
@@ -260,7 +275,6 @@ void InferenceBatcher::run(
                     double util_pct = (interval_total_processing_duration / NUM_SLOTS / elapsed_interval_time) * 100.0;
                     double inf_per_sec = interval_total_inferences / elapsed_interval_time;
 
-                    // System CPU tracking
                     FILETIME idleTime, kernelTime, userTime;
                     float sys_cpu_pct = 0.0f;
                     if (GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
@@ -280,14 +294,12 @@ void InferenceBatcher::run(
                         previousIdleTicks = idleTicks;
                     }
 
-                    // System RAM tracking
                     MEMORYSTATUSEX memInfo;
                     memInfo.dwLength = sizeof(MEMORYSTATUSEX);
                     GlobalMemoryStatusEx(&memInfo);
                     double sys_ram_used_gb = (memInfo.ullTotalPhys - memInfo.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
                     double sys_ram_total_gb = memInfo.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
                     
-                    // Queue profiling
                     size_t input_queue_size = queue.size_approx();
                     size_t dispatch_q_size = dispatch_queue.size();
                     size_t scatter_q_size = scatter_queue.size();
@@ -300,6 +312,7 @@ void InferenceBatcher::run(
                         total_result_items += qs;
                         if (qs > 0) active_result_queues++;
                     }
+                    logger.rotate(current_global_step.load(), rotation_interval);
 
                     logger.log("INFO", "============================================================");
                     logger.log("INFO", " INFERENCE BATCHER DIAGNOSTICS (" + std::to_string(elapsed_interval_time) + "s interval)");
@@ -351,8 +364,8 @@ void InferenceBatcher::run(
         int current_slot = 0;
         
         while (!stop_event.load()) {
-            if (pending_trt_reload.load() || pause_requested.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (pending_trt_reload.load() || pending_refit.load() || pause_requested.load()) {
+                std::this_thread::yield();
                 continue;
             }
 
@@ -377,7 +390,7 @@ void InferenceBatcher::run(
 
             slot_free[current_slot].store(false); 
 
-            if (logging_level <= 10) {
+            if (logger.get_level() <= 10) {
                 std::ostringstream q_log;
                 q_log << "Batch Size: " << req_size << " | InferenceQ Approx: " << queue.size_approx() 
                       << " | DispatchQ: " << dispatch_queue.size() << " | ScatterQ: " << scatter_queue.size();
@@ -395,6 +408,48 @@ void InferenceBatcher::run(
     });
 
     while (!stop_event.load()) {
+        // ============================================================
+        // PRIORITY 1: Handle in-place refit request (FAST PATH ~100ms)
+        // ============================================================
+        if (pending_refit.load()) {
+            std::string onnx_to_refit;
+            {
+                std::lock_guard<std::mutex> lock(refit_mutex);
+                onnx_to_refit = pending_onnx_path;
+            }
+            
+            // Ensure GPU is fully idle
+            cudaDeviceSynchronize();
+            
+            auto refit_start = std::chrono::steady_clock::now();
+            
+            // Perform in-place refit on the LIVE engine (same CUDA context)
+            bool success = TRTBuilder::refit_engine_inplace(trt_engine, onnx_to_refit, logger);
+            
+            double refit_duration = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - refit_start
+            ).count();
+            
+            if (success) {
+                logger.log("INFO", "In-place refit completed in " + std::to_string(refit_duration) + "ms");
+                last_refit_success.store(true);
+            } else {
+                logger.log("WARNING", "In-place refit FAILED after " + std::to_string(refit_duration) + "ms. Engine unchanged.");
+                last_refit_success.store(false);
+            }
+            
+            // Clear refit request and unpause
+            pending_refit.store(false);
+            is_paused.store(false);
+            pause_requested.store(false);
+            
+            logger.rotate(current_global_step.load(), rotation_interval);
+            continue;
+        }
+
+        // ============================================================
+        // PRIORITY 2: Handle full engine reload (SLOW PATH - fallback)
+        // ============================================================
         if (pending_trt_reload.load()) {
             std::lock_guard<std::mutex> lock(reload_mutex);
             
@@ -409,17 +464,16 @@ void InferenceBatcher::run(
             trt_runtime = nvinfer1::createInferRuntime(gBatcherLogger);
             trt_engine = trt_runtime->deserializeCudaEngine(pending_engine_data.data(), pending_engine_data.size());
             
-            // --- FIX: CLEAR HOST RAM BUFFER AFTER DESERIALIZATION ---
             pending_engine_data.clear();
             pending_engine_data.shrink_to_fit();
-            // --------------------------------------------------------
 
             for (int i = 0; i < 3; ++i) {
                 trt_contexts[i] = trt_engine->createExecutionContext();
             }
             
-            logger.rotate(current_global_step.load(), rotation_interval);
-            logger.log("INFO", "Hot swap complete. Resuming Inference.");
+            if (logger.get_level() <= 20) {
+                logger.log("INFO", "Full engine hot swap complete. Resuming Inference.");
+            }
             
             pending_trt_reload.store(false);
             is_paused.store(false); 
@@ -427,6 +481,9 @@ void InferenceBatcher::run(
             continue;
         }
 
+        // ============================================================
+        // Check if we need to enter Paused State (for drain)
+        // ============================================================
         bool all_free = true;
         for (int i = 0; i < NUM_SLOTS; ++i) {
             if (!slot_free[i].load()) all_free = false;
@@ -435,16 +492,19 @@ void InferenceBatcher::run(
         if (pause_requested.load()) {
             if (all_free && dispatch_queue.empty()) {
                 is_paused.store(true);
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                std::this_thread::yield();
                 continue; 
             }
         }
 
         if (!trt_contexts[0]) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::yield();
             continue;
         }
 
+        // ============================================================
+        // Normal Dispatch Operation
+        // ============================================================
         PipelineJob job;
         if (dispatch_queue.try_pop(job)) {
             int current_slot = job.slot;
@@ -462,7 +522,6 @@ void InferenceBatcher::run(
             gpu_input_fp16[current_slot].slice(0, 0, padded_size).zero_();
             gpu_input_fp16[current_slot].slice(0, 0, req_size).copy_(pinned_staging[current_slot].slice(0, 0, req_size), true);
 
-
             cudaEventRecord(compute_start[current_slot], raw_streams[current_slot]);
             
             trt_contexts[current_slot]->setInputShape("input", nvinfer1::Dims4{padded_size, 69, 8, 8});
@@ -478,7 +537,7 @@ void InferenceBatcher::run(
             cudaMemcpyAsync(value_cpu[current_slot].data_ptr(), gpu_value_fp16[current_slot].data_ptr(), req_size * value_bytes_per_tensor, cudaMemcpyDeviceToHost, raw_streams[current_slot]);
             cudaEventRecord(fw_stop_events[current_slot], raw_streams[current_slot]);
 
-            if (logging_level <= 10) {
+            if (logger.get_level() <= 10) {
                 double launch_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_launch_start).count();
                 logger.log("DEBUG", "[Slot " + std::to_string(current_slot) + "] GPU Instruction Overhead: " + std::to_string(launch_ms) + "ms");
             }

@@ -1,0 +1,29 @@
+# Core ML & Quantization (Based on your provided screenshot)
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.11.0
+onnx==1.17.0
+onnxscript
+pytorch-quantization --index-url https://pypi.nvidia.com
+
+# Data Handling & Storage
+numpy
+pyyaml
+h5py
+hdf5plugin
+zstandard
+lmdb
+
+# Chess Logic
+chess
+
+# Infrastructure & Monitoring
+psutil
+py-spy
+tqdm
+tensorboard
+
+# UI & Utils
+pillow
+matplotlib
+beautifulsoup4
+setuptools<70

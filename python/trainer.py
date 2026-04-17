@@ -9,14 +9,184 @@ import os
 import time
 import numpy as np
 import lmdb
-
 import zstandard as zstd
+import torch.multiprocessing as mp 
+import concurrent.futures
+import psutil
+import struct
+import traceback
+import threading
 
 from model import ChessAIModel
 
+class AsyncBatchPrefetcher:
+    def __init__(self, db_path, batch_size, input_planes, board_dim, policy_moves, core_ids, prefetch_workers, rl_dir, log_level, rotation_interval):
+        self.ready_queue = mp.Queue(maxsize=3) 
+        self.free_queue = mp.Queue(maxsize=3)
+        for i in range(3):
+            self.free_queue.put(i)
+
+        self.db_path = db_path
+        self.batch_size = batch_size
+        self.input_planes = input_planes
+        self.board_dim = board_dim
+        self.policy_moves = policy_moves
+        self.core_ids = core_ids
+        self.prefetch_workers = prefetch_workers
+        self.rl_dir = rl_dir
+        self.log_level = log_level
+        self.rotation_interval = rotation_interval
+        
+        # Allocate exactly 3 static buffers in Shared Memory. This locks the RAM usage permanently.
+        self.shm_b = torch.zeros((3, batch_size, input_planes, board_dim, board_dim), dtype=torch.float32).share_memory_()
+        self.shm_p = torch.zeros((3, batch_size, policy_moves), dtype=torch.float32).share_memory_()
+        self.shm_v = torch.zeros((3, batch_size), dtype=torch.float16).share_memory_()
+        self.shm_m = torch.zeros((3, batch_size, policy_moves), dtype=torch.bool).share_memory_()
+        self.shm_valid = torch.zeros(3, dtype=torch.int32).share_memory_()
+
+        self.worker = mp.Process(target=self._worker_loop)
+        self.worker.daemon = True
+        self.worker.start()
+
+    def _worker_loop(self):
+        logger = logging.getLogger("Prefetcher")
+        logger.setLevel(self.log_level)
+        logger.propagate = False
+
+        current_log_dir = None
+
+        def setup_or_rotate_logger(step):
+            nonlocal current_log_dir
+            target_folder = (step // self.rotation_interval) * self.rotation_interval
+            new_log_dir = os.path.join(self.rl_dir, f"run_step_{target_folder:06d}")
+
+            if new_log_dir != current_log_dir:
+                os.makedirs(new_log_dir, exist_ok=True)
+                current_log_dir = new_log_dir
+
+                if logger.hasHandlers():
+                    logger.handlers.clear()
+
+                formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] [PREFETCH] %(message)s")
+                log_file_path = os.path.join(current_log_dir, "prefetcher.log")
+                file_handler = logging.FileHandler(log_file_path, mode='a')
+                file_handler.setFormatter(formatter)
+                logger.addHandler(file_handler)
+                logger.info(f"Prefetcher logger rotated to {current_log_dir}")
+
+        try:
+            psutil.Process().cpu_affinity(self.core_ids)
+
+            env = lmdb.open(
+                self.db_path, 
+                map_size=1024 * 1024 * 1024 * 128,
+                readonly=True, 
+                lock=False, 
+                readahead=False
+            )
+
+            board_bytes = ((self.input_planes * self.board_dim * self.board_dim) + 7) // 8
+            mask_bytes = (self.policy_moves + 7) // 8
+            total_input_size = self.input_planes * self.board_dim * self.board_dim
+
+            thread_local = threading.local()
+
+            def fetch_single(idx):
+                if not hasattr(thread_local, "decompressor"):
+                    thread_local.decompressor = zstd.ZstdDecompressor()
+                with env.begin(write=False, buffers=True) as txn:
+                    compressed_blob = txn.get(f"{idx}".encode('ascii'))
+                    if compressed_blob is None:
+                        return None
+                    return thread_local.decompressor.decompress(compressed_blob)
+
+            setup_or_rotate_logger(0)
+            logger.info("Core affinity set successfully. Connected to LMDB.")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.prefetch_workers) as executor:
+                while True:
+                    # Wait for the PyTorch thread to finish with a buffer
+                    slot = self.free_queue.get()
+
+                    with env.begin(write=False) as txn:
+                        cpp_blob = txn.get(b"__CPP_STATE")
+                        py_blob  = txn.get(b"__PY_STATE")
+
+                        if not cpp_blob or not py_blob:
+                            time.sleep(1)
+                            self.free_queue.put(slot) # Put it back if we skip
+                            continue
+
+                        actual_count  = struct.unpack('QQdQQQ', cpp_blob)[3]
+                        current_step  = struct.unpack('Qd', py_blob)[0]
+
+                    setup_or_rotate_logger(current_step)
+
+                    if actual_count < self.batch_size:
+                        logger.debug(f"Buffer size ({actual_count}) < Batch Size ({self.batch_size}). Waiting...")
+                        time.sleep(1)
+                        self.free_queue.put(slot)
+                        continue
+
+                    t_start = time.perf_counter()
+                    indices = np.random.randint(0, actual_count, size=self.batch_size)
+                    results = list(executor.map(fetch_single, indices))
+
+                    t_fetch = (time.perf_counter() - t_start) * 1000
+
+                    b_arr = np.empty((self.batch_size, self.input_planes, self.board_dim, self.board_dim), dtype=np.float32)
+                    p_arr = np.zeros((self.batch_size, self.policy_moves), dtype=np.float32)
+                    v_arr = np.empty(self.batch_size, dtype=np.float16)
+                    m_arr = np.empty((self.batch_size, self.policy_moves), dtype=np.bool_)
+
+                    valid_idx = 0
+                    for buf in results:
+                        if buf is None:
+                            continue
+
+                        num_moves = np.frombuffer(buf[0:2], dtype=np.uint16)[0]
+                        off_board = 2 + board_bytes
+                        off_mask  = off_board + mask_bytes
+                        off_idx   = off_mask  + (2 * num_moves)
+                        off_val   = off_idx   + (2 * num_moves)
+
+                        board_bits = np.frombuffer(buf[2:off_board], dtype=np.uint8)
+                        b_arr[valid_idx] = np.unpackbits(board_bits)[:total_input_size].reshape(self.input_planes, self.board_dim, self.board_dim)
+
+                        mask_bits = np.frombuffer(buf[off_board:off_mask], dtype=np.uint8)
+                        m_arr[valid_idx] = np.unpackbits(mask_bits)[:self.policy_moves]
+
+                        move_indices = np.frombuffer(buf[off_mask:off_idx], dtype=np.uint16)
+                        move_probs   = np.frombuffer(buf[off_idx:off_val], dtype=np.float16)
+                        p_arr[valid_idx, move_indices] = move_probs
+
+                        v_arr[valid_idx] = np.frombuffer(buf[off_val:off_val + 2], dtype=np.float16)[0]
+                        valid_idx += 1
+
+                    t_unpack = (time.perf_counter() - (t_start + (t_fetch / 1000))) * 1000
+
+                    # Copy directly into the pre-allocated Shared Memory slot
+                    self.shm_b[slot][:valid_idx].copy_(torch.from_numpy(b_arr[:valid_idx]))
+                    self.shm_p[slot][:valid_idx].copy_(torch.from_numpy(p_arr[:valid_idx]))
+                    self.shm_v[slot][:valid_idx].copy_(torch.from_numpy(v_arr[:valid_idx]))
+                    self.shm_m[slot][:valid_idx].copy_(torch.from_numpy(m_arr[:valid_idx]))
+                    self.shm_valid[slot] = valid_idx
+
+                    logger.debug(f"Assembled batch of {valid_idx}. Fetch: {t_fetch:.1f}ms | Unpack: {t_unpack:.1f}ms. Pushing slot {slot} to queue...")
+
+                    # Send the integer index instead of the massive tensors
+                    self.ready_queue.put(slot)
+
+        except Exception as e:
+            if logger:
+                logger.critical(f"FATAL PREFETCHER ERROR: {str(e)}")
+                logger.critical(traceback.format_exc())
+            raise
+
+
 class TrainTask:
     def __init__(self, model_path: str, model_config: dict, training_config: dict,
-                 state_config: dict, global_config: str, env):
+                 state_config: dict, global_config: dict, env, db_path: str):
         self.training_config = training_config
         self.model_path = model_path
         self.model_config = model_config
@@ -29,8 +199,6 @@ class TrainTask:
         self.last_log_dir = None
         self.tb_writer = None
         self.device = torch.device("cuda")
-        
-        self.decompressor = zstd.ZstdDecompressor()
 
         m_cfg = self.model_config['model']
         c_cfg = self.model_config['chess']
@@ -40,8 +208,23 @@ class TrainTask:
         self.total_input_size = self.input_planes * self.board_dim * self.board_dim
         self.total_policy_moves = c_cfg['total_policy_moves']
 
-        self.board_bytes = (self.total_input_size + 7) // 8
-        self.mask_bytes = (self.total_policy_moves + 7) // 8
+        rl_dir = os.path.dirname(db_path)
+        log_level = self.training_config.get('logging_level', 20)
+        rotation_interval = self.global_config['logging_rotation_steps']
+
+        # Pass the rotation interval so the prefetcher knows when to switch folders
+        self.prefetcher = AsyncBatchPrefetcher(
+            db_path=db_path,
+            batch_size=self.training_config['batch_size'],
+            input_planes=self.input_planes,
+            board_dim=self.board_dim,
+            policy_moves=self.total_policy_moves,
+            core_ids=self.training_config.get('io_read_cores', [3, 4]),
+            prefetch_workers=self.training_config.get('prefetch_workers', 16),
+            rl_dir=rl_dir,
+            log_level=log_level,
+            rotation_interval=rotation_interval
+        )
 
         self.model = ChessAIModel(self.model_config).to(self.device)
 
@@ -53,7 +236,6 @@ class TrainTask:
         )
 
         self.scaler = GradScaler('cuda')
-
         self.policy_criterion = nn.KLDivLoss(reduction='batchmean')
         self.value_criterion = nn.MSELoss()
 
@@ -99,58 +281,29 @@ class TrainTask:
                 self.tb_writer.close()
             tb_dir = os.path.join(current_log_dir, "tensorboard")
             self.tb_writer = SummaryWriter(log_dir=tb_dir)
-
             self.last_log_dir = current_log_dir
 
         data_start = time.perf_counter()
-        batch_size = self.training_config['batch_size']
+        
+        # Get the index of the ready buffer
+        slot = self.prefetcher.ready_queue.get()
+        valid_idx = self.prefetcher.shm_valid[slot].item()
 
-        boards, policies, values, masks = [], [], [], []
+        # Slice the shared memory directly
+        t_b = self.prefetcher.shm_b[slot][:valid_idx]
+        t_p = self.prefetcher.shm_p[slot][:valid_idx]
+        t_v = self.prefetcher.shm_v[slot][:valid_idx]
+        t_m = self.prefetcher.shm_m[slot][:valid_idx]
 
-        # Uses the shared environment. read-only transaction, so it doesn't block C++ writes.
-        with self.env.begin(write=False, buffers=True) as txn:
-            actual_count = txn.stat()['entries']
-            indices = np.random.randint(0, actual_count, size=batch_size)
+        shuffle_idx = torch.randperm(valid_idx)
 
-            for idx in indices:
-                compressed_blob = txn.get(f"{idx}".encode('ascii'))
+        board_tensors    = t_b[shuffle_idx].to(self.device, non_blocking=True)
+        policy_target    = t_p[shuffle_idx].to(self.device, non_blocking=True)
+        value_targets    = t_v[shuffle_idx].float().to(self.device, non_blocking=True).flatten()
+        true_legal_masks = t_m[shuffle_idx].to(self.device, non_blocking=True)
 
-                if compressed_blob is None:
-                    for _ in range(10):
-                        new_idx = np.random.randint(0, actual_count)
-                        compressed_blob = txn.get(f"{new_idx}".encode('ascii'))
-                        if compressed_blob is not None:
-                            break
-                    if compressed_blob is None:
-                        continue
-
-                buf = self.decompressor.decompress(compressed_blob)
-
-                num_moves = np.frombuffer(buf[0:2], dtype=np.uint16)[0]
-
-                off_board = 2 + self.board_bytes
-                off_mask  = off_board + self.mask_bytes
-                off_idx   = off_mask  + (2 * num_moves)
-                off_val   = off_idx   + (2 * num_moves)
-
-                board_bits = np.frombuffer(buf[2:off_board], dtype=np.uint8)
-                board = np.unpackbits(board_bits)[:self.total_input_size]
-                boards.append(board.reshape(self.input_planes, self.board_dim, self.board_dim).astype(np.float32))
-
-                mask_bits = np.frombuffer(buf[off_board:off_mask], dtype=np.uint8)
-                masks.append(np.unpackbits(mask_bits)[:self.total_policy_moves].astype(np.bool_))
-
-                pi_vec = np.zeros(self.total_policy_moves, dtype=np.float32)
-                pi_vec[np.frombuffer(buf[off_mask:off_idx], dtype=np.uint16)] = \
-                    np.frombuffer(buf[off_idx:off_val], dtype=np.float16)
-                policies.append(pi_vec)
-
-                values.append(np.frombuffer(buf[off_val:off_val + 2], dtype=np.float16))
-
-        board_tensors    = torch.from_numpy(np.stack(boards)).to(self.device, non_blocking=True)
-        policy_target    = torch.from_numpy(np.stack(policies)).to(self.device, non_blocking=True)
-        value_targets    = torch.from_numpy(np.stack(values)).float().to(self.device, non_blocking=True).flatten()
-        true_legal_masks = torch.from_numpy(np.stack(masks)).to(self.device, non_blocking=True)
+        # CRITICAL: Tell the worker it can overwrite this buffer for the next batch
+        self.prefetcher.free_queue.put(slot)
 
         data_time = (time.perf_counter() - data_start) * 1000
 
@@ -158,23 +311,17 @@ class TrainTask:
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = float(self.training_config['learning_rate'])
 
-        # --- BATCH VALUE COMPOSITION ANALYZER ---
         with torch.no_grad():
-            v_tars = value_targets.cpu().numpy()
-            total_v = len(v_tars)
-            
-            # Assuming standard [-1, 1] bounds for chess
-            wins = np.sum(v_tars > 0.5)
-            draws = np.sum((v_tars >= -0.5) & (v_tars <= 0.5))
-            losses = np.sum(v_tars < -0.5)
-            
-            pct_w = (wins / total_v) * 100
-            pct_d = (draws / total_v) * 100
-            pct_l = (losses / total_v) * 100
-            
-            v_min = np.min(v_tars)
-            v_max = np.max(v_tars)
-        # ----------------------------------------
+            total_v = len(value_targets)
+            if total_v > 0:
+                wins = (value_targets == 1.0).sum().item()
+                draws = (value_targets == 0.0).sum().item()
+                losses = (value_targets == -1.0).sum().item()
+                pct_w = (wins / total_v) * 100
+                pct_d = (draws / total_v) * 100
+                pct_l = (losses / total_v) * 100
+            else:
+                pct_w = pct_d = pct_l = 0.0
 
         self.model.train()
         self.optimizer.zero_grad()
@@ -213,7 +360,7 @@ class TrainTask:
             f"Loss: T={total_loss.item():.4f} "
             f"(P={(policy_loss.item() * self.training_config['policy_loss_weight']):.4f}, "
             f"V={(value_loss.item() * self.training_config['value_loss_weight']):.4f}) | "
-            f"Batch Vals (W/D/L): {pct_w:.1f}% / {pct_d:.1f}% / {pct_l:.1f}% (Range: {v_min:.2f} to {v_max:.2f}) | "
+            f"Batch Vals (W/D/L): {pct_w:.1f}% / {pct_d:.1f}% / {pct_l:.1f}%| "
             f"P_Ent={policy_entropy.item():.4f} | "
             f"V_Out={v_out_mean.item():.4f} | V_Tar={v_tar_mean.item():.4f} | "
             f"Grad={grad_norm.item():.2f} | LR={self.optimizer.param_groups[0]['lr']:.6f} | "
@@ -228,14 +375,19 @@ class TrainTask:
             self.tb_writer.add_scalar('Metrics/Value_Output_Mean', v_out_mean.item(), global_step)
             self.tb_writer.add_scalar('Metrics/Value_Target_Mean', v_tar_mean.item(), global_step)
             self.tb_writer.add_scalar('Metrics/Grad_Norm', grad_norm.item(), global_step)
-            
-            # Log the new metrics to TensorBoard
             self.tb_writer.add_scalar('Batch_Composition/Wins_Pct', pct_w, global_step)
             self.tb_writer.add_scalar('Batch_Composition/Draws_Pct', pct_d, global_step)
             self.tb_writer.add_scalar('Batch_Composition/Losses_Pct', pct_l, global_step)
-            self.tb_writer.add_scalar('Batch_Composition/Target_Min', v_min, global_step)
-            self.tb_writer.add_scalar('Batch_Composition/Target_Max', v_max, global_step)
-            
             self.tb_writer.add_scalar('Hardware_MS/Data_Load', data_time, global_step)
             self.tb_writer.add_scalar('Hardware_MS/Forward', fw_time, global_step)
             self.tb_writer.add_scalar('Hardware_MS/Backward', bw_time, global_step)
+
+
+    def cleanup(self):
+        if hasattr(self, 'prefetcher'):
+            self.prefetcher.worker.terminate()
+            self.prefetcher.worker.join()
+            self.prefetcher.ready_queue.close()
+            self.prefetcher.free_queue.close()
+        if self.tb_writer is not None:
+            self.tb_writer.close()

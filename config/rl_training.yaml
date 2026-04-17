@@ -1,28 +1,26 @@
 global:
   total_training_steps: 20000                        # Total gradient updates to perform
   backup_interval_steps: 1000                        # How often to backup the model
+  build_interval_steps: 50                           # How often to rebuild/refit engine
   logging_rotation_steps: 1000                       # How often to make a new log folder
   min_buffer_size: 1024000                           # Minimum replay buffer size
-  max_buffer_size: 16384000                          # Max buffer size
-  buffer_ramp_steps: 10000                           # Steps to reach max buffer size (linear)
-  min_build_steps: 200                               # Minimum steps for a new engine build
-  max_build_steps: 1000                              # Max steps for a new engine build
-  build_ramp_steps: 10000                            # Steps to reach max engine build rate (linear)
+  max_buffer_size: 24576000                          # Max buffer size
+  buffer_ramp_steps: 30000                           # Steps to reach max buffer size (linear)
   model_path: 'rl_dir/models/model'                  # Path to best model base name
 
 inference:
   inference_worker_cores: [13, 14, 15]               # Dedicated CPU cores for the Batching Process (feeding the GPU)
-  batch_size: 1024                                   # Max batch size during inference
-  batch_size_factor: 16                              # Multiplier for batch size to determine max slots available in RAM
+  batch_size: 512                                    # Max batch size during inference
+  batch_size_factor: 12                              # Multiplier for batch size to determine max slots available in RAM
   batch_timeout_ms: 10                               # How long the GPU batcher waits for more data before running partial batch
   logging_interval_sec: 60
   logging_level: 20
 
 data_generation:
-  data_generator_cores: [3]                          # Dedicated CPU cores for the main C++ orchestrator and data generator task
-  io_write_cores: [4]
-  game_worker_cores: [5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
-  workers_per_core: 12                               # Number of game workers to pin to each core
+  data_generator_cores: [5]                          # Dedicated CPU cores for the main C++ orchestrator and data generator task
+  io_write_cores: [6]
+  game_worker_cores: [11, 12, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+  workers_per_core: 10                               # Number of game workers to pin to each core
   max_ply_length: 400                                # Hard cutoff to force a draw  main_logging_level: 20
   main_logging_level: 20
   worker_logging_level: 50
@@ -42,14 +40,17 @@ mcts:
 
 selection:
   temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
-  temperature_top_move: 0.6                          # Probability the top move is played
-  temperature_blunder_threshold: 0.3                 # Threshold for ignoring blunders
+  top_move_probability: 0.5                          # Probability the top move is played
+  temperature_blunder_q_threshold: 0.3               # Absolute Q value [-1, 1] threshold
+  temperature_blunder_noise_weight: 0.045
   draw_cutoff: -0.25                                 # Value threshold to consider a game a draw
   resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.90                          # Value head cutoff for resignation
 
 training:
-  training_cores: [2]
+  training_cores: [2]                                # Dedicated CPU cores for training task
+  io_read_cores: [3, 4]                              # Dedicated CPU cores for batch prefetching
+  prefetch_workers: 8                                # How many workers in async read process to query lmdb
   seed: 42                                           # Seed for initialisation
   batch_size: 4096                                   # Positions per Gradient Update
   sampling_ratio: 1.0                                # Train on x the amount of data generated

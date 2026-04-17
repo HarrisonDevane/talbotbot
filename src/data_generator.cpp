@@ -9,7 +9,6 @@
 #include <windows.h> 
 #include <cmath>
 
-// [Constructor remains identical...]
 DataGenerator::DataGenerator(
     const YAML::Node& global_cfg,
     const YAML::Node& data_gen_cfg, const YAML::Node& mcts_cfg, const YAML::Node& sel_cfg, const YAML::Node& model_cfg,
@@ -51,8 +50,9 @@ DataGenerator::DataGenerator(
     selector_config.minimax_win_target = mcts_cfg["minimax_win_target"].as<double>();
     selector_config.minimax_loss_target = mcts_cfg["minimax_loss_target"].as<double>();
     selector_config.temperature_ply_cutoff = sel_cfg["temperature_ply_cutoff"].as<int>();
-    selector_config.temperature_top_move = sel_cfg["temperature_top_move"].as<double>();
-    selector_config.temperature_blunder_threshold = sel_cfg["temperature_blunder_threshold"].as<double>();
+    selector_config.top_move_probability = sel_cfg["top_move_probability"].as<double>();
+    selector_config.temperature_blunder_q_threshold = sel_cfg["temperature_blunder_q_threshold"].as<double>();
+    selector_config.temperature_blunder_noise_weight = sel_cfg["temperature_blunder_noise_weight"].as<double>();
     selector_config.draw_cutoff = sel_cfg["draw_cutoff"].as<double>();
     selector_config.resignation_probability = sel_cfg["resignation_probability"].as<double>();
     selector_config.resignation_cutoff = sel_cfg["resignation_cutoff"].as<double>();
@@ -147,9 +147,15 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
         double final_game_value = 0.0;
         double game_entropy_sum = 0.0;
         std::string pgn_result = "*";
+        
         std::vector<GameTransition> raw_training_data;
+        raw_training_data.reserve(config.max_ply_length); // FIX: Pre-allocate capacity to stop heap shredding
+
         std::vector<chess::Board> history; 
         int total_input_size = model_config.input_planes * model_config.board_dim * model_config.board_dim;
+
+        // FIX: Hoist mask allocation outside the simulation loop
+        std::unique_ptr<bool[]> temp_mask(new bool[model_config.policy_moves]);
 
         while (!game_over && !stop_event.load()) {
             chess::Color current_turn = board.sideToMove();
@@ -204,12 +210,11 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
             transition.turn = current_turn;
             transition.move = move_result.best_move;
             transition.board_state.resize(total_input_size, 0);
-            transition.policy = targets.policy_vector; // Passed from TargetGenerator
+            transition.policy = targets.policy_vector;
             
             board_to_tensor_69(board, history, transition.board_state.data());
             
-            std::unique_ptr<bool[]> temp_mask(new bool[model_config.policy_moves]);
-            get_legal_move_mask(board, temp_mask.get());
+            get_legal_move_mask(board, temp_mask.get()); // FIX: Use pre-allocated mask memory
             transition.legal_mask.clear();
             for(int i = 0; i < model_config.policy_moves; ++i) transition.legal_mask.push_back(temp_mask[i] ? 1 : 0);
             

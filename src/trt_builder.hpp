@@ -22,9 +22,17 @@ public:
         std::vector<uint8_t> serialized_data;
     };
 
+    // Full engine build (slow, ~60s+)
     static std::unique_ptr<EngineResult> build_engine(
         const std::string& onnx_path, 
         int max_batch_size, 
+        Logger& logger
+    );
+
+    // In-place refit of an existing engine (fast, ~100ms)
+    static bool refit_engine_inplace(
+        nvinfer1::ICudaEngine* engine,
+        const std::string& onnx_path,
         Logger& logger
     );
 

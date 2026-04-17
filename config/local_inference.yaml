@@ -8,10 +8,11 @@ evaluation:
   main_cores: [3]                                    # Dedicated CPU cores for the main C++ orchestrator
   game_worker_cores: [5, 6, 7, 8, 9, 10, 11, 12]
   workers_per_core: 4                                # Number of game workers to pin to each core
+  input_amax: 1.0
 
 inference:
   inference_worker_cores: [13, 14, 15]               # Dedicated CPU cores for the Batching Process
-  batch_size: 128                                    # Max batch size during inference
+  batch_size: 64                                     # Max batch size during inference
   batch_size_factor: 8                               # Multiplier for batch size to determine max slots
   batch_timeout_ms: 10                               # How long the GPU batcher waits
   logging_interval_sec: 60
@@ -29,9 +30,10 @@ mcts:
   logging_level: 20                                  # Logging level for MCTS Search and Action Selection
   
 selection:
-  temperature_ply_cutoff: 0                          # 0 for competitive play (always greedy)
-  temperature_top_move: 1.0                          # Probability the top move is played
-  temperature_blunder_threshold: 0.0
+  temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
+  top_move_probability: 0.5                          # Probability the top move is played
+  temperature_blunder_q_threshold: 0.3               # Absolute Q value [-1, 1] threshold
+  temperature_blunder_noise_weight: 0.045
   draw_cutoff: -0.25                                 # Value threshold to consider a game a draw
-  resignation_probability: 0.0                       # 0.0 disables resignation for pure inference
-  resignation_cutoff: -1.0
+  resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
+  resignation_cutoff: -0.90                          # Value head cutoff for resignation

@@ -21,8 +21,9 @@ struct ActionSelectorConfig {
     double minimax_win_target;
     double minimax_loss_target;
     int temperature_ply_cutoff;
-    double temperature_blunder_threshold;
-    double temperature_top_move;
+    double temperature_blunder_q_threshold;
+    double temperature_blunder_noise_weight;
+    double top_move_probability;
     
     double resignation_probability;
     double resignation_cutoff;

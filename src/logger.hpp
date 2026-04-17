@@ -37,6 +37,10 @@ public:
         if (log_file.is_open()) log_file.close();
     }
 
+    int get_level() const {
+        return min_log_level;
+    }
+
     void rotate(int global_step, int rotation_interval) {
         // FLAT DIRECTORY BYPASS: If rotation is <= 0, drop directly into rl_dir
         if (rotation_interval <= 0) {
