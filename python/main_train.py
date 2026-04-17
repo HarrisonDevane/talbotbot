@@ -63,11 +63,6 @@ class RLOrchestrator:
         self.total_hours_accumulator = self.state_config['lifetime']['hours_training'] 
         
         self.total_steps = self.params_config['global']['total_training_steps']
-        self.save_interval = self.params_config['global']['backup_interval_steps']
-
-        self.last_backup_step = (self.current_step // self.save_interval) * self.save_interval
-
-        self.build_interval = self.params_config['global']['build_interval_steps']
 
         rotation_interval = self.params_config['global']['logging_rotation_steps']
         target_folder_step = (self.current_step // rotation_interval) * rotation_interval
@@ -115,6 +110,25 @@ class RLOrchestrator:
             if blob:
                 return struct.unpack('Q', blob)[0]
             return None
+        
+    def _calculate_next_build_step(self, current_target_step):
+        min_build = self.params_config['global']['min_build_steps']
+        max_build = self.params_config['global']['max_build_steps']
+        ramp_steps = self.params_config['global']['build_ramp_steps']
+        
+        if current_target_step >= ramp_steps:
+            return ((current_target_step // max_build) + 1) * max_build
+
+        simulated_step = 0
+        while simulated_step <= current_target_step:
+            progress = min(1.0, simulated_step / ramp_steps)
+            interval = int(min_build + (max_build - min_build) * progress)
+            simulated_step += interval
+            
+            if simulated_step >= ramp_steps:
+                simulated_step = ((simulated_step // max_build) + 1) * max_build
+                
+        return simulated_step
 
     def _wait_for_trt_engine(self):
         target_step = self._get_lmdb_signal(b"__TRT_EXPORT_SIGNAL")
@@ -309,7 +323,7 @@ class RLOrchestrator:
                 self.current_step += 1
                 self.state_config['lifetime']['training_steps'] = self.current_step
 
-                if self.current_step % self.build_interval == 0:
+                if self.current_step >= self.next_build_step:
                     self.train_task.save_checkpoint(self.model_pth)
                     
                     self.train_task.cleanup()
@@ -321,13 +335,20 @@ class RLOrchestrator:
                     self._export_to_cpp(self.current_step)
                     self._wait_for_trt_engine()
                     
-                    if (self.current_step - self.last_backup_step) >= self.save_interval:
-                        model_backup_path = os.path.join(RL_DIR, 'models', f'step_{self.current_step:06d}_model.pth')
-                        shutil.copy(self.model_pth, model_backup_path)
-                        shutil.copy(RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_step:06d}_config.yaml'))
-                        self.logger.info(f"Accurate periodic backup saved at exact build step {self.current_step}.")
-                        self.last_backup_step = self.current_step
-                                        
+                    # Store backup and state accurately corresponding to the build step
+                    model_backup_path = os.path.join(RL_DIR, 'models', f'step_{self.current_step:06d}_model.pth')
+                    shutil.copy(self.model_pth, model_backup_path)
+                    shutil.copy(RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_step:06d}_config.yaml'))
+                    self.logger.info(f"Accurate periodic backup saved at exact build step {self.current_step}.")
+
+                    backup_dir = os.path.join(RL_DIR, 'backup')
+                    os.makedirs(backup_dir, exist_ok=True)
+                    model_backup_path = os.path.join(backup_dir, f'step_{self.current_step:06d}_model.pth')
+                    shutil.copy(self.model_pth, model_backup_path)
+                    shutil.copy(RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_step:06d}_config.yaml'))
+                    self.logger.info(f"Periodic backup saved at step {self.current_step}.")
+
+                                    
                     self.logger.info("Reinitializing PyTorch TrainTask...")
                     self.train_task = TrainTask(
                         model_path=self.model_pth,
@@ -338,6 +359,8 @@ class RLOrchestrator:
                         env=self.env,
                         db_path=self.buffer_file_path
                     )
+                    
+                    self.next_build_step = self._calculate_next_build_step(self.current_step)
 
                 total_time = time.time() - step_start_time
 

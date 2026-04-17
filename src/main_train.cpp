@@ -191,10 +191,6 @@ int main(int argc, char* argv[]) {
     uint64_t last_handled_export_step = has_ready ? ready_signal : 0; 
     bool needs_initial_build = false;
 
-    // Track consecutive refit failures to trigger rebuild
-    int consecutive_refit_failures = 0;
-    const int MAX_REFIT_FAILURES_BEFORE_REBUILD = 3;
-
     if (has_export) {
         if (!has_ready || ready_signal < export_signal) {
             main_logger.log("INFO", "Export signal (" + std::to_string(export_signal) + 
@@ -206,7 +202,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (needs_initial_build) {
-        main_logger.log("INFO", "[BUILD] TensorRT is cooking (with kREFIT enabled). Terminal will be silent for ~60s...");
+        main_logger.log("INFO", "[BUILD] TensorRT is cooking. Terminal will be silent for ~60s...");
         auto result = TRTBuilder::build_engine(onnx_path, inference_batch_size, main_logger);
         if (result) {
             TRTBuilder::save_engine(*result, engine_path);
@@ -286,30 +282,19 @@ int main(int argc, char* argv[]) {
                 last_handled_export_step = exported_step;
                 trt_update_in_progress.store(true);
 
-                // Decide: refit (fast) or rebuild (slow)?
-                bool force_rebuild = (consecutive_refit_failures >= MAX_REFIT_FAILURES_BEFORE_REBUILD);
-                
-                if (force_rebuild) {
-                    main_logger.log("WARNING", "Too many consecutive refit failures (" + 
-                                    std::to_string(consecutive_refit_failures) + 
-                                    "). Forcing full engine rebuild...");
-                } else {
-                    main_logger.log("INFO", "ONNX export signal received for step " + 
-                                    std::to_string(exported_step) + ". Attempting in-place REFIT...");
-                }
+                main_logger.log("INFO", "ONNX export signal received for step " + 
+                                std::to_string(exported_step) + ". Initiating full engine rebuild...");
 
                 // Capture values for the background thread
                 uint64_t step_for_update = exported_step;
-                bool do_rebuild = force_rebuild;
 
                 std::thread([&batcher, &main_logger, onnx_path, engine_path, inference_batch_size, 
-                             lmdb_env, shared_dbi, step_for_update, do_rebuild,
-                             &consecutive_refit_failures]() {
+                             lmdb_env, shared_dbi, step_for_update]() {
                     
                     auto start_time = std::chrono::steady_clock::now();
                     
                     try {
-                        // 1. Request pause and wait for pipeline drain
+                        // Request pause and wait for pipeline drain
                         main_logger.log("INFO", "Initiating Synchronous Pipeline Drain...");
                         batcher.request_pause();
                         
@@ -324,84 +309,32 @@ int main(int argc, char* argv[]) {
                         }
                         
                         main_logger.log("INFO", "Pipeline drained.");
-
-                        bool update_success = false;
-
-                        if (!do_rebuild) {
-                            // ========================================
-                            // FAST PATH: In-place refit (~100ms)
-                            // ========================================
-                            main_logger.log("INFO", "Executing in-place REFIT...");
+                        main_logger.log("INFO", "Executing FULL ENGINE REBUILD (this will take ~60s)...");
                             
-                            // Signal the batcher to do the refit on its own thread
-                            batcher.request_refit(onnx_path, static_cast<int>(step_for_update));
+                        auto result = TRTBuilder::build_engine(onnx_path, inference_batch_size, main_logger);
+                        
+                        if (result) {
+                            // Signal hot-swap with new engine data
+                            batcher.signal_trt_reload(result->serialized_data, static_cast<int>(step_for_update));
                             
-                            // Wait for refit to complete (batcher will clear is_paused)
+                            // Wait for swap to complete
                             while (batcher.is_fully_paused() && !global_stop_event.load()) {
                                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                             }
                             
-                            update_success = batcher.last_refit_success.load();
+                            // Save to disk for future restarts
+                            TRTBuilder::save_engine(*result, engine_path);
                             
-                            if (update_success) {
-                                consecutive_refit_failures = 0;
-                                double duration = std::chrono::duration<double, std::milli>(
-                                    std::chrono::steady_clock::now() - start_time
-                                ).count();
-                                main_logger.log("INFO", "REFIT completed successfully in " + 
-                                                std::to_string(duration) + "ms");
-                            } else {
-                                consecutive_refit_failures++;
-                                main_logger.log("WARNING", "REFIT failed. Consecutive failures: " + 
-                                                std::to_string(consecutive_refit_failures));
-                            }
-                        }
-                        
-                        if (do_rebuild || !update_success) {
-                            // ========================================
-                            // SLOW PATH: Full engine rebuild (~60s+)
-                            // ========================================
-                            main_logger.log("INFO", "Executing FULL ENGINE REBUILD (this will take ~60s)...");
-                            
-                            // Make sure we're paused again if refit failed
-                            if (!batcher.is_fully_paused()) {
-                                batcher.request_pause();
-                                while (!batcher.is_fully_paused() && !global_stop_event.load()) {
-                                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                                }
-                            }
-                            
-                            auto result = TRTBuilder::build_engine(onnx_path, inference_batch_size, main_logger);
-                            
-                            if (result) {
-                                // Signal hot-swap with new engine data
-                                batcher.signal_trt_reload(result->serialized_data, static_cast<int>(step_for_update));
-                                
-                                // Wait for swap to complete
-                                while (batcher.is_fully_paused() && !global_stop_event.load()) {
-                                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                                }
-                                
-                                // Save to disk for future restarts
-                                TRTBuilder::save_engine(*result, engine_path);
-                                
-                                consecutive_refit_failures = 0;  // Reset on successful rebuild
-                                update_success = true;
-                                
-                                double duration = std::chrono::duration<double>(
-                                    std::chrono::steady_clock::now() - start_time
-                                ).count();
-                                main_logger.log("INFO", "Full rebuild completed in " + 
-                                                std::to_string(duration) + " seconds.");
-                            } else {
-                                main_logger.log("CRITICAL", "Full rebuild FAILED. Resuming with old engine.");
-                                batcher.cancel_pause();
-                            }
-                        }
-                        
-                        // Write ready signal on any success
-                        if (update_success) {
+                            double duration = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - start_time
+                            ).count();
+                            main_logger.log("INFO", "Full rebuild completed in " + 
+                                            std::to_string(duration) + " seconds.");
+
                             write_lmdb_signal(lmdb_env, shared_dbi, "__TRT_ENGINE_READY", step_for_update);
+                        } else {
+                            main_logger.log("CRITICAL", "Full rebuild FAILED. Resuming with old engine.");
+                            batcher.cancel_pause();
                         }
                         
                     } catch (const std::exception& e) {

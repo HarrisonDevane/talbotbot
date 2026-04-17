@@ -49,65 +49,6 @@ std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::st
     return result;
 }
 
-bool TRTBuilder::refit_engine_inplace(
-    nvinfer1::ICudaEngine* engine,
-    const std::string& onnx_path,
-    Logger& logger
-) {
-    if (!engine) {
-        logger.log("ERROR", "TensorRT Refit: Null engine provided");
-        return false;
-    }
-
-    // Create refitter for the live engine
-    auto refitter = std::unique_ptr<nvinfer1::IRefitter>(nvinfer1::createInferRefitter(*engine, gTRTLogger));
-    if (!refitter) {
-        logger.log("ERROR", "TensorRT Refit: Failed to create refitter (engine may not have kREFIT flag)");
-        return false;
-    }
-
-    // Create parser refitter to load weights directly from ONNX
-    auto parser_refitter = std::unique_ptr<nvonnxparser::IParserRefitter>(
-        nvonnxparser::createParserRefitter(*refitter, gTRTLogger)
-    );
-    if (!parser_refitter) {
-        logger.log("ERROR", "TensorRT Refit: Failed to create parser refitter");
-        return false;
-    }
-
-    // Load new weights from ONNX file
-    logger.log("INFO", "TensorRT Refit: Loading weights from ONNX...");
-    if (!parser_refitter->refitFromFile(onnx_path.c_str())) {
-        logger.log("ERROR", "TensorRT Refit: Failed to parse weights from ONNX file");
-        return false;
-    }
-
-    // Check for missing weights
-    int32_t num_missing = refitter->getMissingWeights(0, nullptr);
-    if (num_missing > 0) {
-        std::vector<const char*> missing_names(num_missing);
-        refitter->getMissingWeights(num_missing, missing_names.data());
-        logger.log("WARNING", "TensorRT Refit: " + std::to_string(num_missing) + " weights still missing after ONNX parse:");
-        for (int i = 0; i < std::min(num_missing, 5); ++i) {
-            logger.log("WARNING", "  - " + std::string(missing_names[i]));
-        }
-        if (num_missing > 5) {
-            logger.log("WARNING", "  ... and " + std::to_string(num_missing - 5) + " more");
-        }
-        return false;
-    }
-
-    // Execute the refit
-    logger.log("INFO", "TensorRT Refit: Applying weights to engine...");
-    if (!refitter->refitCudaEngine()) {
-        logger.log("ERROR", "TensorRT Refit: refitCudaEngine() failed");
-        return false;
-    }
-
-    logger.log("INFO", "TensorRT Refit: Success");
-    return true;
-}
-
 void TRTBuilder::save_engine(const EngineResult& result, const std::string& engine_path) {
     std::ofstream outfile(engine_path, std::ios::binary);
     outfile.write(reinterpret_cast<const char*>(result.serialized_data.data()), result.serialized_data.size());
