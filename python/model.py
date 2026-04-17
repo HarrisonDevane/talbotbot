@@ -3,33 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple
 
-class BottleneckBlock(nn.Module):
-    """
-    Reduces channel depth for the 3x3 convolution to save FLOPs, 
-    then expands back to the original filter count.
-    """
-    def __init__(self, num_channels: int, bottleneck_channels: int):
-        super().__init__()
-        # 1x1 Squeeze
-        self.conv1 = nn.Conv2d(num_channels, bottleneck_channels, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(bottleneck_channels)
-        
-        # 3x3 Spatial Processing
-        self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(bottleneck_channels)
-        
-        # 1x1 Expand
-        self.conv3 = nn.Conv2d(bottleneck_channels, num_channels, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(num_channels)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = x
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = F.relu(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))
-        out += identity
-        return F.relu(out)
-
 class GlobalBroadcastingBlock(nn.Module):
     """
     Squeeze-and-Excitation: Pools the board into a global vector 
@@ -51,6 +24,41 @@ class GlobalBroadcastingBlock(nn.Module):
         y = self.fc(y).view(b, c, 1, 1)
         return x * y  # Multiplicative gating
 
+class BottleneckBlock(nn.Module):
+    """
+    Reduces channel depth for the 3x3 convolution to save FLOPs, 
+    then expands back to the original filter count.
+    Optionally applies Squeeze-and-Excitation on the residual branch
+    before the skip connection addition.
+    """
+    def __init__(self, num_channels: int, bottleneck_channels: int, 
+                 use_se: bool = False, se_reduction_ratio: int = 4):
+        super().__init__()
+        # 1x1 Squeeze
+        self.conv1 = nn.Conv2d(num_channels, bottleneck_channels, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(bottleneck_channels)
+        
+        # 3x3 Spatial Processing
+        self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(bottleneck_channels)
+        
+        # 1x1 Expand
+        self.conv3 = nn.Conv2d(bottleneck_channels, num_channels, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(num_channels)
+
+        # SE applied to the residual branch at full channel width
+        self.se = GlobalBroadcastingBlock(num_channels, se_reduction_ratio) if use_se else None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = F.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        if self.se is not None:
+            out = self.se(out)
+        out += identity
+        return F.relu(out)
+
 class ChessAIModel(nn.Module):
     def __init__(self, config: dict):
         super().__init__()
@@ -69,11 +77,16 @@ class ChessAIModel(nn.Module):
         # --- Residual Backbone ---
         res_blocks = []
         for i in range(m_cfg['resblocks']):
-            # Swap standard blocks for SE blocks based on interval
-            if m_cfg['broadcast_interval'] > 0 and (i + 1) % m_cfg['broadcast_interval'] == 0:
-                res_blocks.append(GlobalBroadcastingBlock(self.num_filters, m_cfg['broadcast_reduction_ratio']))
-            else:
-                res_blocks.append(BottleneckBlock(self.num_filters, m_cfg['bottleneck_channels']))
+            use_se = (m_cfg['broadcast_interval'] > 0 
+                      and (i + 1) % m_cfg['broadcast_interval'] == 0)
+            res_blocks.append(
+                BottleneckBlock(
+                    self.num_filters, 
+                    m_cfg['bottleneck_channels'],
+                    use_se=use_se,
+                    se_reduction_ratio=m_cfg['broadcast_reduction_ratio']
+                )
+            )
         
         self.residual_blocks = nn.ModuleList(res_blocks)
 
@@ -120,7 +133,7 @@ def fuse_bn_for_export(model: ChessAIModel) -> ChessAIModel:
         scale = bn_weight / torch.sqrt(bn_var + bn_eps)
         conv.weight.data *= scale[:, None, None, None]
         if conv.bias is None:
-            conv.bias = nn.Parameter(torch.zeros(conv.out_channels))
+            conv.bias = nn.Parameter(torch.zeros(conv.out_channels, device=conv.weight.device, dtype=conv.weight.dtype))
         conv.bias.data = (conv.bias.data - bn_mean) * scale + bn_bias
         return conv
 
@@ -128,7 +141,7 @@ def fuse_bn_for_export(model: ChessAIModel) -> ChessAIModel:
     model.initial_conv = fuse_conv_bn(model.initial_conv, model.initial_bn)
     model.initial_bn = nn.Identity()
 
-    # Fuse inside each BottleneckBlock
+    # Fuse inside each BottleneckBlock (SE has no BN, so no changes needed there)
     for block in model.residual_blocks:
         if isinstance(block, BottleneckBlock):
             block.conv1 = fuse_conv_bn(block.conv1, block.bn1)
