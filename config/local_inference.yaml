@@ -30,10 +30,10 @@ mcts:
   logging_level: 20                                  # Logging level for MCTS Search and Action Selection
   
 selection:
-  temperature_ply_cutoff: 30                         # Sample proportional to visit count for first moves
-  top_move_probability: 0.5                          # Probability the top move is played
-  temperature_blunder_q_threshold: 0.3               # Absolute Q value [-1, 1] threshold
-  temperature_blunder_noise_weight: 0.045
+  temperature_ply_cutoff: 6                          # Sample proportional to visit count for first moves
+  top_move_probability: 0.3                          # Probability the top move is played
+  temperature_blunder_q_threshold: 0.1               # Absolute Q value [-1, 1] threshold
+  temperature_blunder_noise_weight: 0
   draw_cutoff: -0.25                                 # Value threshold to consider a game a draw
-  resignation_probability: 0.9                       # Chance the bot checks for resignation allowed
-  resignation_cutoff: -0.90                          # Value head cutoff for resignation
+  resignation_probability: 0.0                       # Chance the bot checks for resignation allowed
+  resignation_cutoff: 0.0                            # Value head cutoff for resignation

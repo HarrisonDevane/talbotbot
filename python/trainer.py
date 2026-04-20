@@ -16,6 +16,7 @@ import psutil
 import struct
 import traceback
 import threading
+import ctypes
 
 from model import ChessAIModel
 
@@ -77,9 +78,13 @@ class AsyncBatchPrefetcher:
         try:
             psutil.Process().cpu_affinity(self.core_ids)
 
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetCurrentProcess()
+            kernel32.SetProcessWorkingSetSize(handle, ctypes.c_size_t(4 * 1024 * 1024 * 1024), ctypes.c_size_t(8 * 1024 * 1024 * 1024))
+
             env = lmdb.open(
                 self.db_path, 
-                map_size=1024 * 1024 * 1024 * 128,
+                map_size=1024 * 1024 * 1024 * 16,
                 readonly=True, 
                 lock=False, 
                 readahead=False
@@ -103,6 +108,11 @@ class AsyncBatchPrefetcher:
             setup_or_rotate_logger(0)
             logger.info("Core affinity set successfully. Connected to LMDB.")
 
+            b_arr = np.empty((self.batch_size, self.input_planes, self.board_dim, self.board_dim), dtype=np.float32)
+            p_arr = np.empty((self.batch_size, self.policy_moves), dtype=np.float32)
+            v_arr = np.empty(self.batch_size, dtype=np.float16)
+            m_arr = np.empty((self.batch_size, self.policy_moves), dtype=np.bool_)
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.prefetch_workers) as executor:
                 while True:
                     # Wait for the PyTorch thread to finish with a buffer
@@ -114,7 +124,7 @@ class AsyncBatchPrefetcher:
 
                         if not cpp_blob or not py_blob:
                             time.sleep(1)
-                            self.free_queue.put(slot) # Put it back if we skip
+                            self.free_queue.put(slot)
                             continue
 
                         actual_count  = struct.unpack('QQdQQQ', cpp_blob)[3]
@@ -134,10 +144,7 @@ class AsyncBatchPrefetcher:
 
                     t_fetch = (time.perf_counter() - t_start) * 1000
 
-                    b_arr = np.empty((self.batch_size, self.input_planes, self.board_dim, self.board_dim), dtype=np.float32)
-                    p_arr = np.zeros((self.batch_size, self.policy_moves), dtype=np.float32)
-                    v_arr = np.empty(self.batch_size, dtype=np.float16)
-                    m_arr = np.empty((self.batch_size, self.policy_moves), dtype=np.bool_)
+                    p_arr.fill(0.0)
 
                     valid_idx = 0
                     for buf in results:
@@ -174,7 +181,6 @@ class AsyncBatchPrefetcher:
 
                     logger.debug(f"Assembled batch of {valid_idx}. Fetch: {t_fetch:.1f}ms | Unpack: {t_unpack:.1f}ms. Pushing slot {slot} to queue...")
 
-                    # Send the integer index instead of the massive tensors
                     self.ready_queue.put(slot)
 
         except Exception as e:
@@ -182,7 +188,6 @@ class AsyncBatchPrefetcher:
                 logger.critical(f"FATAL PREFETCHER ERROR: {str(e)}")
                 logger.critical(traceback.format_exc())
             raise
-
 
 class TrainTask:
     def __init__(self, model_path: str, model_config: dict, training_config: dict,

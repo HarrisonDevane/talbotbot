@@ -183,7 +183,7 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
             );
 
             // 3. Select Action
-            SelectionResult move_result = agent.select_move(mcts.root, root_v_mix, ply_count);
+            SelectionResult move_result = agent.select_move(mcts.root, ply_count);
 
             auto move_end_time = std::chrono::high_resolution_clock::now();
             double total_move_time = std::chrono::duration<double>(move_end_time - move_start_time).count();
@@ -255,6 +255,10 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
         game.final_game_value = final_game_value;
         game.local_step = local_step_cache;
         game.game_entropy_sum = game_entropy_sum;
+
+        while (completed_games_queue.size() >= 200 && !stop_event.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
 
         completed_games_queue.push(std::move(game));
     }

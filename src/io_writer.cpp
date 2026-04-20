@@ -44,20 +44,20 @@ size_t IOWriter::get_dynamic_buffer_limit(int current_step) {
     return min_buffer_size + static_cast<size_t>(progress * growth_range);
 }
 
-std::vector<uint8_t> IOWriter::pack_bits(const std::vector<c10::Half>& data) {
-    std::vector<uint8_t> out((data.size() + 7) / 8, 0);
+void IOWriter::pack_bits_into(const std::vector<c10::Half>& data, std::vector<uint8_t>& out) {
+    size_t required_size = (data.size() + 7) / 8;
+    out.assign(required_size, 0); // Assign clears and resizes, reusing capacity
     for (size_t i = 0; i < data.size(); ++i) {
         if (data[i] > 0.0f) out[i / 8] |= (1 << (7 - (i % 8)));
     }
-    return out;
 }
 
-std::vector<uint8_t> IOWriter::pack_bits_bool(const uint8_t* data, size_t size) {
-    std::vector<uint8_t> out((size + 7) / 8, 0);
+void IOWriter::pack_bits_bool_into(const uint8_t* data, size_t size, std::vector<uint8_t>& out) {
+    size_t required_size = (size + 7) / 8;
+    out.assign(required_size, 0);
     for (size_t i = 0; i < size; ++i) {
         if (data[i]) out[i / 8] |= (1 << (7 - (i % 8)));
     }
-    return out;
 }
 
 void IOWriter::run() {
@@ -82,6 +82,21 @@ void IOWriter::run() {
 
     logger.log("INFO", "=== IO WRITER STARTED ===");
 
+    // PRE-ALLOCATE ALL VECTORS OUTSIDE THE LOOP
+    std::vector<uint8_t> p_board;
+    std::vector<uint8_t> p_mask;
+    std::vector<uint16_t> indices;
+    std::vector<uint16_t> values_fp16;
+    std::vector<uint8_t> raw_payload;
+    std::vector<uint8_t> compressed_buf;
+
+    p_board.reserve(1024);
+    p_mask.reserve(128);
+    indices.reserve(128);
+    values_fp16.reserve(128);
+    raw_payload.reserve(2048);
+    compressed_buf.reserve(2048);
+
     while (!stop_event.load()) {
         CompletedGame game;
         if (completed_games_queue.try_pop(game)) {
@@ -93,10 +108,8 @@ void IOWriter::run() {
                 uint64_t local_step = current_step.load(std::memory_order_relaxed);
                 logger.rotate(local_step, rotation_interval);
 
-                // --- CRITICAL FIX: Begin the write transaction for this flush ---
                 MDB_txn* txn;
                 mdb_txn_begin(lmdb_env, nullptr, 0, &txn);
-                // ----------------------------------------------------------------
 
                 size_t dynamic_max = get_dynamic_buffer_limit(local_step);
                 size_t current_head = write_head.load(std::memory_order_relaxed);
@@ -113,11 +126,15 @@ void IOWriter::run() {
                     for (size_t i = 0; i < chunk_size; ++i) {
                         const auto& transition = g.transitions[current_game_transition_idx + i];
                         double value_target = (transition.turn == chess::Color::WHITE) ? g.final_game_value : -g.final_game_value;
-                        std::vector<uint8_t> p_board = pack_bits(transition.board_state);
-                        std::vector<uint8_t> p_mask = pack_bits_bool(transition.legal_mask.data(), model_config.policy_moves); 
+                        
+                        // Clear dynamic arrays (preserves capacity)
+                        indices.clear();
+                        values_fp16.clear();
+                        raw_payload.clear();
 
-                        std::vector<uint16_t> indices;
-                        std::vector<uint16_t> values_fp16; 
+                        pack_bits_into(transition.board_state, p_board);
+                        pack_bits_bool_into(transition.legal_mask.data(), model_config.policy_moves, p_mask); 
+
                         for (uint16_t j = 0; j < model_config.policy_moves; ++j) {
                             if (transition.policy[j] > 0.0f) {
                                 indices.push_back(j);
@@ -128,7 +145,6 @@ void IOWriter::run() {
                         uint16_t num_moves = indices.size();
                         uint16_t target_fp16 = c10::Half(value_target).x;
 
-                        std::vector<uint8_t> raw_payload;
                         auto append_bytes = [&raw_payload](const void* src, size_t size) {
                             const uint8_t* bytes = static_cast<const uint8_t*>(src);
                             raw_payload.insert(raw_payload.end(), bytes, bytes + size);
@@ -142,8 +158,11 @@ void IOWriter::run() {
                         append_bytes(&target_fp16, sizeof(target_fp16));
 
                         size_t max_dst_size = ZSTD_compressBound(raw_payload.size());
-                        std::vector<uint8_t> compressed_buf(max_dst_size);
-                        size_t compressed_size = ZSTD_compress(compressed_buf.data(), max_dst_size, raw_payload.data(), raw_payload.size(), 1);
+                        if (compressed_buf.size() < max_dst_size) {
+                            compressed_buf.resize(max_dst_size);
+                        }
+
+                        size_t compressed_size = ZSTD_compress(compressed_buf.data(), compressed_buf.size(), raw_payload.data(), raw_payload.size(), 1);
                         if (ZSTD_isError(compressed_size)) continue; 
                         
                         std::string key_str = std::to_string(current_head);
@@ -156,7 +175,6 @@ void IOWriter::run() {
                             current_cnt = current_head + 1;
                         }
 
-                        // 2. Advance head and detect wraps
                         size_t next_head = (current_head + 1) % dynamic_max;
                         if (next_head == 0) {
                             current_wraps++;
@@ -167,7 +185,6 @@ void IOWriter::run() {
                     current_game_transition_idx += chunk_size;
                     samples_to_write -= chunk_size;
 
-                    // If the entire game is consumed, advance queue
                     if (current_game_transition_idx == g.transitions.size()) {
                         uncommitted_games++;
                         uncommitted_entropy += g.game_entropy_sum;
@@ -183,7 +200,6 @@ void IOWriter::run() {
                 double raw_entropy = lifetime_entropy + uncommitted_entropy;
                 lifetime_entropy = std::round(raw_entropy * 100.0) / 100.0;
 
-                // Reset trackers for next batch of full games
                 uncommitted_games = 0;
                 uncommitted_entropy = 0.0;
 
@@ -206,17 +222,19 @@ void IOWriter::run() {
 
                 if (sync_counter >= 100000) { 
                     logger.log("INFO", "Moving " + std::to_string(sync_counter) + " positions to SSD");
-
                     mdb_env_sync(lmdb_env, 0); 
                     sync_counter = 0;
-}
+                }
 
                 write_head.store(current_head, std::memory_order_relaxed);
                 buffer_count.store(current_cnt, std::memory_order_relaxed);
                 buffer_wraps.store(current_wraps, std::memory_order_relaxed);
 
                 logger.log("INFO", "Successfully flushed exactly " + std::to_string(flush_threshold) + " samples. LMDB Count: " + std::to_string(current_cnt));
-                logger.log("INFO", "Positions currently buffered awaiting next flush: " + std::to_string(current_buffered_samples));            
+                
+                size_t actual_queue_backlog = completed_games_queue.size();
+                logger.log("INFO", "Positions currently buffered awaiting next flush: " + std::to_string(current_buffered_samples) + 
+                                   " | Main Queue Backlog: " + std::to_string(actual_queue_backlog) + " games");            
             }
         }
     }

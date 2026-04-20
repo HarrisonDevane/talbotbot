@@ -97,6 +97,9 @@ int main(int argc, char* argv[]) {
         mainMask |= (static_cast<DWORD_PTR>(1) << core.as<int>());
     }
     SetThreadAffinityMask(GetCurrentThread(), mainMask);
+    SetProcessWorkingSetSize(GetCurrentProcess(),
+    (SIZE_T)8ULL * 1024 * 1024 * 1024,
+    (SIZE_T)16ULL * 1024 * 1024 * 1024);
     
     const double sampling_ratio = config["training"]["sampling_ratio"].as<double>();
     const size_t batch_size = config["training"]["batch_size"].as<size_t>();
@@ -108,7 +111,7 @@ int main(int argc, char* argv[]) {
             
     mdb_env_create(&lmdb_env);
     mdb_env_set_mapsize(lmdb_env, (size_t)1024 * 1024 * 1024 * 128); 
-    mdb_env_open(lmdb_env, db_path.c_str(), MDB_NOSYNC | MDB_NOTLS | MDB_WRITEMAP | MDB_MAPASYNC, 0664);
+    mdb_env_open(lmdb_env, db_path.c_str(), MDB_NOSYNC | MDB_NOTLS, 0664);
 
     MDB_dbi shared_dbi;
     MDB_txn* init_txn;
@@ -227,7 +230,7 @@ int main(int argc, char* argv[]) {
     main_logger.log("INFO", "[MAIN] Initializing Batcher...");
     InferenceBatcher batcher(
         model_path, inference_batch_size, batch_timeout, num_workers, 
-        rl_dir, batcher_log_level, batcher_cores, rot_interval, current_step.load(), log_interval_sec
+        rl_dir, batcher_log_level, batcher_cores, rot_interval, current_step, log_interval_sec
     );
 
     std::thread batcher_thread([&]() {

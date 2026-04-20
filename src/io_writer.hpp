@@ -88,6 +88,6 @@ private:
     void run();
     size_t get_dynamic_buffer_limit(int current_step);
     
-    std::vector<uint8_t> pack_bits(const std::vector<c10::Half>& data); 
-    std::vector<uint8_t> pack_bits_bool(const uint8_t* data, size_t size);
+    void pack_bits_into(const std::vector<c10::Half>& data, std::vector<uint8_t>& out); 
+    void pack_bits_bool_into(const uint8_t* data, size_t size, std::vector<uint8_t>& out);
 };

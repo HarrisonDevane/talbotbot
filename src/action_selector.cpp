@@ -20,7 +20,7 @@ void ActionSelector::reset_for_new_game() {
     logger.log("DEBUG", "Agent state reset. Resignation allowed: " + std::string(use_resignation ? "True" : "False"));
 }
 
-SelectionResult ActionSelector::select_move(MCTSNode* root, double root_v_mix, int ply_count) {
+SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
     SelectionResult result;
     
     int num_children = root->num_children;
@@ -42,6 +42,20 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, double root_v_mix, i
         }
     }
 
+    MCTSNode* top_node;
+    double best_q;
+
+    if (!non_forced_visited.empty()) {
+        std::sort(non_forced_visited.begin(), non_forced_visited.end(), [](MCTSNode* a, MCTSNode* b) {
+            if (a->visits != b->visits) return a->visits > b->visits;
+            return a->gumbel_score > b->gumbel_score;
+        });
+        MCTSNode* m1 = non_forced_visited[0];
+        MCTSNode* m2 = (non_forced_visited.size() > 1) ? non_forced_visited[1] : m1;
+        top_node = (m1->gumbel_score > m2->gumbel_score) ? m1 : m2;
+        best_q = -top_node->calculate_v_mix();
+    }
+
     // Rule A: Win
     if (!winning_nodes.empty()) {
         int min_dtm = 999999;
@@ -53,25 +67,14 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, double root_v_mix, i
         result.best_move = best_moves[dist(rng)];
 
     // Rule B: Draw
-    } else if (!draw_nodes.empty() && root_v_mix <= config.draw_cutoff) {
+    } else if (!draw_nodes.empty() && best_q <= config.draw_cutoff) {
         std::uniform_int_distribution<> dist(0, draw_nodes.size() - 1);
         result.best_move = draw_nodes[dist(rng)]->move;
 
     // Rule C: Temperature / Safe Moves
     } else if (!non_forced_visited.empty()) {
         if (ply_count <= config.temperature_ply_cutoff) {
-            std::sort(non_forced_visited.begin(), non_forced_visited.end(), [](MCTSNode* a, MCTSNode* b) {
-                if (a->visits != b->visits) return a->visits > b->visits;
-                return a->gumbel_score > b->gumbel_score;
-            });
 
-            MCTSNode* m1 = non_forced_visited[0];
-            MCTSNode* m2 = (non_forced_visited.size() > 1) ? non_forced_visited[1] : m1;
-            
-            // Pick the one with the higher score as top_node baseline
-            MCTSNode* top_node = (m1->gumbel_score > m2->gumbel_score) ? m1 : m2;
-
-            double best_q_val = -top_node->calculate_v_mix();
             std::vector<MCTSNode*> valid_nodes;
             
             double sum_other_visits = 0.0;
@@ -79,7 +82,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, double root_v_mix, i
 
             for (MCTSNode* node : non_forced_visited) {
                 // 1. Calculate the absolute Q-drop for this candidate
-                double q_drop = best_q_val - (-node->calculate_v_mix());
+                double q_drop = best_q - (-node->calculate_v_mix());
                 
                 // 2. Calculate the dynamic threshold using the candidate's noise
                 double dynamic_threshold = config.temperature_blunder_q_threshold + 
@@ -150,8 +153,8 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, double root_v_mix, i
         }
     }
 
-    if (use_resignation && root_v_mix < config.resignation_cutoff) {
-        logger.log("INFO", "Root Value (" + std::to_string(root_v_mix) + ") is below cutoff. Triggering Resignation.");
+    if (use_resignation && best_q < config.resignation_cutoff) {
+        logger.log("INFO", "Best Value (" + std::to_string(best_q) + ") is below cutoff. Triggering Resignation.");
         result.resigned = true;
         result.best_move = chess::Move::NO_MOVE;
     }

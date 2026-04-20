@@ -48,7 +48,7 @@ class RLOrchestrator:
 
         self.env = lmdb.open(
             self.buffer_file_path,
-            map_size=1024 * 1024 * 1024 * 128, 
+            map_size=1024 * 1024 * 1024 * 16, 
             readonly=False,
             lock=True,
             readahead=False,
@@ -378,6 +378,7 @@ class RLOrchestrator:
             self.logger.info("Shutting down C++ engine...")
             engine_process.terminate()
             engine_process.wait()
+            
 
     def _export_to_cpp(self, export_step):
         checkpoint = torch.load(self.model_pth, map_location='cpu', weights_only=True)

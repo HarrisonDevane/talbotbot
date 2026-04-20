@@ -16,7 +16,7 @@
 class InferenceBatcher {
 private:
     std::string model_path; 
-    std::string onnx_path;  // NEW: Store ONNX path for refit
+    std::string onnx_path;
     int batch_size;
     int timeout_ms;
     int num_workers;
@@ -26,7 +26,7 @@ private:
     std::vector<int> core_ids;
     
     int rotation_interval;
-    std::atomic<int> current_global_step;
+    std::atomic<uint64_t>& current_global_step;
     int logging_interval_sec;
 
     torch::Device device;
@@ -69,7 +69,7 @@ public:
     InferenceBatcher(
         const std::string& path, int b_size, int timeout, int workers, 
         const std::string& rl_dir, int log_level, const std::vector<int>& cores,
-        int rot_interval, int initial_step, int log_interval_sec
+        int rot_interval, std::atomic<uint64_t>& initial_step, int log_interval_sec
     );
 
     ~InferenceBatcher();

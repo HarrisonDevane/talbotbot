@@ -50,5 +50,5 @@ public:
     void reset_for_new_game();
     void set_name(const std::string& new_name) { name = new_name; }
 
-    SelectionResult select_move(MCTSNode* root, double root_v_mix, int ply_count);
+    SelectionResult select_move(MCTSNode* root, int ply_count);
 };

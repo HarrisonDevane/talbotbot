@@ -159,11 +159,12 @@ int main(int argc, char* argv[]) {
         batcher_cores.push_back(core.as<int>());
     }
 
+    std::atomic<uint64_t> dummy_step{0};
+
     InferenceBatcher batcher(
         engine_path, inference_batch_size, inf_cfg["batch_timeout_ms"].as<int>(), num_workers, 
-        run_log_dir, inf_cfg["logging_level"].as<int>(), batcher_cores, 0, 0, inf_cfg["logging_interval_sec"].as<int>()
+        run_log_dir, inf_cfg["logging_level"].as<int>(), batcher_cores, 0, dummy_step, inf_cfg["logging_interval_sec"].as<int>()
     );
-
     std::thread batcher_thread([&]() {
         batcher.run(inference_queue, result_queues, shared_input_buffer, shared_policy_buffer, shared_value_buffer, global_stop_event, &buffer_free_slots);
     });
@@ -402,7 +403,7 @@ int main(int argc, char* argv[]) {
             search_logger.log("INFO", std::string(70, '-'));
             search_logger.log("INFO", ""); 
 
-            SelectionResult result = agent.select_move(agg_root, agg_v_mix, ply_count);
+            SelectionResult result = agent.select_move(agg_root, ply_count);
             
             std::string best_move_str = (result.best_move == chess::Move::NO_MOVE) ? "0000" : chess::uci::moveToUci(result.best_move);
             

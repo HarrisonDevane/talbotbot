@@ -30,7 +30,7 @@ struct PipelineJob {
 InferenceBatcher::InferenceBatcher(
     const std::string& path, int b_size, int timeout, int workers, 
     const std::string& r_dir, int log_level, const std::vector<int>& cores,
-    int rot_interval, int initial_step, int log_interval_sec
+    int rot_interval, std::atomic<uint64_t>& initial_step, int log_interval_sec
 ) : model_path(path), batch_size(b_size), timeout_ms(timeout), 
     num_workers(workers), rl_dir(r_dir), logging_level(log_level), core_ids(cores),
     rotation_interval(rot_interval), current_global_step(initial_step), 
@@ -424,10 +424,8 @@ void InferenceBatcher::run(
             trt_runtime = nvinfer1::createInferRuntime(gBatcherLogger);
             trt_engine = trt_runtime->deserializeCudaEngine(pending_engine_data.data(), pending_engine_data.size());
             
-            // --- FIX: CLEAR HOST RAM BUFFER AFTER DESERIALIZATION ---
             pending_engine_data.clear();
             pending_engine_data.shrink_to_fit();
-            // --------------------------------------------------------
 
             for (int i = 0; i < 3; ++i) {
                 trt_contexts[i] = trt_engine->createExecutionContext();
