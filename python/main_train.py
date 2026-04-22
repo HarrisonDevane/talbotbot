@@ -340,13 +340,6 @@ class RLOrchestrator:
                     model_backup_path = os.path.join(RL_DIR, 'models', f'step_{self.current_step:06d}_model.pth')
                     shutil.copy(self.model_pth, model_backup_path)
                     shutil.copy(RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_step:06d}_config.yaml'))
-                    self.logger.info(f"Accurate periodic backup saved at exact build step {self.current_step}.")
-
-                    backup_dir = os.path.join(RL_DIR, 'backup')
-                    os.makedirs(backup_dir, exist_ok=True)
-                    model_backup_path = os.path.join(backup_dir, f'step_{self.current_step:06d}_model.pth')
-                    shutil.copy(self.model_pth, model_backup_path)
-                    shutil.copy(RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_step:06d}_config.yaml'))
                     self.logger.info(f"Periodic backup saved at step {self.current_step}.")
 
                                     

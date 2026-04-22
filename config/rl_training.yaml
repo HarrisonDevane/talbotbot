@@ -1,5 +1,5 @@
 global:
-  total_training_steps: 80000                        # Total gradient updates to perform
+  total_training_steps: 10000                        # Total gradient updates to perform
   logging_rotation_steps: 1000                       # How often to make a new log folder
   min_buffer_size: 1024000                           # Minimum replay buffer size
   max_buffer_size: 24576000                          # Max buffer size
@@ -10,7 +10,7 @@ global:
   model_path: 'rl_dir/models/model'                  # Path to best model base name
 
 inference:
-  inference_worker_cores: [12, 13, 14]               # Dedicated CPU cores for the Batching Process (feeding the GPU)
+  inference_worker_cores: [8, 9, 10]               # Dedicated CPU cores for the Batching Process (feeding the GPU)
   batch_size: 512                                    # Max batch size during inference
   batch_size_factor: 12                              # Multiplier for batch size to determine max slots available in RAM
   batch_timeout_ms: 10                               # How long the GPU batcher waits for more data before running partial batch
@@ -18,9 +18,9 @@ inference:
   logging_level: 20
 
 data_generation:
-  data_generator_cores: [7]                          # Dedicated CPU cores for the main C++ orchestrator and data generator task
-  io_write_cores: [8]
-  game_worker_cores: [15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+  data_generator_cores: [3]                          # Dedicated CPU cores for the main C++ orchestrator and data generator task
+  io_write_cores: [4]
+  game_worker_cores: [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
   workers_per_core: 10                               # Number of game workers to pin to each core
   max_ply_length: 400                                # Hard cutoff to force a draw  main_logging_level: 20
   main_logging_level: 20
@@ -28,14 +28,14 @@ data_generation:
   io_logging_level: 20
 
 mcts:
-  node_pool_size: 100000                             # Capacity of the persistent MCTS node pool
+  node_pool_size: 1000000                            # Capacity of the persistent MCTS node pool
   worker_minibatch_size: 16                          # Max positions a single worker sends at once
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
   gumbel_c_visit: 50.0                               # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_noise: 1.0                                  # Gumbel noise value
-  gumbel_search_depth: 128                           # Search depth budget
-  gumbel_m: 16                                       # m value for sequential halving (top m moves sampled)
+  gumbel_search_depth: 48                            # Search depth budget
+  gumbel_m: 8                                        # m value for sequential halving (top m moves sampled)
   minimax_win_target: 0.95
   minimax_loss_target: 0.001
 
@@ -49,8 +49,8 @@ selection:
   resignation_cutoff: -0.80                          # Value head cutoff for resignation
 
 training:
-  training_cores: [9]                                # Dedicated CPU cores for training task
-  io_read_cores: [10, 11]                              # Dedicated CPU cores for batch prefetching
+  training_cores: [5]                                # Dedicated CPU cores for training task
+  io_read_cores: [6, 7]                              # Dedicated CPU cores for batch prefetching
   prefetch_workers: 8                                # How many workers in async read process to query lmdb
   seed: 42                                           # Seed for initialisation
   batch_size: 4096                                   # Positions per Gradient Update

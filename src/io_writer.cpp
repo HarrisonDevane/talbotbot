@@ -216,15 +216,6 @@ void IOWriter::run() {
                 mdb_put(txn, dbi, &state_key, &state_val, 0);
 
                 mdb_txn_commit(txn);
-                
-                static size_t sync_counter = 0;
-                sync_counter += flush_threshold;
-
-                if (sync_counter >= 100000) { 
-                    logger.log("INFO", "Moving " + std::to_string(sync_counter) + " positions to SSD");
-                    mdb_env_sync(lmdb_env, 0); 
-                    sync_counter = 0;
-                }
 
                 write_head.store(current_head, std::memory_order_relaxed);
                 buffer_count.store(current_cnt, std::memory_order_relaxed);

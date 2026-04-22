@@ -35,6 +35,10 @@ DataGenerator::DataGenerator(
     config.rl_dir = rl_dir_in;
     config.rotation_interval = rot_interval;
 
+    for (int i = 0; i < config.num_cores; ++i) {
+        core_wait_counts.push_back(std::make_unique<std::atomic<int>>(0));
+    }
+
     model_config.input_planes = model_cfg["model"]["input_planes"].as<int>();
     model_config.board_dim = model_cfg["chess"]["board_dim"].as<int>();
     model_config.policy_moves = model_cfg["chess"]["total_policy_moves"].as<int>();
@@ -101,6 +105,7 @@ void DataGenerator::_generate_pgn(int game_number, const std::vector<GameTransit
 
 void DataGenerator::worker_main(int logical_idx, int core_id) {
     int worker_id = logical_idx + 1;
+    int core_index = logical_idx / config.workers_per_core;
     SetThreadAffinityMask(GetCurrentThread(), (static_cast<DWORD_PTR>(1) << core_id));
     at::set_num_threads(1);
 
@@ -110,6 +115,8 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
     logger.rotate(local_step_cache, config.rotation_interval);
     
     logger.log("INFO", "=== GAME WORKER " + std::to_string(core_id) + " ===");
+
+    std::atomic<int>* core_wait_count = core_wait_counts[core_index].get();
     
     // --- Coordinator takes ownership of the Engine ---
     chess::Board dummy;
@@ -121,7 +128,7 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
         selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
         selector_config.gumbel_noise, dummy, std::vector<chess::Board>(), logger,
         shared_input_buffer, shared_policy_buffer, shared_value_buffer,
-        model_config, buffer_free_slots
+        buffer_free_slots, core_wait_count, config.workers_per_core
     );
 
     ActionSelector agent("worker_" + std::to_string(worker_id), logical_idx, selector_config, logger);

@@ -47,7 +47,7 @@ struct SearchWorker {
     int gumbel_m = 0;
 
     MCTSEngine* mcts = nullptr;
-    int core_id = -1;
+    DWORD_PTR core_mask = 0;
 };
 
 std::vector<std::string> split(const std::string& s, char delimiter) {
@@ -106,7 +106,7 @@ int main(int argc, char* argv[]) {
     
     Logger main_logger("uci_main", run_log_dir, global_cfg["main_logging_level"].as<int>());
     main_logger.rotate(0, 0); 
-    main_logger.log("INFO", "Booting Talbot UCI Engine (Root Parallelism Pool)...");
+    main_logger.log("INFO", "Booting Talbot UCI Engine (Single Worker, Unified Logging)...");
 
     if (eval_cfg["main_cores"]) {
         DWORD_PTR mainMask = 0;
@@ -120,15 +120,6 @@ int main(int argc, char* argv[]) {
         main_logger.log("CRITICAL", "Engine file missing at " + engine_path);
         return 1;
     }
-
-    std::vector<int> worker_core_ids;
-    for (const auto& core : eval_cfg["game_worker_cores"]) {
-        worker_core_ids.push_back(core.as<int>());
-    }
-    int workers_per_core = eval_cfg["workers_per_core"].as<int>();
-    int num_workers = std::max(1, (int)worker_core_ids.size() * workers_per_core);
-
-    main_logger.log("INFO", "Initializing " + std::to_string(num_workers) + " Persistent Ensemble Workers.");
 
     int inference_batch_size = inf_cfg["batch_size"].as<int>();
     int max_batch_size = inference_batch_size * inf_cfg["batch_size_factor"].as<int>();
@@ -150,7 +141,7 @@ int main(int argc, char* argv[]) {
     }
 
     moodycamel::ConcurrentQueue<std::pair<int, int>> inference_queue;
-    std::vector<ThreadSafeQueue<std::vector<int>>> result_queues(num_workers);
+    std::vector<ThreadSafeQueue<std::vector<int>>> result_queues(1); 
     ThreadSafeQueue<int> buffer_free_slots;
     for (int i = 0; i < max_batch_size; ++i) buffer_free_slots.push(i);
 
@@ -162,9 +153,10 @@ int main(int argc, char* argv[]) {
     std::atomic<uint64_t> dummy_step{0};
 
     InferenceBatcher batcher(
-        engine_path, inference_batch_size, inf_cfg["batch_timeout_ms"].as<int>(), num_workers, 
+        engine_path, inference_batch_size, inf_cfg["batch_timeout_ms"].as<int>(), 1, 
         run_log_dir, inf_cfg["logging_level"].as<int>(), batcher_cores, 0, dummy_step, inf_cfg["logging_interval_sec"].as<int>()
     );
+    
     std::thread batcher_thread([&]() {
         batcher.run(inference_queue, result_queues, shared_input_buffer, shared_policy_buffer, shared_value_buffer, global_stop_event, &buffer_free_slots);
     });
@@ -172,11 +164,6 @@ int main(int argc, char* argv[]) {
     chess::Board board;
     board.setFen(chess::constants::STARTPOS);
     std::vector<chess::Board> history;
-    
-    Logger search_logger("uci_search", run_log_dir, mcts_cfg["logging_level"].as<int>());
-    search_logger.rotate(0, 0); 
-
-    Logger quiet_logger("quiet_mcts", run_log_dir, 999); 
 
     ActionSelectorConfig s_config;
     s_config.node_pool_size = mcts_cfg["node_pool_size"].as<int>();
@@ -195,50 +182,52 @@ int main(int argc, char* argv[]) {
     s_config.resignation_probability = sel_cfg["resignation_probability"].as<double>();
     s_config.resignation_cutoff = sel_cfg["resignation_cutoff"].as<double>();
 
-    std::vector<std::unique_ptr<MCTSEngine>> mcts_engines;
-    for (int w = 0; w < num_workers; ++w) {
-        mcts_engines.push_back(std::make_unique<MCTSEngine>(
-            s_config.node_pool_size, s_config.batch_size_per_worker, 
-            inference_queue, result_queues[w], w,
-            s_config.virtual_loss, s_config.draw_cutoff, 
-            s_config.gumbel_c_visit, s_config.gumbel_c_scale, 
-            s_config.gumbel_noise, board, history, quiet_logger, 
-            shared_input_buffer, shared_policy_buffer, shared_value_buffer,
-            m_config, buffer_free_slots
-        ));
+    std::atomic<int> single_worker_wait_count{0};
+
+    auto mcts_engine = std::make_unique<MCTSEngine>(
+        s_config.node_pool_size, s_config.batch_size_per_worker, 
+        inference_queue, result_queues[0], 0, 
+        s_config.virtual_loss, s_config.draw_cutoff, 
+        s_config.gumbel_c_visit, s_config.gumbel_c_scale, 
+        s_config.gumbel_noise, board, history, main_logger, 
+        shared_input_buffer, shared_policy_buffer, shared_value_buffer,
+        buffer_free_slots, &single_worker_wait_count, 1
+    );
+
+    SearchWorker search_worker;
+    search_worker.mcts = mcts_engine.get();
+    
+    if (eval_cfg["game_worker_cores"]) {
+        for (const auto& core : eval_cfg["game_worker_cores"]) {
+            search_worker.core_mask |= (static_cast<DWORD_PTR>(1) << core.as<int>());
+        }
     }
 
-    std::vector<std::unique_ptr<SearchWorker>> search_workers;
-    for (int w = 0; w < num_workers; ++w) {
-        auto sw = std::make_unique<SearchWorker>();
-        sw->mcts = mcts_engines[w].get();
-        sw->core_id = worker_core_ids[w / workers_per_core];
+    search_worker.thread = std::thread([worker = &search_worker]() {
+        if (worker->core_mask != 0) {
+            SetThreadAffinityMask(GetCurrentThread(), worker->core_mask);
+        }
+        while (true) {
+            std::unique_lock<std::mutex> lock(worker->mtx);
+            worker->cv_start.wait(lock, [&]{ return worker->start_flag || worker->quit_flag; });
+            if (worker->quit_flag) break;
+            
+            worker->mcts->reset(worker->board, worker->history);
+            worker->mcts->run_simulations(worker->search_nodes, worker->gumbel_m);
+            
+            worker->start_flag = false;
+            worker->done_flag = true;
+            lock.unlock();
+            worker->cv_done.notify_one();
+        }
+    });
 
-        sw->thread = std::thread([worker = sw.get()]() {
-            SetThreadAffinityMask(GetCurrentThread(), (static_cast<DWORD_PTR>(1) << worker->core_id));
-            while (true) {
-                std::unique_lock<std::mutex> lock(worker->mtx);
-                worker->cv_start.wait(lock, [&]{ return worker->start_flag || worker->quit_flag; });
-                if (worker->quit_flag) break;
-                worker->mcts->reset(worker->board, worker->history);
-                worker->mcts->run_simulations(worker->search_nodes, worker->gumbel_m);
-                worker->start_flag = false;
-                worker->done_flag = true;
-                lock.unlock();
-                worker->cv_done.notify_one();
-            }
-        });
-        search_workers.push_back(std::move(sw));
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    ActionSelector agent("uci_agent", 0, s_config, search_logger);
+    ActionSelector agent("uci_agent", 0, s_config, main_logger);
     int ply_count = 1;
 
     std::string line;
     while (std::getline(std::cin, line)) {
         line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
-        
         main_logger.log("DEBUG", "GUI -> Engine: " + line);
         std::vector<std::string> tokens = split(line, ' ');
         if (tokens.empty()) continue;
@@ -246,7 +235,7 @@ int main(int argc, char* argv[]) {
         const std::string& command = tokens[0];
 
         if (command == "uci") {
-            std::cout << "id name Talbot UCI" << std::endl;
+            std::cout << "id name Talbot UCI (Single)" << std::endl;
             std::cout << "id author Talbot Dev" << std::endl;
             std::cout << "uciok" << std::endl;
         } 
@@ -276,8 +265,6 @@ int main(int argc, char* argv[]) {
 
             ply_count = 1;
 
-            // FIX: Removed the forced STARTPOS duplication block.
-            // This loop now accurately mirrors data_generator.cpp temporal history sequences.
             for (size_t i = moves_idx + 1; i < tokens.size(); ++i) {
                 history.insert(history.begin(), board);
                 if (history.size() > 4) history.pop_back();
@@ -293,118 +280,31 @@ int main(int argc, char* argv[]) {
                 if (tokens[i] == "nodes") total_search_nodes = std::stoi(tokens[i + 1]);
             }
 
-            int worker_nodes = total_search_nodes / num_workers;
-            if (worker_nodes < 1) worker_nodes = 1;
-
-            search_logger.log("INFO", "Dispatching search to pool. Budget per worker: " + std::to_string(worker_nodes));
+            main_logger.log("INFO", "Dispatching search to single worker. Budget: " + std::to_string(total_search_nodes));
 
             auto search_start_time = std::chrono::steady_clock::now();
 
-            for (int w = 0; w < num_workers; ++w) {
-                std::lock_guard<std::mutex> lock(search_workers[w]->mtx);
-                search_workers[w]->board = board;
-                search_workers[w]->history = history;
-                search_workers[w]->search_nodes = worker_nodes;
-                search_workers[w]->gumbel_m = s_config.gumbel_m;
-                search_workers[w]->done_flag = false;
-                search_workers[w]->start_flag = true;
-                search_workers[w]->cv_start.notify_one();
+            {
+                std::lock_guard<std::mutex> lock(search_worker.mtx);
+                search_worker.board = board;
+                search_worker.history = history;
+                search_worker.search_nodes = total_search_nodes;
+                search_worker.gumbel_m = s_config.gumbel_m;
+                search_worker.done_flag = false;
+                search_worker.start_flag = true;
+                search_worker.cv_start.notify_one();
             }
 
-            for (int w = 0; w < num_workers; ++w) {
-                std::unique_lock<std::mutex> lock(search_workers[w]->mtx);
-                search_workers[w]->cv_done.wait(lock, [&]{ return search_workers[w]->done_flag; });
+            {
+                std::unique_lock<std::mutex> lock(search_worker.mtx);
+                search_worker.cv_done.wait(lock, [&]{ return search_worker.done_flag; });
             }
 
-            auto search_end_time = std::chrono::steady_clock::now();
-            double duration = std::chrono::duration<double>(search_end_time - search_start_time).count();
-            double speed = (duration > 0) ? ((worker_nodes * num_workers) / duration) : 0.0;
+            MCTSNode* root = mcts_engine->root;
+            double root_v_mix = root->calculate_v_mix();
 
-            MCTSNode* agg_root = mcts_engines[0]->root;
-            for (int i = 0; i < agg_root->num_children; ++i) {
-                MCTSNode* agg_child = agg_root->first_child + i;
-                for (int w = 1; w < num_workers; ++w) {
-                    MCTSNode* w_child = mcts_engines[w]->root->first_child + i;
-                    agg_child->visits += w_child->visits;
-                    agg_child->value_sum += w_child->value_sum;
-                    if (w_child->forced_outcome.has_value()) {
-                        if (!agg_child->forced_outcome.has_value()) {
-                            agg_child->forced_outcome = w_child->forced_outcome;
-                            agg_child->distance_to_mate = w_child->distance_to_mate;
-                        } else {
-                            if (w_child->forced_outcome.value() == -1 && agg_child->forced_outcome.value() == -1) {
-                                agg_child->distance_to_mate = std::min(agg_child->distance_to_mate.value(), w_child->distance_to_mate.value());
-                            } else if (w_child->forced_outcome.value() == 1 && agg_child->forced_outcome.value() == 1) {
-                                agg_child->distance_to_mate = std::max(agg_child->distance_to_mate.value(), w_child->distance_to_mate.value());
-                            } else if (w_child->forced_outcome.value() == -1) {
-                                agg_child->forced_outcome = -1;
-                                agg_child->distance_to_mate = w_child->distance_to_mate;
-                            }
-                        }
-                    }
-                }
-            }
+            SelectionResult result = agent.select_move(root, ply_count);
 
-            agg_root->visits = 0;
-            agg_root->value_sum = 0;
-            for (int w = 0; w < num_workers; ++w) {
-                agg_root->visits += mcts_engines[w]->root->visits;
-                agg_root->value_sum += mcts_engines[w]->root->value_sum;
-            }
-
-            double agg_v_mix = agg_root->calculate_v_mix();
-            double max_visits = 1.0;
-            for (int i = 0; i < agg_root->num_children; ++i) {
-                if (agg_root->first_child[i].visits > max_visits) max_visits = agg_root->first_child[i].visits;
-            }
-            for (int i = 0; i < agg_root->num_children; ++i) {
-                agg_root->first_child[i].calculate_gumbel_score(s_config.gumbel_c_visit, s_config.gumbel_c_scale, max_visits, agg_v_mix);
-            }
-
-            search_logger.log("INFO", "");
-            search_logger.log("INFO", "--- Ensemble Search Results ---");
-            
-            std::stringstream rss;
-            rss << "Tree Stats: Root v_mix=" << std::fixed << std::setprecision(4) << agg_v_mix 
-                << " | Sims: " << (worker_nodes * num_workers) << " | Time: " << duration << "s | Speed: " << std::fixed << std::setprecision(1) << speed << " sim/s";
-            search_logger.log("INFO", rss.str());
-
-            char table_header[256];
-            snprintf(table_header, sizeof(table_header), 
-                "%-8s %8s %8s %8s %8s %8s %8s", 
-                "Move", "Visits", "Logit", "Raw Q", "Score", "Outcome", "DTM");
-            search_logger.log("INFO", table_header);
-            search_logger.log("INFO", std::string(70, '-'));
-
-            std::vector<MCTSNode*> children;
-            for (int i = 0; i < agg_root->num_children; ++i) {
-                children.push_back(agg_root->first_child + i);
-            }
-
-            std::sort(children.begin(), children.end(), [](MCTSNode* a, MCTSNode* b) {
-                if (a->visits != b->visits) return a->visits > b->visits;
-                return a->gumbel_score > b->gumbel_score;
-            });
-
-            for (MCTSNode* node : children) {
-                if (node->visits == 0) continue; 
-                char line[512];
-                std::string outcome_str = node->forced_outcome.has_value() ? std::to_string(node->forced_outcome.value()) : "None";
-                std::string dtm_str = node->distance_to_mate.has_value() ? std::to_string(node->distance_to_mate.value()) : "None";
-                double q_val = (node->visits > 0) ? (-node->value_sum / node->visits) : agg_v_mix;
-
-                snprintf(line, sizeof(line), 
-                    "%-8s %8d %8.4f %8.4f %8.4f %8s %8s", 
-                    chess::uci::moveToUci(node->move).c_str(), node->visits, node->raw_logit, 
-                    q_val, node->gumbel_score, outcome_str.c_str(), dtm_str.c_str()
-                );
-                search_logger.log("INFO", line);
-            }
-            search_logger.log("INFO", std::string(70, '-'));
-            search_logger.log("INFO", ""); 
-
-            SelectionResult result = agent.select_move(agg_root, ply_count);
-            
             std::string best_move_str = (result.best_move == chess::Move::NO_MOVE) ? "0000" : chess::uci::moveToUci(result.best_move);
             
             std::cout << "bestmove " << best_move_str << std::endl;
@@ -415,16 +315,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    main_logger.log("INFO", "Quit command received. Terminating workers...");
-    for (int w = 0; w < num_workers; ++w) {
-        {
-            std::lock_guard<std::mutex> lock(search_workers[w]->mtx);
-            search_workers[w]->quit_flag = true;
-        }
-        search_workers[w]->cv_start.notify_one();
-        if (search_workers[w]->thread.joinable()) {
-            search_workers[w]->thread.join();
-        }
+    main_logger.log("INFO", "Quit command received. Terminating worker...");
+    {
+        std::lock_guard<std::mutex> lock(search_worker.mtx);
+        search_worker.quit_flag = true;
+    }
+    search_worker.cv_start.notify_one();
+    if (search_worker.thread.joinable()) {
+        search_worker.thread.join();
     }
 
     global_stop_event.store(true);

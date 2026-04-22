@@ -15,7 +15,7 @@ struct MCTSNode {
     int policy_flat_index = -1;
 
     int visits = 0; 
-    int num_unselected_children = 0;
+    int num_available_children = 0;
     double value_sum = 0.0;
     double raw_logit = 0.0;
     double raw_value = 0.0;
@@ -27,7 +27,7 @@ struct MCTSNode {
     std::optional<int> distance_to_mate = std::nullopt;
     
     bool expanded = false;
-    bool selected = false;
+    bool unavailable_for_selection = false;
 
     MCTSNode(MCTSNode* p = nullptr, chess::Move m = chess::Move::NO_MOVE);
 

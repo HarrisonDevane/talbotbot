@@ -110,7 +110,7 @@ int main(int argc, char* argv[]) {
     const int policy_moves = model["chess"]["total_policy_moves"].as<int>();
             
     mdb_env_create(&lmdb_env);
-    mdb_env_set_mapsize(lmdb_env, (size_t)1024 * 1024 * 1024 * 128); 
+    mdb_env_set_mapsize(lmdb_env, (size_t)1024 * 1024 * 1024 * 16); 
     mdb_env_open(lmdb_env, db_path.c_str(), MDB_NOSYNC | MDB_NOTLS, 0664);
 
     MDB_dbi shared_dbi;

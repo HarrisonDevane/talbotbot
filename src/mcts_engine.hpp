@@ -98,8 +98,6 @@ public:
     double gumbel_noise;
     std::mt19937 rng;
 
-    ModelConfig model_config;
-
     double time_selection = 0.0;
     double time_expansion = 0.0;
     double time_backpropagation = 0.0;
@@ -128,6 +126,9 @@ public:
     torch::DeviceType device;
     torch::ScalarType policy_logits_dtype;
 
+    std::atomic<int>* core_wait_count;
+    int workers_per_core;
+
     MCTSEngine(
         int node_pool_capacity, 
         int worker_batch_size, 
@@ -145,8 +146,9 @@ public:
         std::vector<torch::Tensor>& shared_input_buffer, 
         std::vector<torch::Tensor>& shared_policy_buffer, 
         std::vector<torch::Tensor>& shared_value_buffer, 
-        const ModelConfig& model_config, 
-        ThreadSafeQueue<int>& buffer_free_slots
+        ThreadSafeQueue<int>& buffer_free_slots,
+        std::atomic<int>* core_wait_count,
+        int workers_per_core
     );
 
     void reset(const chess::Board& board, const std::vector<chess::Board>& history);
@@ -168,4 +170,7 @@ private:
     void _run_single_async_simulation(MCTSNode* start_node);
     
     void _log_tournament_results(const std::vector<MCTSNode*>& candidates, const std::string& phase_name);
+
+    template <typename Predicate, typename WorkFn>
+    void _spin_wait(Predicate should_keep_waiting, WorkFn work_fn);
 };

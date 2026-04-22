@@ -16,17 +16,15 @@ MCTSEngine::MCTSEngine(
     ThreadSafeQueue<std::vector<int>>& result_queue, int worker_id, double virtual_loss,
     double draw_cutoff, double gumbel_c_visit, double gumbel_c_scale, double gumbel_noise, 
     const chess::Board& board, const std::vector<chess::Board>& base_history, Logger& logger, 
-    std::vector<torch::Tensor>& shared_input_buffer, 
-    std::vector<torch::Tensor>& shared_policy_buffer, std::vector<torch::Tensor>& shared_value_buffer,
-    const ModelConfig& model_cfg, 
-    ThreadSafeQueue<int>& buffer_free_slots
+    std::vector<torch::Tensor>& shared_input_buffer, std::vector<torch::Tensor>& shared_policy_buffer, std::vector<torch::Tensor>& shared_value_buffer,
+    ThreadSafeQueue<int>& buffer_free_slots, std::atomic<int>* core_wait_count, int workers_per_core
 ) : worker_batch_size(worker_batch_size), worker_id(worker_id), virtual_loss(virtual_loss),
     draw_cutoff(draw_cutoff), gumbel_c_visit(gumbel_c_visit), gumbel_c_scale(gumbel_c_scale), 
     gumbel_noise(gumbel_noise), root_board(board), base_history(base_history), 
     node_pool(node_pool_capacity), logger(logger), inference_queue(inference_queue), result_queue(result_queue), 
     buffer_free_slots(buffer_free_slots), shared_input_buffer(shared_input_buffer), 
     shared_policy_buffer(shared_policy_buffer), shared_value_buffer(shared_value_buffer),
-    model_config(model_cfg) 
+    core_wait_count(core_wait_count), workers_per_core(workers_per_core)
 {
     torch::set_num_threads(1);
 
@@ -87,7 +85,7 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
     double exp_cache[256];
 
     while (true) {
-        if (node->num_children == 0 || !node->expanded || node->selected || node->forced_outcome.has_value()) break;
+        if (node->num_children == 0 || !node->expanded || node->unavailable_for_selection || node->forced_outcome.has_value()) break;
 
         MCTSNode* best_child = nullptr;
         double best_deficit = -1e20;
@@ -97,7 +95,7 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
 
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
-            if ((child->forced_outcome.has_value() && child->forced_outcome.value() == 1) || child->selected) continue;
+            if (child->forced_outcome.has_value() || child->unavailable_for_selection) continue;
             if (child->visits > max_visits) max_visits = child->visits;
             sum_visits += child->visits;
         }
@@ -107,7 +105,7 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
 
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
-            if ((child->forced_outcome.has_value() && child->forced_outcome.value() == 1) || child->selected) continue;
+            if (child->forced_outcome.has_value() || child->unavailable_for_selection) continue;
             double score = child->calculate_gumbel_score(gumbel_c_visit, gumbel_c_scale, max_visits, v_mix);
             if (score > max_score_logit) max_score_logit = score;
         }
@@ -115,7 +113,7 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
         double sum_score_exp = 0.0;
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
-            if ((child->forced_outcome.has_value() && child->forced_outcome.value() == 1) || child->selected) {
+            if (child->forced_outcome.has_value() || child->unavailable_for_selection) {
                 exp_cache[i] = 0.0;
                 continue;
             }
@@ -150,13 +148,13 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
 
 void MCTSEngine::_mark_selected(MCTSNode* node) {
     MCTSNode* current_node = node;
-    current_node->selected = true;
+    current_node->unavailable_for_selection = true;
     MCTSNode* parent = current_node->parent;
 
     while (parent != nullptr) {
-        parent->num_unselected_children -= 1;
-        if (parent->num_unselected_children > 0) break;
-        parent->selected = true;
+        parent->num_available_children -= 1;
+        if (parent->num_available_children > 0) break;
+        parent->unavailable_for_selection = true;
         current_node = parent;
         parent = current_node->parent;
     }
@@ -164,17 +162,38 @@ void MCTSEngine::_mark_selected(MCTSNode* node) {
 
 void MCTSEngine::_unmark_selected(MCTSNode* node) {
     MCTSNode* current_node = node;
-    current_node->selected = false;
+    current_node->unavailable_for_selection = false;
     MCTSNode* parent = current_node->parent;
 
     while (parent != nullptr) {
-        parent->num_unselected_children += 1;
-        if (parent->num_unselected_children == 1) {
-            parent->selected = false;
+        parent->num_available_children += 1;
+        if (parent->num_available_children == 1) {
+            parent->unavailable_for_selection = false;
             current_node = parent;
             parent = current_node->parent;
         } else break;
     }
+}
+
+template <typename Predicate, typename WorkFn>
+void MCTSEngine::_spin_wait(Predicate should_keep_waiting, WorkFn work_fn) {
+    if (workers_per_core <= 1) {
+        while (should_keep_waiting()) {
+            work_fn();
+        }
+        return;
+    }
+
+    core_wait_count->fetch_add(1, std::memory_order_acquire);
+    while (should_keep_waiting()) {
+        work_fn();
+        if (core_wait_count->load(std::memory_order_relaxed) == workers_per_core) {
+            _mm_pause();
+        } else {
+            std::this_thread::yield();
+        }
+    }
+    core_wait_count->fetch_sub(1, std::memory_order_release);
 }
 
 void MCTSEngine::_retrieve_inference(bool block) {
@@ -266,11 +285,10 @@ void MCTSEngine::_queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCT
     auto start_time = NOW();
     int buffer_index;
 
-    while (!buffer_free_slots.try_pop(buffer_index)) {
-        _retrieve_inference(false);
-        if (!batch_buffer.empty()) _submit_batch();
-        std::this_thread::yield();
-    }
+    _spin_wait(
+        [&]() { return !buffer_free_slots.try_pop(buffer_index); },
+        [&]() { _retrieve_inference(false); if (!batch_buffer.empty()) _submit_batch(); }
+    );
 
     in_flight_nodes[buffer_index] = leaf;
     _mark_selected(leaf);
@@ -279,7 +297,7 @@ void MCTSEngine::_queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCT
     chess::Movelist moves;
     chess::movegen::legalmoves(moves, root_board);
     leaf->num_children = moves.size();
-    leaf->num_unselected_children = leaf->num_children;
+    leaf->num_available_children = leaf->num_children;
 
     if (leaf->num_children > 0) {
         leaf->first_child = node_pool.allocate(leaf, moves[0]);
@@ -319,9 +337,10 @@ void MCTSEngine::_queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCT
 
     if (batch_buffer.size() >= (size_t)worker_batch_size) { 
         _submit_batch();
-        while (inference_sent > inference_received) {
-            _retrieve_inference(true);
-        }
+        _spin_wait(
+            [&]() { return inference_sent > inference_received; },
+            [&]() { _retrieve_inference(true); }
+        );
     }
 
     time_misc += ELAPSED(start_time, NOW());
@@ -334,21 +353,26 @@ void MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
     simulation_path.push_back(start_node);
     
     int start_path_len = simulation_path.size();
+    int loop_iterations = 0;
+    int unavailable_continues = 0;
+    int select_unavailable_continues = 0;
 
     while (true) {
+        loop_iterations++;
         _retrieve_inference(false);
         if (batch_buffer.size() >= (size_t)worker_batch_size) { 
-            while (inference_sent > inference_received) {
-                _retrieve_inference(true);
-            }
+            _spin_wait(
+                [&]() { return inference_sent > inference_received; },
+                [&]() { _retrieve_inference(true); }
+            );
             _submit_batch();
         }
 
-        if (start_node->selected || buffer_free_slots.empty()) {
+        if (start_node->unavailable_for_selection || buffer_free_slots.empty()) {
+            if (start_node->unavailable_for_selection) unavailable_continues++;
             if (!batch_buffer.empty()) _submit_batch();
             if (inference_received >= inference_sent) break;
-            
-            std::this_thread::yield();
+            _retrieve_inference(true);
             continue;
         }
 
@@ -369,12 +393,25 @@ void MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
             break;
         }
 
-        if (start_node->selected) {
+        if (start_node->unavailable_for_selection) {
+            select_unavailable_continues++;
+            while (simulation_path.size() > 1) {
+                root_board.unmakeMove(simulation_path.back()->move);
+                simulation_path.pop_back();
+            }
             continue;
         }
 
         _queue_leaf_for_inference(leaf, simulation_path);
         break;
+    }
+
+    if (logger.get_level() <= 30 && (unavailable_continues > 5 || select_unavailable_continues > 2 || loop_iterations > 10)) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), 
+            "ASYNC_SIM_CHURN: %d iters, unavail_waits=%d, post_select_unavail=%d, in_flight=%d",
+            loop_iterations, unavailable_continues, select_unavailable_continues, inference_sent - inference_received);
+        logger.log("WARNING", buf);
     }
 
     while (!simulation_path.empty()) {
@@ -598,6 +635,7 @@ void MCTSEngine::_backpropagate_minimax(MCTSNode* node) {
     int worst_loss_dtm = -1;
     bool all_children_are_wins = true;
     bool has_winning_child = false;
+    bool had_outcome = node->forced_outcome.has_value();
 
     for (int i = 0; i < node->num_children; ++i) {
         MCTSNode* child = node->first_child + i;
@@ -625,6 +663,15 @@ void MCTSEngine::_backpropagate_minimax(MCTSNode* node) {
     } else {
         node->forced_outcome = std::nullopt;
         node->distance_to_mate = std::nullopt;
+    }
+
+    if ((!had_outcome && node->forced_outcome.has_value()) && node->parent != nullptr) {
+        if (!node->unavailable_for_selection) {
+            node->parent->num_available_children -= 1;
+            if (node->parent->num_available_children <= 0) {
+                node->parent->unavailable_for_selection = true;
+            }
+        }
     }
 }
 

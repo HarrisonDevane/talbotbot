@@ -1,10 +1,10 @@
 model:
   input_planes: 69                                   # Plane feature stack (P1 pieces, P2 pieces, reps, etc.)
-  filters: 128                                       # Convolutional filters (Network "width")
-  resblocks: 12                                      # Total residual blocks (Network "depth")
-  bottleneck_channels: 64                            # Squeezed 3x3 convolution depth. Halving 'filters' here makes the network ~2x faster.
+  filters: 256                                       # Convolutional filters (Network "width")
+  resblocks: 16                                      # Total residual blocks (Network "depth")
+  bottleneck_channels: 128                           # Squeezed 3x3 convolution depth. Halving 'filters' here makes the network ~2x faster.
   broadcast_reduction_ratio: 4                       # Shrinks the hidden FC layer in the Squeeze-and-Excitation block to prevent parameter bloat.
-  broadcast_interval: 6                              # Replaces a standard block with a Global Broadcasting block every N layers for instant cross-board vision.
+  broadcast_interval: 8                              # Replaces a standard block with a Global Broadcasting block every N layers for instant cross-board vision.
 
 chess:
   board_dim: 8

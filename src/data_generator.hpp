@@ -88,6 +88,7 @@ private:
     std::vector<torch::Tensor>& shared_input_buffer;
     std::vector<torch::Tensor>& shared_policy_buffer;
     std::vector<torch::Tensor>& shared_value_buffer;
+    std::vector<std::unique_ptr<std::atomic<int>>> core_wait_counts;
     ThreadSafeQueue<int>& buffer_free_slots;
 
     ThreadSafeQueue<CompletedGame>& completed_games_queue;
