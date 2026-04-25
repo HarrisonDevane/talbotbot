@@ -43,7 +43,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
     }
 
     MCTSNode* top_node;
-    double best_q;
+    double best_q = -2.0;
 
     if (!non_forced_visited.empty()) {
         std::sort(non_forced_visited.begin(), non_forced_visited.end(), [](MCTSNode* a, MCTSNode* b) {
@@ -71,62 +71,22 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
         std::uniform_int_distribution<> dist(0, draw_nodes.size() - 1);
         result.best_move = draw_nodes[dist(rng)]->move;
 
-    // Rule C: Temperature / Safe Moves
+       // Rule C: Temperature / Deterministic
     } else if (!non_forced_visited.empty()) {
         if (ply_count <= config.temperature_ply_cutoff) {
-
-            std::vector<MCTSNode*> valid_nodes;
-            
-            double sum_other_visits = 0.0;
-            double total_valid_visits = top_node->visits;
-
-            for (MCTSNode* node : non_forced_visited) {
-                // 1. Calculate the absolute Q-drop for this candidate
-                double q_drop = best_q - (-node->calculate_v_mix());
-                
-                // 2. Calculate the dynamic threshold using the candidate's noise
-                double dynamic_threshold = config.temperature_blunder_q_threshold + 
-                                           (config.temperature_blunder_noise_weight * node->gumbel_noise);
-                
-                // 3. Clamp it so negative noise doesn't artificially shrink the threshold below baseline
-                dynamic_threshold = std::max(config.temperature_blunder_q_threshold, dynamic_threshold);
-
-                // 4. Evaluate against the dynamic threshold
-                if (q_drop <= dynamic_threshold) {
-                    valid_nodes.push_back(node);
-                    if (node != top_node) {
-                        sum_other_visits += node->visits;
-                        total_valid_visits += node->visits;
-                    }
-                }
+            // weight(a) = visits(a) * exp(-q_drop(a) / temperature)
+            double temp = config.temperature_q_decay;
+ 
+            std::vector<double> weights(non_forced_visited.size());
+            for (size_t i = 0; i < non_forced_visited.size(); ++i) {
+                double q_drop = best_q - (-non_forced_visited[i]->calculate_v_mix());
+                weights[i] = non_forced_visited[i]->visits * std::exp(-q_drop / temp);
             }
-
-            std::vector<double> act_probs(valid_nodes.size(), 0.0);
-            int top_idx_in_valid = -1;
-            for(size_t i = 0; i < valid_nodes.size(); ++i) {
-                if(valid_nodes[i] == top_node) top_idx_in_valid = i;
-            }
-
-            if (valid_nodes.size() > 1 && sum_other_visits > 0.0) {
-                // NEW LOGIC: Calculate natural probability, apply config as a floor
-                double natural_top_prob = static_cast<double>(top_node->visits) / total_valid_visits;
-                double actual_top_prob = std::max(config.top_move_probability, natural_top_prob);
-                double remaining_prob = 1.0 - actual_top_prob;
-
-                act_probs[top_idx_in_valid] = actual_top_prob;
-                for (size_t i = 0; i < valid_nodes.size(); ++i) {
-                    if (i != top_idx_in_valid) {
-                        act_probs[i] = (valid_nodes[i]->visits / sum_other_visits) * remaining_prob;
-                    }
-                }
-            } else {
-                act_probs[top_idx_in_valid] = 1.0;
-            }
-
-            std::discrete_distribution<> d(act_probs.begin(), act_probs.end());
-            result.best_move = valid_nodes[d(rng)]->move;
+ 
+            std::discrete_distribution<> d(weights.begin(), weights.end());
+            result.best_move = non_forced_visited[d(rng)]->move;
         } else {
-            // [Existing non-temperature logic remains the same]
+            // Deterministic: pick the gumbel winner
             std::sort(non_forced_visited.begin(), non_forced_visited.end(), [](MCTSNode* a, MCTSNode* b) {
                 if (a->visits != b->visits) return a->visits > b->visits;
                 return a->gumbel_score > b->gumbel_score;

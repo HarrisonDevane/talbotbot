@@ -18,12 +18,11 @@ struct ActionSelectorConfig {
     double gumbel_search_depth;
     double gumbel_m;                   
     
+    bool minimax_target_override;
     double minimax_win_target;
     double minimax_loss_target;
     int temperature_ply_cutoff;
-    double temperature_blunder_q_threshold;
-    double temperature_blunder_noise_weight;
-    double top_move_probability;
+    double temperature_q_decay;
     
     double resignation_probability;
     double resignation_cutoff;

@@ -22,48 +22,41 @@ class GlobalBroadcastingBlock(nn.Module):
         b, c, _, _ = x.size()
         y = self.avg_pool(x).view(b, c)
         y = self.fc(y).view(b, c, 1, 1)
-        return x * y  # Multiplicative gating
+        return x * y
 
-class BottleneckBlock(nn.Module):
+class BasicBlock(nn.Module):
     """
-    Reduces channel depth for the 3x3 convolution to save FLOPs, 
-    then expands back to the original filter count.
-    Optionally applies Squeeze-and-Excitation on the residual branch
-    before the skip connection addition.
+    Standard AlphaZero/Lc0 block: 3x3 -> 3x3 -> SE.
+    Maintains full spatial capacity without bottlenecking.
     """
-    def __init__(self, num_channels: int, bottleneck_channels: int, 
-                 use_se: bool = False, se_reduction_ratio: int = 4):
+    def __init__(self, num_channels: int, se_reduction_ratio: int = 4):
         super().__init__()
-        # 1x1 Squeeze
-        self.conv1 = nn.Conv2d(num_channels, bottleneck_channels, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(bottleneck_channels)
+        # First 3x3 Spatial Processing
+        self.conv1 = nn.Conv2d(num_channels, num_channels, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(num_channels)
         
-        # 3x3 Spatial Processing
-        self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(bottleneck_channels)
-        
-        # 1x1 Expand
-        self.conv3 = nn.Conv2d(bottleneck_channels, num_channels, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(num_channels)
+        # Second 3x3 Spatial Processing
+        self.conv2 = nn.Conv2d(num_channels, num_channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(num_channels)
 
-        # SE applied to the residual branch at full channel width
-        self.se = GlobalBroadcastingBlock(num_channels, se_reduction_ratio) if use_se else None
+        # Unconditional SE applied to the residual branch
+        self.se = GlobalBroadcastingBlock(num_channels, se_reduction_ratio)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
         out = F.relu(self.bn1(self.conv1(x)))
-        out = F.relu(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))
-        if self.se is not None:
-            out = self.se(out)
+        out = self.bn2(self.conv2(out))
+        
+        # Apply SE seamlessly
+        out = self.se(out)
         out += identity
+        
         return F.relu(out)
 
 class ChessAIModel(nn.Module):
     def __init__(self, config: dict):
         super().__init__()
         
-        # Extract from your model_config.yaml
         m_cfg = config['model']
         c_cfg = config['chess']
 
@@ -76,14 +69,10 @@ class ChessAIModel(nn.Module):
 
         # --- Residual Backbone ---
         res_blocks = []
-        for i in range(m_cfg['resblocks']):
-            use_se = (m_cfg['broadcast_interval'] > 0 
-                      and (i + 1) % m_cfg['broadcast_interval'] == 0)
+        for _ in range(m_cfg['resblocks']):
             res_blocks.append(
-                BottleneckBlock(
+                BasicBlock(
                     self.num_filters, 
-                    m_cfg['bottleneck_channels'],
-                    use_se=use_se,
                     se_reduction_ratio=m_cfg['broadcast_reduction_ratio']
                 )
             )
@@ -93,7 +82,6 @@ class ChessAIModel(nn.Module):
         # --- Policy Head (Where to move) ---
         self.policy_conv = nn.Conv2d(self.num_filters, 2, kernel_size=1, bias=False)
         self.policy_bn = nn.BatchNorm2d(2)
-        # 2 channels * 8 * 8 -> 4672 moves
         self.policy_fc = nn.Linear(2 * self.board_dim * self.board_dim, c_cfg['total_policy_moves'])
 
         # --- Value Head (Who is winning) ---
@@ -141,15 +129,13 @@ def fuse_bn_for_export(model: ChessAIModel) -> ChessAIModel:
     model.initial_conv = fuse_conv_bn(model.initial_conv, model.initial_bn)
     model.initial_bn = nn.Identity()
 
-    # Fuse inside each BottleneckBlock (SE has no BN, so no changes needed there)
+    # Fuse inside each BasicBlock (SE has no BN, so no changes needed there)
     for block in model.residual_blocks:
-        if isinstance(block, BottleneckBlock):
+        if isinstance(block, BasicBlock):
             block.conv1 = fuse_conv_bn(block.conv1, block.bn1)
             block.bn1 = nn.Identity()
             block.conv2 = fuse_conv_bn(block.conv2, block.bn2)
             block.bn2 = nn.Identity()
-            block.conv3 = fuse_conv_bn(block.conv3, block.bn3)
-            block.bn3 = nn.Identity()
 
     # Fuse heads
     model.policy_conv = fuse_conv_bn(model.policy_conv, model.policy_bn)

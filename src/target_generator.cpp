@@ -84,44 +84,48 @@ TargetResult TargetGenerator::generate_targets(
         }
     };
     
-    if (!winning_nodes.empty()) {
-        int min_dtm = 999999;
-        for (MCTSNode* child : winning_nodes) {
-            if (child->distance_to_mate.value() < min_dtm) min_dtm = child->distance_to_mate.value();
-        }
-        std::vector<int> target_indices;
-        for (int i = 0; i < num_children; ++i) {
-            if (all_children[i]->forced_outcome.has_value() && 
-                all_children[i]->forced_outcome.value() == -1 && 
-                all_children[i]->distance_to_mate.value() == min_dtm) {
-                target_indices.push_back(i);
+    if (config.minimax_target_override) {
+        if (!winning_nodes.empty()) {
+            int min_dtm = 999999;
+            for (MCTSNode* child : winning_nodes) {
+                if (child->distance_to_mate.value() < min_dtm) min_dtm = child->distance_to_mate.value();
             }
-        }
-        apply_reallocation(target_indices, config.minimax_win_target, true);
-        logger.log("INFO", std::to_string(target_indices.size()) + " fastest win(s) found. Reallocating " + std::to_string(config.minimax_win_target) + " mass.");
-
-    } else if (!draw_nodes.empty() && root_v_mix <= config.draw_cutoff) {
-        std::vector<int> target_indices;
-        for (int i = 0; i < num_children; ++i) {
-            if (all_children[i]->forced_outcome.has_value() && all_children[i]->forced_outcome.value() == 0) {
-                target_indices.push_back(i);
+            std::vector<int> target_indices;
+            for (int i = 0; i < num_children; ++i) {
+                if (all_children[i]->forced_outcome.has_value() && 
+                    all_children[i]->forced_outcome.value() == -1 && 
+                    all_children[i]->distance_to_mate.value() == min_dtm) {
+                    target_indices.push_back(i);
+                }
             }
-        }
-        apply_reallocation(target_indices, config.minimax_win_target, true);
-        logger.log("INFO", "Forced draw condition met. Reallocating " + std::to_string(config.minimax_win_target) + " mass.");
+            apply_reallocation(target_indices, config.minimax_win_target, true);
+            logger.log("INFO", std::to_string(target_indices.size()) + " fastest win(s) found. Reallocating " + std::to_string(config.minimax_win_target) + " mass.");
 
-    } else if (!losing_nodes.empty() && !non_forced_nodes.empty()) {
-        std::vector<int> target_indices;
-        for (int i = 0; i < num_children; ++i) {
-            if (all_children[i]->forced_outcome.has_value() && all_children[i]->forced_outcome.value() == 1) {
-                target_indices.push_back(i);
+        } else if (!draw_nodes.empty() && root_v_mix <= config.draw_cutoff) {
+            std::vector<int> target_indices;
+            for (int i = 0; i < num_children; ++i) {
+                if (all_children[i]->forced_outcome.has_value() && all_children[i]->forced_outcome.value() == 0) {
+                    target_indices.push_back(i);
+                }
             }
-        }
-        apply_reallocation(target_indices, config.minimax_loss_target, false);
-        logger.log("INFO", std::to_string(losing_nodes.size()) + " forced loss(es) squashed to " + std::to_string(config.minimax_loss_target) + " mass.");
+            apply_reallocation(target_indices, config.minimax_win_target, true);
+            logger.log("INFO", "Forced draw condition met. Reallocating " + std::to_string(config.minimax_win_target) + " mass.");
 
+        } else if (!losing_nodes.empty() && !non_forced_nodes.empty()) {
+            std::vector<int> target_indices;
+            for (int i = 0; i < num_children; ++i) {
+                if (all_children[i]->forced_outcome.has_value() && all_children[i]->forced_outcome.value() == 1) {
+                    target_indices.push_back(i);
+                }
+            }
+            apply_reallocation(target_indices, config.minimax_loss_target, false);
+            logger.log("INFO", std::to_string(losing_nodes.size()) + " forced loss(es) squashed to " + std::to_string(config.minimax_loss_target) + " mass.");
+
+        } else {
+            final_probs = base_probs; 
+        }
     } else {
-        final_probs = base_probs; 
+        final_probs = base_probs;
     }
 
     map_policy_to_global_vector(all_moves, final_probs.data(), board, result.policy_vector.data());

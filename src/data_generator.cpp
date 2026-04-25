@@ -51,12 +51,11 @@ DataGenerator::DataGenerator(
     selector_config.gumbel_noise = mcts_cfg["gumbel_noise"].as<double>();
     selector_config.gumbel_search_depth = mcts_cfg["gumbel_search_depth"].as<int>();
     selector_config.gumbel_m = mcts_cfg["gumbel_m"].as<int>();
+    selector_config.minimax_target_override = mcts_cfg["minimax_target_override"].as<bool>();
     selector_config.minimax_win_target = mcts_cfg["minimax_win_target"].as<double>();
     selector_config.minimax_loss_target = mcts_cfg["minimax_loss_target"].as<double>();
     selector_config.temperature_ply_cutoff = sel_cfg["temperature_ply_cutoff"].as<int>();
-    selector_config.top_move_probability = sel_cfg["top_move_probability"].as<double>();
-    selector_config.temperature_blunder_q_threshold = sel_cfg["temperature_blunder_q_threshold"].as<double>();
-    selector_config.temperature_blunder_noise_weight = sel_cfg["temperature_blunder_noise_weight"].as<double>();
+    selector_config.temperature_q_decay = sel_cfg["temperature_q_decay"].as<double>();
     selector_config.draw_cutoff = sel_cfg["draw_cutoff"].as<double>();
     selector_config.resignation_probability = sel_cfg["resignation_probability"].as<double>();
     selector_config.resignation_cutoff = sel_cfg["resignation_cutoff"].as<double>();

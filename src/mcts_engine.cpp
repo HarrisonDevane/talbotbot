@@ -633,33 +633,51 @@ void MCTSEngine::_backpropagate_minimax(MCTSNode* node) {
 
     int best_win_dtm = 999999;
     int worst_loss_dtm = -1;
-    bool all_children_are_wins = true;
+    
     bool has_winning_child = false;
+    bool has_drawing_child = false;
+    bool all_children_proven = true;
+    bool all_children_are_losses = true;
+    
     bool had_outcome = node->forced_outcome.has_value();
 
     for (int i = 0; i < node->num_children; ++i) {
         MCTSNode* child = node->first_child + i;
+        
         if (child->forced_outcome.has_value()) {
-            if (child->forced_outcome.value() == -1) {
+            int outcome = child->forced_outcome.value();
+            
+            // child outcome -1 means the child loses, so the current node wins
+            if (outcome == -1) { 
                 has_winning_child = true;
                 if (child->distance_to_mate.value() < best_win_dtm) best_win_dtm = child->distance_to_mate.value();
-            }
-            if (child->forced_outcome.value() != 1) {
-                all_children_are_wins = false;
-            } else {
+            } 
+            // child outcome 0 is a draw
+            else if (outcome == 0) {
+                has_drawing_child = true;
+                all_children_are_losses = false;
+            } 
+            // child outcome 1 means the child wins, so the current node loses
+            else if (outcome == 1) { 
                 if (child->distance_to_mate.value() > worst_loss_dtm) worst_loss_dtm = child->distance_to_mate.value();
             }
         } else {
-            all_children_are_wins = false;
+            all_children_proven = false;
+            all_children_are_losses = false;
         }
     }
 
     if (has_winning_child) {
         node->forced_outcome = 1;
         node->distance_to_mate = best_win_dtm + 1;
-    } else if (all_children_are_wins) {
-        node->forced_outcome = -1;
-        node->distance_to_mate = worst_loss_dtm + 1;
+    } else if (all_children_proven) {
+        if (has_drawing_child) {
+            node->forced_outcome = 0;
+            node->distance_to_mate = 0; 
+        } else if (all_children_are_losses) {
+            node->forced_outcome = -1;
+            node->distance_to_mate = worst_loss_dtm + 1;
+        }
     } else {
         node->forced_outcome = std::nullopt;
         node->distance_to_mate = std::nullopt;
@@ -674,7 +692,6 @@ void MCTSEngine::_backpropagate_minimax(MCTSNode* node) {
         }
     }
 }
-
 void MCTSEngine::_backpropagate(MCTSNode* node, double value, bool is_terminal) {
     auto start_time = NOW();
     

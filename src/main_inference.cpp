@@ -176,9 +176,7 @@ int main(int argc, char* argv[]) {
     s_config.gumbel_m = mcts_cfg["gumbel_m"].as<int>();
     s_config.batch_size_per_worker = mcts_cfg["worker_minibatch_size"].as<int>();
     s_config.temperature_ply_cutoff = sel_cfg["temperature_ply_cutoff"].as<int>();
-    s_config.top_move_probability = sel_cfg["top_move_probability"].as<double>();
-    s_config.temperature_blunder_q_threshold = sel_cfg["temperature_blunder_q_threshold"].as<double>();
-    s_config.temperature_blunder_noise_weight = sel_cfg["temperature_blunder_noise_weight"].as<double>();
+    s_config.temperature_q_decay = sel_cfg["temperature_q_decay"].as<double>();
     s_config.resignation_probability = sel_cfg["resignation_probability"].as<double>();
     s_config.resignation_cutoff = sel_cfg["resignation_cutoff"].as<double>();
 

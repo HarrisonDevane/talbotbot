@@ -23,15 +23,13 @@ mcts:
   gumbel_c_visit: 50.0                               # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_noise: 0.0                                  # 0.0 for deterministic tournament play
-  gumbel_search_depth: 50000                        # Default search depth if GUI doesn't specify
+  gumbel_search_depth: 30000                         # Default search depth if GUI doesn't specify
   gumbel_m: 32                                       # m value for sequential halving
   logging_level: 20                                  # Logging level for MCTS Search and Action Selection
   
 selection:
   temperature_ply_cutoff: 6                          # Sample proportional to visit count for first moves
-  top_move_probability: 0.3                          # Probability the top move is played
-  temperature_blunder_q_threshold: 0.1               # Absolute Q value [-1, 1] threshold
-  temperature_blunder_noise_weight: 0
+  temperature_q_decay: 0.1                           # Absolute Q value [-1, 1] Boltazmann temperature decay
   draw_cutoff: -0.25                                 # Value threshold to consider a game a draw
   resignation_probability: 0.0                       # Chance the bot checks for resignation allowed
   resignation_cutoff: 0.0                            # Value head cutoff for resignation
