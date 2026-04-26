@@ -71,7 +71,14 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
         std::uniform_int_distribution<> dist(0, draw_nodes.size() - 1);
         result.best_move = draw_nodes[dist(rng)]->move;
 
-       // Rule C: Temperature / Deterministic
+    // Rule C: Resign if below threshold
+    } else if (use_resignation && !non_forced_visited.empty() && best_q < config.resignation_cutoff) {
+        // Check for !non_forced_visited.empty() means if a forced loss is found, it will be played out to mate
+        logger.log("INFO", "Best Value (" + std::to_string(best_q) + ") is below cutoff. Triggering Resignation.");
+        result.resigned = true;
+        result.best_move = chess::Move::NO_MOVE;
+
+    // Rule D: Temperature / Deterministic
     } else if (!non_forced_visited.empty()) {
         if (ply_count <= config.temperature_ply_cutoff) {
             // weight(a) = visits(a) * exp(-q_drop(a) / temperature)
@@ -96,27 +103,20 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
             result.best_move = (m1->gumbel_score > m2->gumbel_score) ? m1->move : m2->move;
         }
         
-    // Rule D: Delay Mate
+    // Rule E: Delay Mate
     } else {
-        if (!draw_nodes.empty()) {
-            std::uniform_int_distribution<> dist(0, draw_nodes.size() - 1);
-            result.best_move = draw_nodes[dist(rng)]->move;
-        } else if (!losing_nodes.empty()) {
+        // Delay mate
+        if (!losing_nodes.empty()) {
             MCTSNode* best_delay = losing_nodes[0];
             for (MCTSNode* c : losing_nodes) {
                 if (c->distance_to_mate.value() > best_delay->distance_to_mate.value()) best_delay = c;
             }
             result.best_move = best_delay->move;
+        // Should never be reached
         } else {
             std::uniform_int_distribution<> dist(0, num_children - 1);
             result.best_move = all_children[dist(rng)]->move;
         }
-    }
-
-    if (use_resignation && best_q < config.resignation_cutoff) {
-        logger.log("INFO", "Best Value (" + std::to_string(best_q) + ") is below cutoff. Triggering Resignation.");
-        result.resigned = true;
-        result.best_move = chess::Move::NO_MOVE;
     }
 
     return result;
