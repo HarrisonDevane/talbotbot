@@ -1,5 +1,5 @@
 global:
-  total_training_steps: 40000                        # Total gradient updates to perform
+  total_training_steps: 20000                        # Total gradient updates to perform
   logging_rotation_steps: 1000                       # How often to make a new log folder
   min_buffer_size: 1024000                           # Minimum replay buffer size
   max_buffer_size: 24576000                          # Max buffer size
@@ -10,7 +10,7 @@ global:
   model_path: 'rl_dir/models/model'                  # Path to best model base name
 
 inference:
-  inference_worker_cores: [8, 9, 10]               # Dedicated CPU cores for the Batching Process (feeding the GPU)
+  inference_worker_cores: [8, 9, 10]                 # Dedicated CPU cores for the Batching Process (feeding the GPU)
   batch_size: 512                                    # Max batch size during inference
   batch_size_factor: 12                              # Multiplier for batch size to determine max slots available in RAM
   batch_timeout_ms: 10                               # How long the GPU batcher waits for more data before running partial batch
@@ -31,6 +31,7 @@ mcts:
   node_pool_size: 50000                              # Capacity of the persistent MCTS node pool
   worker_minibatch_size: 16                          # Max positions a single worker sends at once
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored (prevents threads flocking)
+  contempt: 0.0                                      # Contempt for playing drawing positions
   gumbel_c_visit: 50.0                               # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_noise: 1.0                                  # Gumbel noise value

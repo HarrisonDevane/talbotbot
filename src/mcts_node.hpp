@@ -7,7 +7,6 @@
 struct MCTSNode {
     MCTSNode* parent = nullptr;
     
-    // THE FIX: Only point to the first child. The rest are contiguous in the NodePool.
     MCTSNode* first_child = nullptr;
     int num_children = 0;
     
@@ -16,9 +15,15 @@ struct MCTSNode {
 
     int visits = 0; 
     int num_available_children = 0;
-    double value_sum = 0.0;
+    
+    double w_sum = 0.0;
+    double d_sum = 0.0;
+    double l_sum = 0.0;
+
     double raw_logit = 0.0;
-    double raw_value = 0.0;
+    double raw_w = 0.0;
+    double raw_d = 0.0;
+    double raw_l = 0.0;
 
     double gumbel_noise = 0.0;
     double gumbel_score = 0.0;
@@ -32,6 +37,8 @@ struct MCTSNode {
     MCTSNode(MCTSNode* p = nullptr, chess::Move m = chess::Move::NO_MOVE);
 
     MCTSNode* get_child(chess::Move m) const;
-    double calculate_gumbel_score(double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix);
-    double calculate_v_mix() const;
+    
+    double expected_value(double contempt) const;
+    double calculate_gumbel_score(double contempt, double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix);
+    double calculate_v_mix(double contempt) const;
 };

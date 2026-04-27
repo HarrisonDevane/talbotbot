@@ -173,7 +173,7 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < total_slots; ++i) {
         shared_input_buffer.push_back(torch::zeros({input_planes, board_dim, board_dim}, options_half));
         shared_policy_buffer.push_back(torch::zeros({policy_moves}, options_half));
-        shared_value_buffer.push_back(torch::zeros({1}, options_half));
+        shared_value_buffer.push_back(torch::zeros({3}, options_half));
     }
 
     std::vector<ThreadSafeQueue<std::vector<int>>> result_queues(num_workers);

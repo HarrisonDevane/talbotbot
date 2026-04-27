@@ -53,7 +53,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
         MCTSNode* m1 = non_forced_visited[0];
         MCTSNode* m2 = (non_forced_visited.size() > 1) ? non_forced_visited[1] : m1;
         top_node = (m1->gumbel_score > m2->gumbel_score) ? m1 : m2;
-        best_q = -top_node->calculate_v_mix();
+        best_q = -top_node->calculate_v_mix(config.contempt);
     }
 
     // Rule A: Win
@@ -86,7 +86,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
  
             std::vector<double> weights(non_forced_visited.size());
             for (size_t i = 0; i < non_forced_visited.size(); ++i) {
-                double q_drop = best_q - (-non_forced_visited[i]->calculate_v_mix());
+                double q_drop = best_q - (-non_forced_visited[i]->calculate_v_mix(config.contempt));
                 weights[i] = non_forced_visited[i]->visits * std::exp(-q_drop / temp);
             }
  

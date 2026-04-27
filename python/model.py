@@ -3,55 +3,72 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple
 
-class GlobalBroadcastingBlock(nn.Module):
-    """
-    Squeeze-and-Excitation: Pools the board into a global vector 
-    to provide long-range coordination.
-    """
-    def __init__(self, num_channels: int, reduction_ratio: int):
-        super().__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(num_channels, num_channels // reduction_ratio, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(num_channels // reduction_ratio, num_channels, bias=False),
-            nn.Sigmoid()
-        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y
-
-class BasicBlock(nn.Module):
+class BottleneckBlock(nn.Module):
     """
-    Standard AlphaZero/Lc0 block: 3x3 -> 3x3 -> SE.
-    Maintains full spatial capacity without bottlenecking.
+    1x1 squeeze -> 3x3 spatial -> 1x1 expand with residual skip.
+    No SE - global coordination is handled by BroadcastResBlock at intervals.
     """
-    def __init__(self, num_channels: int, se_reduction_ratio: int = 4):
+    def __init__(self, num_channels: int, bottleneck_channels: int):
         super().__init__()
-        # First 3x3 Spatial Processing
-        self.conv1 = nn.Conv2d(num_channels, num_channels, kernel_size=3, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(num_channels)
+        self.conv1 = nn.Conv2d(num_channels, bottleneck_channels, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(bottleneck_channels)
         
-        # Second 3x3 Spatial Processing
-        self.conv2 = nn.Conv2d(num_channels, num_channels, kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(num_channels)
-
-        # Unconditional SE applied to the residual branch
-        self.se = GlobalBroadcastingBlock(num_channels, se_reduction_ratio)
+        self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(bottleneck_channels)
+        
+        self.conv3 = nn.Conv2d(bottleneck_channels, num_channels, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(num_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
         out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        
-        # Apply SE seamlessly
-        out = self.se(out)
+        out = F.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
         out += identity
-        
         return F.relu(out)
+
+
+class BroadcastResBlock(nn.Module):
+    """
+    DeepMind-style broadcasting residual block.
+    1x1 mix channels -> broadcast (pool to global vector, linear, broadcast back) -> 1x1 mix channels.
+    Full residual skip connection.
+    """
+    def __init__(self, num_channels: int, board_dim: int):
+        super().__init__()
+        spatial_size = board_dim * board_dim
+
+        # First 1x1 to mix channels
+        self.conv1 = nn.Conv2d(num_channels, num_channels, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(num_channels)
+
+        # Broadcast: operates on each channel independently across spatial dims
+        self.broadcast_fc = nn.Linear(spatial_size, spatial_size, bias=True)
+
+        # Second 1x1 to mix channels
+        self.conv2 = nn.Conv2d(num_channels, num_channels, kernel_size=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(num_channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        b, c, h, w = x.shape
+
+        # 1x1 channel mix
+        out = F.relu(self.bn1(self.conv1(x)))
+
+        # Broadcast: reshape to (B, C, H*W), apply same linear to each channel
+        out = out.reshape(b, c, h * w)
+        out = self.broadcast_fc(out)
+        out = F.relu(out)
+        out = out.reshape(b, c, h, w)
+
+        # 1x1 channel mix (no relu before skip)
+        out = self.bn2(self.conv2(out))
+
+        out += identity
+        return F.relu(out)
+
 
 class ChessAIModel(nn.Module):
     def __init__(self, config: dict):
@@ -69,26 +86,27 @@ class ChessAIModel(nn.Module):
 
         # --- Residual Backbone ---
         res_blocks = []
-        for _ in range(m_cfg['resblocks']):
-            res_blocks.append(
-                BasicBlock(
-                    self.num_filters, 
-                    se_reduction_ratio=m_cfg['broadcast_reduction_ratio']
-                )
-            )
+        broadcast_interval = m_cfg.get('broadcast_interval', 0)
+        bottleneck_channels = m_cfg['bottleneck_channels']
+
+        for i in range(m_cfg['resblocks']):
+            if broadcast_interval > 0 and (i + 1) % broadcast_interval == 0:
+                res_blocks.append(BroadcastResBlock(self.num_filters, self.board_dim))
+            else:
+                res_blocks.append(BottleneckBlock(self.num_filters, bottleneck_channels))
         
         self.residual_blocks = nn.ModuleList(res_blocks)
 
-        # --- Policy Head (Where to move) ---
+        # --- Policy Head ---
         self.policy_conv = nn.Conv2d(self.num_filters, 2, kernel_size=1, bias=False)
         self.policy_bn = nn.BatchNorm2d(2)
         self.policy_fc = nn.Linear(2 * self.board_dim * self.board_dim, c_cfg['total_policy_moves'])
 
-        # --- Value Head (Who is winning) ---
+        # --- Value Head (WDL) ---
         self.value_conv = nn.Conv2d(self.num_filters, 1, kernel_size=1, bias=False)
         self.value_bn = nn.BatchNorm2d(1)
         self.value_fc1 = nn.Linear(1 * self.board_dim * self.board_dim, 64)
-        self.value_fc2 = nn.Linear(64, 1)
+        self.value_fc2 = nn.Linear(64, 3)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # Backbone
@@ -101,17 +119,17 @@ class ChessAIModel(nn.Module):
         p = p.flatten(1)
         policy_logits = self.policy_fc(p)
         
-        # Value
+        # Value (WDL)
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.flatten(1)
         v = F.relu(self.value_fc1(v))
-        value_out = torch.tanh(self.value_fc2(v))
+        value_out = F.softmax(self.value_fc2(v), dim=1)
 
         return policy_logits, value_out
     
+
 def fuse_bn_for_export(model: ChessAIModel) -> ChessAIModel:
     def fuse_conv_bn(conv, bn):
-        # Fold BN into conv weights and bias
         bn_mean = bn.running_mean
         bn_var = bn.running_var
         bn_weight = bn.weight
@@ -129,9 +147,16 @@ def fuse_bn_for_export(model: ChessAIModel) -> ChessAIModel:
     model.initial_conv = fuse_conv_bn(model.initial_conv, model.initial_bn)
     model.initial_bn = nn.Identity()
 
-    # Fuse inside each BasicBlock (SE has no BN, so no changes needed there)
+    # Fuse inside each block
     for block in model.residual_blocks:
-        if isinstance(block, BasicBlock):
+        if isinstance(block, BottleneckBlock):
+            block.conv1 = fuse_conv_bn(block.conv1, block.bn1)
+            block.bn1 = nn.Identity()
+            block.conv2 = fuse_conv_bn(block.conv2, block.bn2)
+            block.bn2 = nn.Identity()
+            block.conv3 = fuse_conv_bn(block.conv3, block.bn3)
+            block.bn3 = nn.Identity()
+        elif isinstance(block, BroadcastResBlock):
             block.conv1 = fuse_conv_bn(block.conv1, block.bn1)
             block.bn1 = nn.Identity()
             block.conv2 = fuse_conv_bn(block.conv2, block.bn2)

@@ -76,16 +76,16 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    YAML::Node config = YAML::LoadFile(config_file_path);
-    YAML::Node global_cfg = config["global"];
-    YAML::Node eval_cfg = config["evaluation"];
-    YAML::Node inf_cfg = config["inference"];
-    YAML::Node mcts_cfg = config["mcts"];
-    YAML::Node sel_cfg = config["selection"];
+    YAML::Node config_input = YAML::LoadFile(config_file_path);
+    YAML::Node global_config_input = config_input["global"];
+    YAML::Node eval_config_input = config_input["evaluation"];
+    YAML::Node inference_config_input = config_input["inference"];
+    YAML::Node mcts_config_input = config_input["mcts"];
+    YAML::Node selector_config_input = config_input["selection"];
 
-    std::string model_file_path = global_cfg["model_file"].as<std::string>();
-    std::string base_log_dir = global_cfg["log_dir"].as<std::string>();
-    std::string base_model_path = global_cfg["model_path"].as<std::string>();
+    std::string model_file_path = global_config_input["model_file"].as<std::string>();
+    std::string base_log_dir = global_config_input["log_dir"].as<std::string>();
+    std::string base_model_path = global_config_input["model_path"].as<std::string>();
     std::string engine_path = base_model_path + ".engine";
 
     if (!fs::exists(model_file_path)) {
@@ -104,13 +104,13 @@ int main(int argc, char* argv[]) {
     std::string run_log_dir = base_log_dir + "/" + time_oss.str();
     fs::create_directories(run_log_dir);
     
-    Logger main_logger("uci_main", run_log_dir, global_cfg["main_logging_level"].as<int>());
+    Logger main_logger("uci_main", run_log_dir, global_config_input["main_logging_level"].as<int>());
     main_logger.rotate(0, 0); 
     main_logger.log("INFO", "Booting Talbot UCI Engine (Single Worker, Unified Logging)...");
 
-    if (eval_cfg["main_cores"]) {
+    if (eval_config_input["main_cores"]) {
         DWORD_PTR mainMask = 0;
-        for (const auto& core : eval_cfg["main_cores"]) {
+        for (const auto& core : eval_config_input["main_cores"]) {
             mainMask |= (static_cast<DWORD_PTR>(1) << core.as<int>());
         }
         if (mainMask != 0) SetThreadAffinityMask(GetCurrentThread(), mainMask);
@@ -121,13 +121,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    int inference_batch_size = inf_cfg["batch_size"].as<int>();
-    int max_batch_size = inference_batch_size * inf_cfg["batch_size_factor"].as<int>();
+    int inference_batch_size = inference_config_input["batch_size"].as<int>();
+    int max_batch_size = inference_batch_size * inference_config_input["batch_size_factor"].as<int>();
     int input_planes = model["model"]["input_planes"].as<int>();
     int board_dim = model["chess"]["board_dim"].as<int>(); 
     int policy_moves = model["chess"]["total_policy_moves"].as<int>();
     
-    ModelConfig m_config{input_planes, board_dim, policy_moves};
+    ModelConfig model_config{input_planes, board_dim, policy_moves};
     auto options_half = torch::TensorOptions().dtype(torch::kHalf).device(torch::kCPU);
     
     std::vector<torch::Tensor> shared_input_buffer;
@@ -137,7 +137,7 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < max_batch_size; ++i) {
         shared_input_buffer.push_back(torch::zeros({input_planes, board_dim, board_dim}, options_half));
         shared_policy_buffer.push_back(torch::zeros({policy_moves}, options_half));
-        shared_value_buffer.push_back(torch::zeros({1}, options_half));
+        shared_value_buffer.push_back(torch::zeros({3}, options_half));
     }
 
     moodycamel::ConcurrentQueue<std::pair<int, int>> inference_queue;
@@ -146,15 +146,15 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < max_batch_size; ++i) buffer_free_slots.push(i);
 
     std::vector<int> batcher_cores;
-    for (const auto& core : inf_cfg["inference_worker_cores"]) {
+    for (const auto& core : inference_config_input["inference_worker_cores"]) {
         batcher_cores.push_back(core.as<int>());
     }
 
     std::atomic<uint64_t> dummy_step{0};
 
     InferenceBatcher batcher(
-        engine_path, inference_batch_size, inf_cfg["batch_timeout_ms"].as<int>(), 1, 
-        run_log_dir, inf_cfg["logging_level"].as<int>(), batcher_cores, 0, dummy_step, inf_cfg["logging_interval_sec"].as<int>()
+        engine_path, inference_batch_size, inference_config_input["batch_timeout_ms"].as<int>(), 1, 
+        run_log_dir, inference_config_input["logging_level"].as<int>(), batcher_cores, 0, dummy_step, inference_config_input["logging_interval_sec"].as<int>()
     );
     
     std::thread batcher_thread([&]() {
@@ -165,29 +165,30 @@ int main(int argc, char* argv[]) {
     board.setFen(chess::constants::STARTPOS);
     std::vector<chess::Board> history;
 
-    ActionSelectorConfig s_config;
-    s_config.node_pool_size = mcts_cfg["node_pool_size"].as<int>();
-    s_config.virtual_loss = mcts_cfg["virtual_loss"].as<double>();
-    s_config.draw_cutoff = sel_cfg["draw_cutoff"].as<double>();
-    s_config.gumbel_c_visit = mcts_cfg["gumbel_c_visit"].as<double>();
-    s_config.gumbel_c_scale = mcts_cfg["gumbel_c_scale"].as<double>();
-    s_config.gumbel_noise = mcts_cfg["gumbel_noise"].as<double>();
-    s_config.gumbel_search_depth = mcts_cfg["gumbel_search_depth"].as<int>();
-    s_config.gumbel_m = mcts_cfg["gumbel_m"].as<int>();
-    s_config.batch_size_per_worker = mcts_cfg["worker_minibatch_size"].as<int>();
-    s_config.temperature_ply_cutoff = sel_cfg["temperature_ply_cutoff"].as<int>();
-    s_config.temperature_q_decay = sel_cfg["temperature_q_decay"].as<double>();
-    s_config.resignation_probability = sel_cfg["resignation_probability"].as<double>();
-    s_config.resignation_cutoff = sel_cfg["resignation_cutoff"].as<double>();
+    ActionSelectorConfig selector_config;
+    selector_config.node_pool_size = mcts_config_input["node_pool_size"].as<int>();
+    selector_config.virtual_loss = mcts_config_input["virtual_loss"].as<double>();
+    selector_config.contempt = mcts_config_input["contempt"].as<double>();
+    selector_config.draw_cutoff = selector_config_input["draw_cutoff"].as<double>();
+    selector_config.gumbel_c_visit = mcts_config_input["gumbel_c_visit"].as<double>();
+    selector_config.gumbel_c_scale = mcts_config_input["gumbel_c_scale"].as<double>();
+    selector_config.gumbel_noise = mcts_config_input["gumbel_noise"].as<double>();
+    selector_config.gumbel_search_depth = mcts_config_input["gumbel_search_depth"].as<int>();
+    selector_config.gumbel_m = mcts_config_input["gumbel_m"].as<int>();
+    selector_config.batch_size_per_worker = mcts_config_input["worker_minibatch_size"].as<int>();
+    selector_config.temperature_ply_cutoff = selector_config_input["temperature_ply_cutoff"].as<int>();
+    selector_config.temperature_q_decay = selector_config_input["temperature_q_decay"].as<double>();
+    selector_config.resignation_probability = selector_config_input["resignation_probability"].as<double>();
+    selector_config.resignation_cutoff = selector_config_input["resignation_cutoff"].as<double>();
 
     std::atomic<int> single_worker_wait_count{0};
 
     auto mcts_engine = std::make_unique<MCTSEngine>(
-        s_config.node_pool_size, s_config.batch_size_per_worker, 
+        selector_config.node_pool_size, selector_config.batch_size_per_worker, 
         inference_queue, result_queues[0], 0, 
-        s_config.virtual_loss, s_config.draw_cutoff, 
-        s_config.gumbel_c_visit, s_config.gumbel_c_scale, 
-        s_config.gumbel_noise, board, history, main_logger, 
+        selector_config.virtual_loss, selector_config.contempt, selector_config.draw_cutoff, 
+        selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
+        selector_config.gumbel_noise, board, history, main_logger, 
         shared_input_buffer, shared_policy_buffer, shared_value_buffer,
         buffer_free_slots, &single_worker_wait_count, 1
     );
@@ -195,8 +196,8 @@ int main(int argc, char* argv[]) {
     SearchWorker search_worker;
     search_worker.mcts = mcts_engine.get();
     
-    if (eval_cfg["game_worker_cores"]) {
-        for (const auto& core : eval_cfg["game_worker_cores"]) {
+    if (eval_config_input["game_worker_cores"]) {
+        for (const auto& core : eval_config_input["game_worker_cores"]) {
             search_worker.core_mask |= (static_cast<DWORD_PTR>(1) << core.as<int>());
         }
     }
@@ -220,7 +221,7 @@ int main(int argc, char* argv[]) {
         }
     });
 
-    ActionSelector agent("uci_agent", 0, s_config, main_logger);
+    ActionSelector agent("uci_agent", 0, selector_config, main_logger);
     int ply_count = 1;
 
     std::string line;
@@ -273,7 +274,7 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (command == "go") {
-            int total_search_nodes = s_config.gumbel_search_depth;
+            int total_search_nodes = selector_config.gumbel_search_depth;
             for (size_t i = 1; i < tokens.size() - 1; ++i) {
                 if (tokens[i] == "nodes") total_search_nodes = std::stoi(tokens[i + 1]);
             }
@@ -287,7 +288,7 @@ int main(int argc, char* argv[]) {
                 search_worker.board = board;
                 search_worker.history = history;
                 search_worker.search_nodes = total_search_nodes;
-                search_worker.gumbel_m = s_config.gumbel_m;
+                search_worker.gumbel_m = selector_config.gumbel_m;
                 search_worker.done_flag = false;
                 search_worker.start_flag = true;
                 search_worker.cv_start.notify_one();
@@ -299,7 +300,7 @@ int main(int argc, char* argv[]) {
             }
 
             MCTSNode* root = mcts_engine->root;
-            double root_v_mix = root->calculate_v_mix();
+            double root_v_mix = root->calculate_v_mix(selector_config.contempt);
 
             SelectionResult result = agent.select_move(root, ply_count);
 

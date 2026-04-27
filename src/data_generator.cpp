@@ -46,6 +46,7 @@ DataGenerator::DataGenerator(
     selector_config.node_pool_size = mcts_cfg["node_pool_size"].as<int>();
     selector_config.batch_size_per_worker = mcts_cfg["worker_minibatch_size"].as<int>();
     selector_config.virtual_loss = mcts_cfg["virtual_loss"].as<double>();
+    selector_config.contempt = mcts_cfg["contempt"].as<double>();
     selector_config.gumbel_c_visit = mcts_cfg["gumbel_c_visit"].as<double>();
     selector_config.gumbel_c_scale = mcts_cfg["gumbel_c_scale"].as<double>();
     selector_config.gumbel_noise = mcts_cfg["gumbel_noise"].as<double>();
@@ -123,7 +124,7 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
     MCTSEngine mcts(
         selector_config.node_pool_size, selector_config.batch_size_per_worker, 
         inference_queue, result_queues[logical_idx], logical_idx,
-        selector_config.virtual_loss, selector_config.draw_cutoff, 
+        selector_config.virtual_loss, selector_config.contempt, selector_config.draw_cutoff, 
         selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
         selector_config.gumbel_noise, dummy, std::vector<chess::Board>(), logger,
         shared_input_buffer, shared_policy_buffer, shared_value_buffer,
@@ -181,7 +182,7 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
             // 1. Search
             mcts.reset(board, history);
             int sim_count = mcts.run_simulations(selector_config.gumbel_search_depth, selector_config.gumbel_m);
-            double root_v_mix = mcts.root->calculate_v_mix();
+            double root_v_mix = mcts.root->calculate_v_mix(selector_config.contempt);
 
             // 2. Generate Targets
             TargetResult targets = TargetGenerator::generate_targets(

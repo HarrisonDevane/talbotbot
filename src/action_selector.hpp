@@ -10,6 +10,7 @@
 
 struct ActionSelectorConfig {
     int node_pool_size;
+    double contempt;
     double virtual_loss;
     double draw_cutoff;
     double gumbel_c_visit;

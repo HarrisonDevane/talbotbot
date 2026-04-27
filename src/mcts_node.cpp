@@ -10,8 +10,13 @@ MCTSNode* MCTSNode::get_child(chess::Move m) const {
     return nullptr;
 }
 
-double MCTSNode::calculate_gumbel_score(double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix) {
-    double q_val = (visits > 0) ? (-value_sum / visits) : v_mix;
+double MCTSNode::expected_value(double contempt) const {
+    if (visits == 0) return (raw_w - raw_l) + (contempt * raw_d);
+    return (w_sum - l_sum + (contempt * d_sum)) / visits;
+}
+
+double MCTSNode::calculate_gumbel_score(double contempt, double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix) {
+    double q_val = (visits > 0) ? -expected_value(contempt) : v_mix;
     double q_norm = (q_val + 1.0) / 2.0;
     
     double sigma = (gumbel_c_visit + max_visits) * gumbel_c_scale;
@@ -20,17 +25,18 @@ double MCTSNode::calculate_gumbel_score(double gumbel_c_visit, double gumbel_c_s
     return gumbel_score;
 }
 
-double MCTSNode::calculate_v_mix() const {
+double MCTSNode::calculate_v_mix(double contempt) const {
     double sum_visits = 0.0;
     double sum_q_weighted = 0.0;
 
     for (int i = 0; i < num_children; ++i) {
         MCTSNode* child = first_child + i;
         if (child->visits > 0) {
-            double child_q = -child->value_sum / child->visits;
+            double child_q = -child->expected_value(contempt);
             sum_visits += child->visits;
             sum_q_weighted += (child->visits * child_q);
         }
     }
-    return (raw_value + sum_q_weighted) / (1.0 + sum_visits);
+    double raw_q = (raw_w - raw_l) + (contempt * raw_d);
+    return (raw_q + sum_q_weighted) / (1.0 + sum_visits);
 }

@@ -242,7 +242,7 @@ class TrainTask:
 
         self.scaler = GradScaler('cuda')
         self.policy_criterion = nn.KLDivLoss(reduction='batchmean')
-        self.value_criterion = nn.MSELoss()
+        self.value_criterion = nn.KLDivLoss(reduction='batchmean')
 
         checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -316,17 +316,19 @@ class TrainTask:
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = float(self.training_config['learning_rate'])
 
+        value_targets_wdl = torch.zeros((value_targets.size(0), 3), device=self.device, dtype=torch.float32)
+        value_targets_wdl[:, 0] = (value_targets == 1.0).float()  # Win
+        value_targets_wdl[:, 1] = (value_targets == 0.0).float()  # Draw
+        value_targets_wdl[:, 2] = (value_targets == -1.0).float() # Loss
+
         with torch.no_grad():
             total_v = len(value_targets)
-            if total_v > 0:
-                wins = (value_targets == 1.0).sum().item()
-                draws = (value_targets == 0.0).sum().item()
-                losses = (value_targets == -1.0).sum().item()
-                pct_w = (wins / total_v) * 100
-                pct_d = (draws / total_v) * 100
-                pct_l = (losses / total_v) * 100
-            else:
-                pct_w = pct_d = pct_l = 0.0
+            wins = (value_targets == 1.0).sum().item()
+            draws = (value_targets == 0.0).sum().item()
+            losses = (value_targets == -1.0).sum().item()
+            pct_w = (wins / total_v) * 100
+            pct_d = (draws / total_v) * 100
+            pct_l = (losses / total_v) * 100
 
         self.model.train()
         self.optimizer.zero_grad()
@@ -339,7 +341,8 @@ class TrainTask:
         policy_log_softmax = F.log_softmax(policy_logits, dim=1)
 
         policy_loss = self.policy_criterion(policy_log_softmax, policy_target.float())
-        value_loss  = self.value_criterion(value_outputs.squeeze(1).float(), value_targets.float())
+        value_log_probs = torch.log(value_outputs.clamp(min=1e-8))
+        value_loss = self.value_criterion(value_log_probs, value_targets_wdl)
 
         total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
                      (value_loss  * self.training_config['value_loss_weight'])
@@ -347,8 +350,12 @@ class TrainTask:
         with torch.no_grad():
             policy_probs   = torch.exp(policy_log_softmax)
             policy_entropy = -(policy_probs * policy_log_softmax).sum(dim=1).mean()
-            v_out_mean     = value_outputs.mean()
+            v_out_mean     = (value_outputs[:, 0] - value_outputs[:, 2]).mean()
             v_tar_mean     = value_targets.mean()
+
+            pred_w_mean = value_outputs[:, 0].mean().item() * 100.0
+            pred_d_mean = value_outputs[:, 1].mean().item() * 100.0
+            pred_l_mean = value_outputs[:, 2].mean().item() * 100.0
 
         fw_time = (time.perf_counter() - fw_start) * 1000
 
@@ -365,11 +372,10 @@ class TrainTask:
             f"Loss: T={total_loss.item():.4f} "
             f"(P={(policy_loss.item() * self.training_config['policy_loss_weight']):.4f}, "
             f"V={(value_loss.item() * self.training_config['value_loss_weight']):.4f}) | "
-            f"Batch Vals (W/D/L): {pct_w:.1f}% / {pct_d:.1f}% / {pct_l:.1f}%| "
+            f"Tar (W/D/L): {pct_w:.1f}% / {pct_d:.1f}% / {pct_l:.1f}% | "
+            f"Pred: {pred_w_mean:.1f}% / {pred_d_mean:.1f}% / {pred_l_mean:.1f}% | "
             f"P_Ent={policy_entropy.item():.4f} | "
-            f"V_Out={v_out_mean.item():.4f} | V_Tar={v_tar_mean.item():.4f} | "
-            f"Grad={grad_norm.item():.2f} | LR={self.optimizer.param_groups[0]['lr']:.6f} | "
-            f"ms: Data={data_time:.1f} FW={fw_time:.1f} BW={bw_time:.1f}"
+            f"Grad={grad_norm.item():.2f} | LR={self.optimizer.param_groups[0]['lr']:.6f}"
         )
 
         if self.tb_writer is not None:
@@ -383,6 +389,9 @@ class TrainTask:
             self.tb_writer.add_scalar('Batch_Composition/Wins_Pct', pct_w, global_step)
             self.tb_writer.add_scalar('Batch_Composition/Draws_Pct', pct_d, global_step)
             self.tb_writer.add_scalar('Batch_Composition/Losses_Pct', pct_l, global_step)
+            self.tb_writer.add_scalar('Predictions/Predicted_Win_Pct', pred_w_mean, global_step)
+            self.tb_writer.add_scalar('Predictions/Predicted_Draw_Pct', pred_d_mean, global_step)
+            self.tb_writer.add_scalar('Predictions/Predicted_Loss_Pct', pred_l_mean, global_step)
             self.tb_writer.add_scalar('Hardware_MS/Data_Load', data_time, global_step)
             self.tb_writer.add_scalar('Hardware_MS/Forward', fw_time, global_step)
             self.tb_writer.add_scalar('Hardware_MS/Backward', bw_time, global_step)

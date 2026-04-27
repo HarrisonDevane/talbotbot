@@ -89,6 +89,7 @@ public:
     int worker_batch_size;
     int worker_id;
     double virtual_loss;
+    double contempt;
     double draw_cutoff;
     int simulation_count;
     int inference_sent;
@@ -136,6 +137,7 @@ public:
         ThreadSafeQueue<std::vector<int>>& result_queue, 
         int worker_id, 
         double virtual_loss,
+        double contempt,
         double draw_cutoff, 
         double gumbel_c_visit, 
         double gumbel_c_scale, 
@@ -158,7 +160,7 @@ private:
     void _wait_for_inference();
     MCTSNode* _select(MCTSNode* start_node, std::vector<MCTSNode*>& simulation_path);
     void _backpropagate_minimax(MCTSNode* node);
-    void _backpropagate(MCTSNode* node, double value, bool is_terminal);
+    void _backpropagate(MCTSNode* node, double w, double d, double l, bool is_terminal);
     void _virtual_loss(MCTSNode* node, bool is_applying);
     
     void _mark_selected(MCTSNode* node);

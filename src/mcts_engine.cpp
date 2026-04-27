@@ -13,12 +13,12 @@
 
 MCTSEngine::MCTSEngine(
     int node_pool_capacity, int worker_batch_size, moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue, 
-    ThreadSafeQueue<std::vector<int>>& result_queue, int worker_id, double virtual_loss,
+    ThreadSafeQueue<std::vector<int>>& result_queue, int worker_id, double virtual_loss, double contempt,
     double draw_cutoff, double gumbel_c_visit, double gumbel_c_scale, double gumbel_noise, 
     const chess::Board& board, const std::vector<chess::Board>& base_history, Logger& logger, 
     std::vector<torch::Tensor>& shared_input_buffer, std::vector<torch::Tensor>& shared_policy_buffer, std::vector<torch::Tensor>& shared_value_buffer,
     ThreadSafeQueue<int>& buffer_free_slots, std::atomic<int>* core_wait_count, int workers_per_core
-) : worker_batch_size(worker_batch_size), worker_id(worker_id), virtual_loss(virtual_loss),
+) : worker_batch_size(worker_batch_size), worker_id(worker_id), virtual_loss(virtual_loss), contempt(contempt),
     draw_cutoff(draw_cutoff), gumbel_c_visit(gumbel_c_visit), gumbel_c_scale(gumbel_c_scale), 
     gumbel_noise(gumbel_noise), root_board(board), base_history(base_history), 
     node_pool(node_pool_capacity), logger(logger), inference_queue(inference_queue), result_queue(result_queue), 
@@ -100,13 +100,13 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
             sum_visits += child->visits;
         }
         
-        double v_mix = node->calculate_v_mix();
+        double v_mix = node->calculate_v_mix(contempt);
         double max_score_logit = -1e20;
 
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
             if (child->forced_outcome.has_value() || child->unavailable_for_selection) continue;
-            double score = child->calculate_gumbel_score(gumbel_c_visit, gumbel_c_scale, max_visits, v_mix);
+            double score = child->calculate_gumbel_score(contempt, gumbel_c_visit, gumbel_c_scale, max_visits, v_mix);
             if (score > max_score_logit) max_score_logit = score;
         }
 
@@ -218,7 +218,10 @@ void MCTSEngine::_retrieve_inference(bool block) {
             inference_received++;
 
             c10::Half* policy_ptr = shared_policy_buffer[buffer_index].data_ptr<c10::Half>();
-            float value_output = (float)shared_value_buffer[buffer_index].data_ptr<c10::Half>()[0];
+            c10::Half* wdl_ptr = shared_value_buffer[buffer_index].data_ptr<c10::Half>();
+            float p_win = (float)wdl_ptr[0];
+            float p_draw = (float)wdl_ptr[1];
+            float p_loss = (float)wdl_ptr[2];
 
             buffer_free_slots.push(buffer_index);
 
@@ -232,7 +235,7 @@ void MCTSEngine::_retrieve_inference(bool block) {
                     node->expanded = true;
                     time_expansion += ELAPSED(exp_start, NOW());
                 }
-                _backpropagate(node, (double)value_output, false);
+                _backpropagate(node, p_win, p_draw, p_loss, false);
             }
         }
     }
@@ -260,14 +263,14 @@ void MCTSEngine::_handle_terminal_node(MCTSNode* leaf) {
     auto start_time = NOW();
     auto result = root_board.isGameOver(); 
     
-    double value = 0.0;
+    double w = 0.0, d = 0.0, l = 0.0;
     std::string term_type = "Draw";
 
     if (result.second == chess::GameResult::LOSE) {
-        value = -1.0; 
+        l = 1.0; 
         term_type = "Loss (Mate)";
     } else if (result.second == chess::GameResult::DRAW || root_board.isRepetition(3)) {
-        value = 0.0;
+        d = 1.0;
     }
 
     if (logger.get_level() <= 10) {
@@ -277,7 +280,7 @@ void MCTSEngine::_handle_terminal_node(MCTSNode* leaf) {
     _mark_selected(leaf);
     time_expansion += ELAPSED(start_time, NOW());
     
-    _backpropagate(leaf, value, true);
+    _backpropagate(leaf, w, d, l, true);
     simulation_count++;
 }
 
@@ -421,9 +424,9 @@ void MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
 }
 
 void MCTSEngine::_log_tournament_results(const std::vector<MCTSNode*>& candidates, const std::string& phase_name) {
-    if (logger.get_level() > 20) return; // INSTANTLY BYPASS EXPENSIVE LOGIC IF NOT NEEDED
+    if (logger.get_level() > 20) return; 
     
-    double root_v_mix = root->calculate_v_mix();
+    double root_v_mix = root->calculate_v_mix(contempt);
     
     logger.log("INFO", ""); 
     logger.log("INFO", "--- " + phase_name + " ---");
@@ -434,8 +437,8 @@ void MCTSEngine::_log_tournament_results(const std::vector<MCTSNode*>& candidate
 
     char table_header[256];
     snprintf(table_header, sizeof(table_header), 
-        "%-8s %8s %8s %8s %8s %8s %8s %8s %8s", 
-        "Move", "Visits", "Logit", "Noise", "Raw Q", "Norm Q", "Score", "Outcome", "DTM");
+        "%-8s %8s %8s %8s %8s %8s %8s %8s %8s %8s", 
+        "Move", "Logit", "Visits", "Win%", "Draw%", "Loss%", "Norm Q", "Score", "Outcome", "DTM");
     logger.log("INFO", table_header);
     logger.log("INFO", std::string(95, '-'));
     
@@ -450,13 +453,17 @@ void MCTSEngine::_log_tournament_results(const std::vector<MCTSNode*>& candidate
         std::string outcome_str = node->forced_outcome.has_value() ? std::to_string(node->forced_outcome.value()) : "None";
         std::string dtm_str = node->distance_to_mate.has_value() ? std::to_string(node->distance_to_mate.value()) : "None";
 
-        double q_val = (node->visits > 0) ? (-node->value_sum / node->visits) : root_v_mix;
+        double w_pct = (node->visits > 0) ? (node->l_sum / node->visits) * 100.0 : node->raw_l * 100.0;
+        double d_pct = (node->visits > 0) ? (node->d_sum / node->visits) * 100.0 : node->raw_d * 100.0;
+        double l_pct = (node->visits > 0) ? (node->w_sum / node->visits) * 100.0 : node->raw_w * 100.0;
+
+        double q_val = (node->visits > 0) ? -node->expected_value(contempt) : root_v_mix;
         double q_norm = (q_val + 1.0) / 2.0;
 
         snprintf(line, sizeof(line), 
-            "%-8s %8d %8.4f %8.4f %8.4f %8.4f %8.4f %8s %8s", 
-            chess::uci::moveToUci(node->move).c_str(), node->visits, node->raw_logit, node->gumbel_noise,
-            q_val, q_norm, node->gumbel_score, outcome_str.c_str(), dtm_str.c_str()
+            "%-8s %8.4f %8d %8.1f %8.1f %8.1f %8.4f %8.4f %8s %8s", 
+            chess::uci::moveToUci(node->move).c_str(), node->raw_logit, node->visits, 
+            w_pct, d_pct, l_pct, q_norm, node->gumbel_score, outcome_str.c_str(), dtm_str.c_str()
         );
         logger.log("INFO", line);
     }
@@ -567,9 +574,9 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
             if (child->visits > max_visits_phase) max_visits_phase = child->visits;
         }
 
-        double root_v_mix = root->calculate_v_mix();
+        double root_v_mix = root->calculate_v_mix(contempt);
         for (MCTSNode* child : active_candidates) {
-            child->calculate_gumbel_score(gumbel_c_visit, gumbel_c_scale, max_visits_phase, root_v_mix);
+            child->calculate_gumbel_score(contempt, gumbel_c_visit, gumbel_c_scale, max_visits_phase, root_v_mix);
         }
 
         _log_tournament_results(active_candidates, "Phase " + std::to_string(phase_idx) + " End");
@@ -595,9 +602,9 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
     for (MCTSNode* child : all_nodes) {
         if (child->visits > max_visits_final) max_visits_final = child->visits;
     }
-    double root_v_mix = root->calculate_v_mix();
+    double root_v_mix_final = root->calculate_v_mix(contempt);
     for (MCTSNode* child : all_nodes) {
-        child->calculate_gumbel_score(gumbel_c_visit, gumbel_c_scale, max_visits_final, root_v_mix);
+        child->calculate_gumbel_score(contempt, gumbel_c_visit, gumbel_c_scale, max_visits_final, root_v_mix_final);
     }
 
     _log_tournament_results(all_nodes, "Final scores");
@@ -692,11 +699,12 @@ void MCTSEngine::_backpropagate_minimax(MCTSNode* node) {
         }
     }
 }
-void MCTSEngine::_backpropagate(MCTSNode* node, double value, bool is_terminal) {
+
+void MCTSEngine::_backpropagate(MCTSNode* node, double w, double d, double l, bool is_terminal) {
     auto start_time = NOW();
     
     if (is_terminal) {
-        node->forced_outcome = static_cast<int>(value);
+        node->forced_outcome = (w > 0.0) ? 1 : ((l > 0.0) ? -1 : 0);
         node->distance_to_mate = 0;
     } else {
         _virtual_loss(node, false);
@@ -704,24 +712,35 @@ void MCTSEngine::_backpropagate(MCTSNode* node, double value, bool is_terminal) 
     }
 
     MCTSNode* current_node = node;
-    double value_for_backprop = value;
-    current_node->raw_value = value;
+    current_node->raw_w = w;
+    current_node->raw_d = d;
+    current_node->raw_l = l;
+
+    double current_w = w;
+    double current_d = d;
+    double current_l = l;
     
     if (logger.get_level() <= 10) {
-        logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " raw value: " + std::to_string(value));
+        logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " raw WDL: " + std::to_string(w) + "/" + std::to_string(d) + "/" + std::to_string(l));
     }
 
     while (current_node != nullptr) {
         current_node->visits += 1;
-        current_node->value_sum += value_for_backprop;
+        current_node->w_sum += current_w;
+        current_node->d_sum += current_d;
+        current_node->l_sum += current_l;
 
         if (logger.get_level() <= 10) {
-            logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " value: " + std::to_string(value_for_backprop));
+            logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " updated WDL sums: " + std::to_string(current_node->w_sum) + "/" + std::to_string(current_node->d_sum) + "/" + std::to_string(current_node->l_sum));
         }
         
         _backpropagate_minimax(current_node);
 
-        value_for_backprop = -value_for_backprop;
+        // Flip Perspective for the Parent
+        double temp_w = current_w;
+        current_w = current_l;
+        current_l = temp_w;
+
         current_node = current_node->parent;
     }
     time_backpropagation += ELAPSED(start_time, NOW());
@@ -733,7 +752,7 @@ void MCTSEngine::_virtual_loss(MCTSNode* node, bool is_applying) {
 
     while (current_node != nullptr) {
         current_node->visits += (1 * multiplier);
-        current_node->value_sum += (virtual_loss * multiplier);
+        current_node->l_sum += (virtual_loss * multiplier);
         current_node = current_node->parent;
     }
 }

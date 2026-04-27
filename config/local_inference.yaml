@@ -20,10 +20,11 @@ mcts:
   node_pool_size: 10000000                           # Capacity of the persistent MCTS node pool
   worker_minibatch_size: 32                          # Max positions sent to batcher at once
   virtual_loss: 0.3                                  # Penalty applied to nodes currently being explored
+  contempt: 0.0                                      # Contempt for playing drawing positions
   gumbel_c_visit: 50.0                               # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_noise: 0.0                                  # 0.0 for deterministic tournament play
-  gumbel_search_depth: 30000                         # Default search depth if GUI doesn't specify
+  gumbel_search_depth: 10000                         # Default search depth if GUI doesn't specify
   gumbel_m: 32                                       # m value for sequential halving
   logging_level: 20                                  # Logging level for MCTS Search and Action Selection
   

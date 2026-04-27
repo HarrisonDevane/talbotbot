@@ -1,8 +1,9 @@
 model:
-  input_planes: 69                                   # Plane feature stack (P1 pieces, P2 pieces, reps, etc.)
-  filters: 64                                        # Convolutional filters (Network "width")
-  resblocks: 6                                       # Total residual blocks (Network "depth")
-  broadcast_reduction_ratio: 4                       # Shrinks the hidden FC layer in the Squeeze-and-Excitation block to prevent parameter bloat.
+  filters: 192
+  resblocks: 8
+  bottleneck_channels: 92
+  broadcast_interval: 4
+  input_planes: 69
 
 chess:
   board_dim: 8
