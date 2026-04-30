@@ -1,8 +1,8 @@
 model:
-  filters: 128
-  resblocks: 10
-  bottleneck_channels: 64
-  broadcast_interval: 5
+  filters: 192
+  resblocks: 16
+  bottleneck_channels: 96
+  broadcast_interval: 8
   input_planes: 69
 
 chess:
