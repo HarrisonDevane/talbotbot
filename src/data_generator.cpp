@@ -39,7 +39,7 @@ DataGenerator::DataGenerator(
         core_wait_counts.push_back(std::make_unique<std::atomic<int>>(0));
     }
 
-    model_config.input_planes = model_cfg["model"]["input_planes"].as<int>();
+    model_config.input_planes = model_cfg["chess"]["input_planes"].as<int>();
     model_config.board_dim = model_cfg["chess"]["board_dim"].as<int>();
     model_config.policy_moves = model_cfg["chess"]["total_policy_moves"].as<int>();
 

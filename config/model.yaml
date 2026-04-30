@@ -1,11 +1,17 @@
-model:
+teacher:
+  filters: 96
+  bottleneck_channels: 48
+  resblocks: 8
+  broadcast_interval: 4
+
+student:
   filters: 192
-  resblocks: 16
   bottleneck_channels: 96
+  resblocks: 20
   broadcast_interval: 8
-  input_planes: 69
 
 chess:
   board_dim: 8
   policy_channels: 73
   total_policy_moves: 4672
+  input_planes: 69

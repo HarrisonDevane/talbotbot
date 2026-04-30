@@ -123,7 +123,7 @@ int main(int argc, char* argv[]) {
 
     int inference_batch_size = inference_config_input["batch_size"].as<int>();
     int max_batch_size = inference_batch_size * inference_config_input["batch_size_factor"].as<int>();
-    int input_planes = model["model"]["input_planes"].as<int>();
+    int input_planes = model["chess"]["input_planes"].as<int>();
     int board_dim = model["chess"]["board_dim"].as<int>(); 
     int policy_moves = model["chess"]["total_policy_moves"].as<int>();
     

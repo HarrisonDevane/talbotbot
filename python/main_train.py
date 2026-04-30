@@ -37,7 +37,15 @@ class RLOrchestrator:
         with open(RL_PARAMS_FILE, 'r') as f:
             self.params_config = yaml.safe_load(f)
         with open(MODEL_FILE, 'r') as f:
-            self.model_config = yaml.safe_load(f)
+            raw_model_config = yaml.safe_load(f)
+
+        target_arch = self.params_config['global']['model'] 
+
+        # 2. Re-map it to the generic 'model' key that ChessAIModel expects
+        self.model_config = {
+            'model': raw_model_config[target_arch],
+            'chess': raw_model_config['chess']
+        }
 
         self.buffer_file_path = os.path.abspath(os.path.join(RL_DIR, "replay_memory.lmdb"))
         
@@ -249,7 +257,6 @@ class RLOrchestrator:
             training_config=self.params_config['training'],
             state_config=self.state_config,
             global_config=self.params_config['global'],
-            env=self.env,
             db_path=self.buffer_file_path 
         )
 
@@ -350,7 +357,6 @@ class RLOrchestrator:
                         training_config=self.params_config['training'],
                         state_config=self.state_config,
                         global_config=self.params_config['global'],
-                        env=self.env,
                         db_path=self.buffer_file_path
                     )
                     
@@ -384,7 +390,7 @@ class RLOrchestrator:
 
         dummy_input = torch.zeros(
             1, 
-            self.model_config['model']['input_planes'], 
+            self.model_config['chess']['input_planes'], 
             self.model_config['chess']['board_dim'], 
             self.model_config['chess']['board_dim'], 
             dtype=torch.float16

@@ -105,7 +105,7 @@ int main(int argc, char* argv[]) {
     const size_t batch_size = config["training"]["batch_size"].as<size_t>();
     const size_t flush_threshold = static_cast<size_t>(batch_size / sampling_ratio);
 
-    const int input_planes = model["model"]["input_planes"].as<int>();
+    const int input_planes = model["chess"]["input_planes"].as<int>();
     const int board_dim = model["chess"]["board_dim"].as<int>(); 
     const int policy_moves = model["chess"]["total_policy_moves"].as<int>();
             

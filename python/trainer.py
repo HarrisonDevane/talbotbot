@@ -191,13 +191,12 @@ class AsyncBatchPrefetcher:
 
 class TrainTask:
     def __init__(self, model_path: str, model_config: dict, training_config: dict,
-                 state_config: dict, global_config: dict, env, db_path: str):
+                 state_config: dict, global_config: dict, db_path: str):
         self.training_config = training_config
         self.model_path = model_path
         self.model_config = model_config
         self.state_config = state_config
         self.global_config = global_config
-        self.env = env 
         
         self.output_dir = None
         self.logger = None
@@ -208,7 +207,7 @@ class TrainTask:
         m_cfg = self.model_config['model']
         c_cfg = self.model_config['chess']
 
-        self.input_planes = m_cfg['input_planes']
+        self.input_planes = c_cfg['input_planes']
         self.board_dim = c_cfg['board_dim']
         self.total_input_size = self.input_planes * self.board_dim * self.board_dim
         self.total_policy_moves = c_cfg['total_policy_moves']

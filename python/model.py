@@ -94,7 +94,7 @@ class ChessAIModel(nn.Module):
         broadcast_interval = m_cfg['broadcast_interval']
 
         # --- Initial Representation ---
-        self.initial_conv = nn.Conv2d(m_cfg['input_planes'], self.num_filters, kernel_size=3, padding=1, bias=False)
+        self.initial_conv = nn.Conv2d(c_cfg['input_planes'], self.num_filters, kernel_size=3, padding=1, bias=False)
         self.initial_bn = nn.BatchNorm2d(self.num_filters)
 
         # --- Residual Backbone ---

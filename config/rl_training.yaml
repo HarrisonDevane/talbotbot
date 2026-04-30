@@ -1,20 +1,22 @@
 global:
-  total_training_steps: 10000                        # Total gradient updates to perform
+  total_training_steps: 40000                        # Total gradient updates to perform
   logging_rotation_steps: 1000                       # How often to make a new log folder
   min_buffer_size: 1024000                           # Minimum replay buffer size
-  max_buffer_size: 24576000                          # Max buffer size
-  buffer_ramp_steps: 30000                           # Steps to reach max buffer size (linear)
+  max_buffer_size: 32768000                          # Max buffer size
+  buffer_ramp_steps: 40000                           # Steps to reach max buffer size (linear)
   min_build_steps: 200                               # Minimum steps for a new engine build
   max_build_steps: 1000                              # Max steps for a new engine build
   build_ramp_steps: 10000                            # Steps to reach max engine build rate (linear)
   model_path: 'rl_dir/models/model'                  # Path to best model base name
+  model: 'teacher'
+  distill_passes: 1.0                                # Number of full buffer passes during distillation
 
 inference:
   inference_worker_cores: [8, 9, 10]                 # Dedicated CPU cores for the Batching Process (feeding the GPU)
   batch_size: 512                                    # Max batch size during inference
   batch_size_factor: 12                              # Multiplier for batch size to determine max slots available in RAM
   batch_timeout_ms: 10                               # How long the GPU batcher waits for more data before running partial batch
-  logging_interval_sec: 60
+  logging_interval_sec: 10
   logging_level: 20
 
 data_generation:
@@ -35,8 +37,8 @@ mcts:
   gumbel_c_visit: 50.0                               # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                # Scale for sigma with visit count
   gumbel_noise: 1.0                                  # Gumbel noise value
-  gumbel_search_depth: 32                            # Search depth budget
-  gumbel_m: 8                                        # m value for sequential halving (top m moves sampled)
+  gumbel_search_depth: 128                           # Search depth budget
+  gumbel_m: 16                                       # m value for sequential halving (top m moves sampled)
   minimax_target_override: True
   minimax_win_target: 0.95
   minimax_loss_target: 0.001
