@@ -37,15 +37,7 @@ class RLOrchestrator:
         with open(RL_PARAMS_FILE, 'r') as f:
             self.params_config = yaml.safe_load(f)
         with open(MODEL_FILE, 'r') as f:
-            raw_model_config = yaml.safe_load(f)
-
-        target_arch = self.params_config['global']['model'] 
-
-        # 2. Re-map it to the generic 'model' key that ChessAIModel expects
-        self.model_config = {
-            'model': raw_model_config[target_arch],
-            'chess': raw_model_config['chess']
-        }
+            self.model_config = yaml.safe_load(f)
 
         self.buffer_file_path = os.path.abspath(os.path.join(RL_DIR, "replay_memory.lmdb"))
         
@@ -103,7 +95,7 @@ class RLOrchestrator:
             if not os.path.exists(self.model_pth):
                 self._create_seed_models()
 
-        self._export_to_cpp(self.current_step)
+        self._export_to_cpp()
 
     def _initialize_empty_lmdb(self):
         cpp_blob = struct.pack(CPP_STATE_FMT, 0, 0, 0.0, 0, 0, 0)
@@ -141,8 +133,6 @@ class RLOrchestrator:
 
     def _wait_for_trt_engine(self):
         target_step = self._get_lmdb_signal(b"__TRT_EXPORT_SIGNAL")
-        if target_step is None:
-            raise RuntimeError("Fatal: __TRT_EXPORT_SIGNAL is missing.")
 
         ready_step = self._get_lmdb_signal(b"__TRT_ENGINE_READY")
         
@@ -205,10 +195,22 @@ class RLOrchestrator:
         random.seed(self.params_config['training']['seed'])
         torch.manual_seed(self.params_config['training']['seed'])
         model = ChessAIModel(self.model_config)
+        
+        # Ensure base models directory exists
         os.makedirs(os.path.join(RL_DIR, 'models'), exist_ok=True)
-        torch.save({'model_state_dict': model.state_dict()}, self.model_pth)
-        self._export_to_cpp(export_step=0)
-        self.logger.info("Seed models created successfully.")
+        
+        # 1. Save the active model for the C++ engine
+        save_dict = {'model_state_dict': model.state_dict()}
+        torch.save(save_dict, self.model_pth)
+        
+        # 2. Save the permanent seed snapshot to the correct subfolder
+        backup_dir = os.path.join(RL_DIR, 'models', 'checkpoints')
+        os.makedirs(backup_dir, exist_ok=True)
+        
+        seed_backup_path = os.path.join(backup_dir, 'step_000000_model.pth')
+        torch.save(save_dict, seed_backup_path)
+        
+        self._export_to_cpp()
     
     def _setup_logger(self, log_dir, name, filename, level, fmt):
         logger = logging.getLogger(name)
@@ -340,11 +342,14 @@ class RLOrchestrator:
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
                     
-                    self._export_to_cpp(self.current_step)
+                    self._export_to_cpp()
                     self._wait_for_trt_engine()
                     
                     # Store backup and state accurately corresponding to the build step
-                    model_backup_path = os.path.join(RL_DIR, 'models', f'step_{self.current_step:06d}_model.pth')
+                    backup_dir = os.path.join(RL_DIR, 'models', 'checkpoints')
+                    os.makedirs(backup_dir, exist_ok=True)
+
+                    model_backup_path = os.path.join(backup_dir, f'step_{self.current_step:06d}_model.pth')
                     shutil.copy(self.model_pth, model_backup_path)
                     shutil.copy(RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_step:06d}_config.yaml'))
                     self.logger.info(f"Periodic backup saved at step {self.current_step}.")
@@ -379,7 +384,7 @@ class RLOrchestrator:
             engine_process.wait()
             
 
-    def _export_to_cpp(self, export_step):
+    def _export_to_cpp(self):
         checkpoint = torch.load(self.model_pth, map_location='cpu', weights_only=True)
         model = ChessAIModel(self.model_config)
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -420,7 +425,9 @@ class RLOrchestrator:
         torch.cuda.empty_cache()
 
         with self.env.begin(write=True) as txn:
-            txn.put(b"__TRT_EXPORT_SIGNAL", struct.pack('Q', export_step))
+            current = txn.get(b"__TRT_EXPORT_SIGNAL")
+            prev = struct.unpack('Q', current)[0] if current else 0
+            txn.put(b"__TRT_EXPORT_SIGNAL", struct.pack('Q', prev + 1))
 
 if __name__ == "__main__":
     orchestrator = RLOrchestrator()

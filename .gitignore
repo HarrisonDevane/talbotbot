@@ -67,3 +67,4 @@ build/*
 *.engine
 *.onnx
 rl_dir/*
+python/plot_metrics.py

@@ -88,10 +88,6 @@ int main(int argc, char* argv[]) {
     std::string base_model_path = global_config_input["model_path"].as<std::string>();
     std::string engine_path = base_model_path + ".engine";
 
-    if (!fs::exists(model_file_path)) {
-        std::cerr << "Fatal: Model config file not found at " << model_file_path << std::endl;
-        return 1;
-    }
     YAML::Node model = YAML::LoadFile(model_file_path);
 
     auto now = std::chrono::system_clock::now();

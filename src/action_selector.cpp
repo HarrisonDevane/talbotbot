@@ -85,10 +85,24 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
             double temp = config.temperature_q_decay;
  
             std::vector<double> weights(non_forced_visited.size());
+            double total_weight = 0.0;
             for (size_t i = 0; i < non_forced_visited.size(); ++i) {
                 double q_drop = best_q - (-non_forced_visited[i]->calculate_v_mix(config.contempt));
                 weights[i] = non_forced_visited[i]->visits * std::exp(-q_drop / temp);
+                total_weight += weights[i];
             }
+            // Log sampling distribution
+            std::ostringstream oss;
+            oss << "Ply " << ply_count << " | Temp=" << temp << " | Moves=" << non_forced_visited.size() << " | ";
+            for (size_t i = 0; i < non_forced_visited.size(); ++i) {
+                double q_drop = best_q - (-non_forced_visited[i]->calculate_v_mix(config.contempt));
+                double pct = (weights[i] / total_weight) * 100.0;
+                oss << chess::uci::moveToUci(non_forced_visited[i]->move)
+                    << "(V=" << non_forced_visited[i]->visits
+                    << " Qd=" << std::fixed << std::setprecision(3) << q_drop
+                    << " P=" << std::setprecision(1) << pct << "%) ";
+            }
+            logger.log("INFO", oss.str());
  
             std::discrete_distribution<> d(weights.begin(), weights.end());
             result.best_move = non_forced_visited[d(rng)]->move;

@@ -374,7 +374,8 @@ class TrainTask:
             f"Tar (W/D/L): {pct_w:.1f}% / {pct_d:.1f}% / {pct_l:.1f}% | "
             f"Pred: {pred_w_mean:.1f}% / {pred_d_mean:.1f}% / {pred_l_mean:.1f}% | "
             f"P_Ent={policy_entropy.item():.4f} | "
-            f"Grad={grad_norm.item():.2f} | LR={self.optimizer.param_groups[0]['lr']:.6f}"
+            f"Grad={grad_norm.item():.2f} | LR={self.optimizer.param_groups[0]['lr']:.6f} | "
+            f"Data={data_time:.0f}ms FW={fw_time:.0f}ms BW={bw_time:.0f}ms"
         )
 
         if self.tb_writer is not None:

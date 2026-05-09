@@ -1,17 +1,11 @@
-teacher:
-  filters: 96
-  bottleneck_channels: 48
-  resblocks: 8
-  broadcast_interval: 4
-
-student:
-  filters: 192
-  bottleneck_channels: 96
-  resblocks: 20
-  broadcast_interval: 8
+model:
+  filters: 224                                                    # Number of convolutional filters in residual blocks
+  bottleneck_channels: 112                                        # Number of channels for bottleneck layers
+  resblocks: 20                                                   # Total number of residual blocks in the network (including broadcasting blocks)
+  broadcast_interval: 8                                           # Interval for global broadcasting block
 
 chess:
-  board_dim: 8
-  policy_channels: 73
-  total_policy_moves: 4672
-  input_planes: 69
+  board_dim: 8                                                    # Spatial dimension of the chess board (8x8)
+  policy_channels: 73                                             # Number of output channels for the policy head
+  total_policy_moves: 4672                                        # Total possible discrete moves in the action space
+  input_planes: 69                                                # Number of input feature planes representing the state

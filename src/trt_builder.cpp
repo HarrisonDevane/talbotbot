@@ -25,13 +25,9 @@ std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::st
     config->addOptimizationProfile(profile);
 
     if (builder->platformHasFastFp16()) config->setFlag(nvinfer1::BuilderFlag::kFP16);
-    
-    // CRITICAL: Enable refit so we can update weights without rebuilding
-    config->setFlag(nvinfer1::BuilderFlag::kREFIT);
 
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 512ULL * 1024 * 1024);
 
-    logger.log("INFO", "TensorRT: Building engine with kREFIT enabled...");
     auto plan = std::unique_ptr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
     
     if (!plan) {

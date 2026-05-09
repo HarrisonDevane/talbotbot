@@ -130,33 +130,26 @@ void InferenceBatcher::run(
     
     std::atomic<double> local_idle_time_sec{0.0};
 
+    // Distribute cores round-robin across 3 roles: dispatcher(0), collector(1), filler(2)
     DWORD_PTR frontendMask = 0;
     DWORD_PTR backendMask = 0;
     DWORD_PTR fillerMask = 0;
+    std::vector<std::string> role_cores(3);
 
-    if (core_ids.size() >= 2) {
-        frontendMask = (static_cast<DWORD_PTR>(1) << core_ids[0]);
-        backendMask = (static_cast<DWORD_PTR>(1) << core_ids[1]);
-        fillerMask = frontendMask; 
-        
-        if (core_ids.size() >= 3) {
-            fillerMask = (static_cast<DWORD_PTR>(1) << core_ids[2]);
-            if (logger.get_level() <= 20) {
-                logger.log("INFO", "Dispatcher pinned to core " + std::to_string(core_ids[0]) + 
-                                   ", Collector pinned to core " + std::to_string(core_ids[1]) + 
-                                   ", Filler pinned to core " + std::to_string(core_ids[2]));
-            }
-        } else {
-            if (logger.get_level() <= 20) {
-                logger.log("INFO", "Dispatcher and Filler sharing core " + std::to_string(core_ids[0]) + 
-                                   ", Collector pinned to core " + std::to_string(core_ids[1]));
-            }
-        }
-    } else {
-        if (logger.get_level() <= 50) {
-            logger.log("CRITICAL", "Insufficient cores provided for pipelined batcher.");
-        }
-        return;
+    for (size_t i = 0; i < core_ids.size(); ++i) {
+        DWORD_PTR bit = static_cast<DWORD_PTR>(1) << core_ids[i];
+        int role = i % 3;
+        if (role == 0) frontendMask |= bit;
+        else if (role == 1) backendMask |= bit;
+        else fillerMask |= bit;
+        if (!role_cores[role].empty()) role_cores[role] += ",";
+        role_cores[role] += std::to_string(core_ids[i]);
+    }
+
+    if (logger.get_level() <= 20) {
+        logger.log("INFO", "Dispatcher pinned to cores [" + role_cores[0] + "]"
+                           ", Collector pinned to cores [" + role_cores[1] + "]"
+                           ", Filler pinned to cores [" + role_cores[2] + "]");
     }
 
     SetThreadAffinityMask(GetCurrentThread(), frontendMask);
