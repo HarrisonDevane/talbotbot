@@ -1,11 +1,11 @@
 global:
-  total_training_steps: 40000                                     # Total gradient updates to perform
+  total_training_steps: 30000                                     # Total gradient updates to perform
   logging_rotation_steps: 1000                                    # How often to make a new log folder
-  min_buffer_size: 1000000                                        # Minimum replay buffer size
+  min_buffer_size: 2000000                                        # Minimum replay buffer size
   max_buffer_size: 32000000                                       # Max buffer size
   buffer_ramp_steps: 30000                                        # Steps to reach max buffer size (linear)
-  min_build_steps: 100                                            # Minimum steps for a new engine build
-  max_build_steps: 500                                            # Max steps for a new engine build
+  min_build_steps: 200                                            # Minimum steps for a new engine build
+  build_steps: 1000                                               # Max steps for a new engine build
   build_ramp_steps: 10000                                         # Steps to reach max engine build rate (linear)
   model_path: 'rl_dir/models/model'                               # Path to model base name
 
