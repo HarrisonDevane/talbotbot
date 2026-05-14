@@ -113,24 +113,9 @@ class RLOrchestrator:
             return None
         
     def _calculate_next_build_step(self, current_target_step):
-        min_build = self.params_config['global']['min_build_steps']
-        max_build = self.params_config['global']['max_build_steps']
-        ramp_steps = self.params_config['global']['build_ramp_steps']
-        
-        if current_target_step >= ramp_steps:
-            return ((current_target_step // max_build) + 1) * max_build
-
-        simulated_step = 0
-        while simulated_step <= current_target_step:
-            progress = min(1.0, simulated_step / ramp_steps)
-            interval = int(min_build + (max_build - min_build) * progress)
-            simulated_step += interval
-            
-            if simulated_step >= ramp_steps:
-                simulated_step = ((simulated_step // max_build) + 1) * max_build
+        build_steps = self.params_config['global']['build_steps']
+        return ((current_target_step // build_steps) + 1) * build_steps
                 
-        return simulated_step
-
     def _wait_for_trt_engine(self):
         target_step = self._get_lmdb_signal(b"__TRT_EXPORT_SIGNAL")
 

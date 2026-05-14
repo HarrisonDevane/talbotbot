@@ -1,8 +1,8 @@
 model:
-  filters: 224                                                    # Number of convolutional filters in residual blocks
-  bottleneck_channels: 112                                        # Number of channels for bottleneck layers
-  resblocks: 20                                                   # Total number of residual blocks in the network (including broadcasting blocks)
-  broadcast_interval: 8                                           # Interval for global broadcasting block
+  filters: 160                                                    # Number of convolutional filters in residual blocks
+  bottleneck_channels: 80                                        # Number of channels for bottleneck layers
+  resblocks: 12                                                   # Total number of residual blocks in the network (including broadcasting blocks)
+  broadcast_interval: 6                                           # Interval for global broadcasting block
 
 chess:
   board_dim: 8                                                    # Spatial dimension of the chess board (8x8)
