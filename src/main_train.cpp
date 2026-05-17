@@ -288,11 +288,11 @@ int main(int argc, char* argv[]) {
                 main_logger.log("INFO", "ONNX export signal received for step " + 
                                 std::to_string(exported_step) + ". Initiating full engine rebuild...");
 
-                // Capture values for the background thread
-                uint64_t step_for_update = exported_step;
+                uint64_t current_train_step = current_step.load(std::memory_order_relaxed);
+                uint64_t current_export_signal = exported_step;
 
                 std::thread([&batcher, &main_logger, onnx_path, engine_path, inference_batch_size, 
-                             lmdb_env, shared_dbi, step_for_update]() {
+                                lmdb_env, shared_dbi, current_train_step, current_export_signal]() {
                     
                     auto start_time = std::chrono::steady_clock::now();
                     
@@ -313,19 +313,20 @@ int main(int argc, char* argv[]) {
                         
                         main_logger.log("INFO", "Pipeline drained.");
                         main_logger.log("INFO", "Executing FULL ENGINE REBUILD (this will take ~60s)...");
-                            
-                        auto result = TRTBuilder::build_engine(onnx_path, inference_batch_size, main_logger);
+
+                        auto result = TRTBuilder::build_engine(
+                            onnx_path, 
+                            inference_batch_size, 
+                            main_logger
+                        );
                         
                         if (result) {
-                            // Signal hot-swap with new engine data
-                            batcher.signal_trt_reload(result->serialized_data, static_cast<int>(step_for_update));
+                            batcher.signal_trt_reload(result->serialized_data, static_cast<int>(current_train_step));
                             
-                            // Wait for swap to complete
                             while (batcher.is_fully_paused() && !global_stop_event.load()) {
                                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                             }
                             
-                            // Save to disk for future restarts
                             TRTBuilder::save_engine(*result, engine_path);
                             
                             double duration = std::chrono::duration<double>(
@@ -334,7 +335,7 @@ int main(int argc, char* argv[]) {
                             main_logger.log("INFO", "Full rebuild completed in " + 
                                             std::to_string(duration) + " seconds.");
 
-                            write_lmdb_signal(lmdb_env, shared_dbi, "__TRT_ENGINE_READY", step_for_update);
+                            write_lmdb_signal(lmdb_env, shared_dbi, "__TRT_ENGINE_READY", current_export_signal);
                         } else {
                             main_logger.log("CRITICAL", "Full rebuild FAILED. Resuming with old engine.");
                             batcher.cancel_pause();

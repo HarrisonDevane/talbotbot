@@ -1,9 +1,9 @@
 global:
-  total_training_steps: 60000                                     # Total gradient updates to perform
+  total_training_steps: 40000                                     # Total gradient updates to perform
   logging_rotation_steps: 1000                                    # How often to make a new log folder
-  min_buffer_size: 1000000                                        # Minimum replay buffer size
-  max_buffer_size: 24000000                                       # Max buffer size
-  buffer_ramp_steps: 30000                                        # Steps to reach max buffer size (linear)
+  min_buffer_size: 2000000                                        # Minimum replay buffer size
+  max_buffer_size: 32000000                                       # Max buffer size
+  buffer_ramp_steps: 40000                                        # Steps to reach max buffer size (linear)
   build_steps: 250                                                # Steps for a new engine build
   model_path: 'rl_dir/models/model'                               # Path to model base name
 
@@ -18,7 +18,7 @@ inference:
 data_generation:
   data_generator_cores: [19]                                      # Dedicated CPU cores for the main C++ orchestrator and data generator task
   io_write_cores: [19]                                            # Dedicated CPU cores LMDB writing
-  game_worker_cores: [22, 23, 24, 25, 26, 27, 28, 29, 30, 31]                     # Dedicated CPU cores for games
+  game_worker_cores: [22, 23, 24, 25, 26, 27, 28, 29, 30, 31]     # Dedicated CPU cores for games
   workers_per_core: 16                                            # Number of game workers to pin to each core
   max_ply_length: 400                                             # Hard cutoff to force a draw
   main_logging_level: 20                                          # Logging level for the UCI Orchestrator
@@ -56,6 +56,6 @@ training:
   policy_loss_weight: 1.0                                         # Weight for Move Prediction loss
   value_loss_weight: 1.0                                          # Weight for Win/Loss Prediction loss
   weight_decay: 1e-4                                              # L2 Regularization
-  learning_rate: 1e-1                                             # SGD Learning Rate
+  learning_rate: 2e-1                                             # SGD Learning Rate
   momentum_rate: 0.9                                              # SGD Momentum
   logging_level: 20                                               # Logging level for training operations
