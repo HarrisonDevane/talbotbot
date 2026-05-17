@@ -2,9 +2,9 @@ global:
   total_training_steps: 40000                                     # Total gradient updates to perform
   logging_rotation_steps: 1000                                    # How often to make a new log folder
   min_buffer_size: 2000000                                        # Minimum replay buffer size
-  max_buffer_size: 32000000                                       # Max buffer size
+  max_buffer_size: 24000000                                       # Max buffer size
   buffer_ramp_steps: 40000                                        # Steps to reach max buffer size (linear)
-  build_steps: 250                                                # Steps for a new engine build
+  build_steps: 500                                                # Steps for a new engine build
   model_path: 'rl_dir/models/model'                               # Path to model base name
 
 inference:
@@ -56,6 +56,6 @@ training:
   policy_loss_weight: 1.0                                         # Weight for Move Prediction loss
   value_loss_weight: 1.0                                          # Weight for Win/Loss Prediction loss
   weight_decay: 1e-4                                              # L2 Regularization
-  learning_rate: 2e-1                                             # SGD Learning Rate
+  learning_rate: 1e-1                                             # SGD Learning Rate
   momentum_rate: 0.9                                              # SGD Momentum
   logging_level: 20                                               # Logging level for training operations
