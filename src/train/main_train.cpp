@@ -76,14 +76,14 @@ int main(int argc, char* argv[]) {
 
     const std::string config_file = args["config_file"];
     const std::string model_file = args["model_file"];
-    const std::string rl_dir = args["rl_dir"];
+    const std::string train_dir = args["train_dir"];
     const std::string db_path = args["db_path"]; 
 
     YAML::Node config = YAML::LoadFile(config_file);
     YAML::Node model = YAML::LoadFile(model_file);
     
     int main_log_level = config["data_generation"]["main_logging_level"].as<int>();
-    Logger main_logger("orchestrator_c", rl_dir, main_log_level); 
+    Logger main_logger("orchestrator_c", train_dir, main_log_level); 
     const int rot_interval = config["global"]["logging_rotation_steps"].as<int>();
     
     main_logger.log("INFO", "[MAIN] Booting up C++ Engine...");
@@ -230,7 +230,7 @@ int main(int argc, char* argv[]) {
     main_logger.log("INFO", "[MAIN] Initializing Batcher...");
     InferenceBatcher batcher(
         model_path, inference_batch_size, batch_timeout, num_workers, 
-        rl_dir, batcher_log_level, batcher_cores, rot_interval, current_step, log_interval_sec
+        train_dir, batcher_log_level, batcher_cores, rot_interval, current_step, log_interval_sec
     );
 
     std::thread batcher_thread([&]() {
@@ -240,7 +240,7 @@ int main(int argc, char* argv[]) {
     main_logger.log("INFO", "[MAIN] Initializing Data Generator Workers...");
     DataGenerator generator(
         config["global"], config["data_generation"], config["mcts"], config["selection"],
-        model, rl_dir, rot_interval, main_logger,
+        model, train_dir, rot_interval, main_logger,
         inference_queue, result_queues, shared_input_buffer, shared_policy_buffer, shared_value_buffer,
         buffer_free_slots, completed_games_queue, init_games + 1, current_step
     );
@@ -253,7 +253,7 @@ int main(int argc, char* argv[]) {
     main_logger.log("INFO", "[MAIN] Initializing I/O Writer...");
     IOWriter io_writer(
         lmdb_env, config["global"]["min_buffer_size"].as<size_t>(), config["global"]["max_buffer_size"].as<size_t>(),
-        config["global"]["buffer_ramp_steps"].as<int>(), io_write_cores, rl_dir, flush_threshold,
+        config["global"]["buffer_ramp_steps"].as<int>(), io_write_cores, train_dir, flush_threshold,
         config["data_generation"]["io_logging_level"].as<int>(), rot_interval, 
         ModelConfig{input_planes, board_dim, policy_moves}, completed_games_queue,
         current_step, atomic_write_head, atomic_buffer_count, atomic_buffer_wraps,

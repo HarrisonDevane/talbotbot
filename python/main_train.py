@@ -19,8 +19,8 @@ from model import ChessAIModel, fuse_bn_for_export
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 
-RL_DIR = os.path.abspath(os.path.join(root_dir, "rl_dir"))
-RL_PARAMS_FILE = os.path.abspath(os.path.join(root_dir, "config", "rl_training.yaml"))
+RL_DIR = os.path.abspath(os.path.join(root_dir, "train_dir"))
+RL_PARAMS_FILE = os.path.abspath(os.path.join(root_dir, "config", "train.yaml"))
 MODEL_FILE = os.path.abspath(os.path.join(root_dir, "config", "model.yaml"))
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"torch.onnx.*")
@@ -227,7 +227,7 @@ class RLOrchestrator:
         self.logger.info(f"Launching C++ Engine: {engine_exe}")
         cmd = [
             engine_exe,
-            "--rl_dir", RL_DIR,
+            "--train_dir", RL_DIR,
             "--config_file", RL_PARAMS_FILE,
             "--model_file", MODEL_FILE,
             "--db_path", self.buffer_file_path

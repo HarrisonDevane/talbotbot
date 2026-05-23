@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 1. SETUP PATHS
 set(DEP_ROOT "D:/Projects/talbot/dependencies")
 set(LIBTORCH_DIR "${DEP_ROOT}/libtorch")
-set(YAML_DIR "${DEP_ROOT}/yaml-cpp/build") 
+set(YAML_DIR "${DEP_ROOT}/yaml-cpp/build")
 set(LMDB_DIR "${DEP_ROOT}/openldap-mdb/libraries/liblmdb")
 set(CUDA_PATH "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0")
 set(CUDNN_PATH "C:/Program Files/NVIDIA/CUDNN/v9.20/bin/13.2/x64")
@@ -15,59 +15,70 @@ set(TRT_DIR "${DEP_ROOT}/TensorRT-10.10.0.31")
 set(ZSTD_DIR "${DEP_ROOT}/zstd")
 
 # 2. DEFINE SHARED SOURCES
-# These files are used by both the training and inference executables
+# Core engine: used by both the training and play executables.
+# Lives in src/core/ and depends on nothing else under src/.
 set(SHARED_SOURCES
-    src/trt_builder.cpp
-    src/action_selector.cpp
-    src/mcts_engine.cpp
-    src/mcts_node.cpp
-    src/inference_batcher.cpp
-    src/board_utils.cpp
+    src/core/trt_builder.cpp
+    src/core/action_selector.cpp
+    src/core/mcts_engine.cpp
+    src/core/mcts_node.cpp
+    src/core/inference_batcher.cpp
+    src/core/board_utils.cpp
 )
 
 # 3. DEFINE EXECUTABLES
-# Main Training Engine
-add_executable(talbot_engine 
+# Main Training Engine -- training-only sources live in src/train/.
+add_executable(talbot_engine
     ${SHARED_SOURCES}
-    src/main_train.cpp
-    src/data_generator.cpp
-    src/target_generator.cpp
-    src/io_writer.cpp
+    src/train/main_train.cpp
+    src/train/data_generator.cpp
+    src/train/target_generator.cpp
+    src/train/io_writer.cpp
     "${LMDB_DIR}/mdb.c"
     "${LMDB_DIR}/midl.c"
 )
 
-# UCI Inference Engine
-add_executable(talbot_inference 
+# Play Engine: --uci and --tournament modes.
+# Play-only sources live in src/play/.
+add_executable(talbot_play
     ${SHARED_SOURCES}
-    src/main_inference.cpp
+    src/play/main_play.cpp
+    src/play/game_worker.cpp
+    src/play/self_play_session.cpp
+    src/play/opening_book.cpp
 )
 
 # 4. SETUP INCLUDES (Apply to both)
+# Every src/ subfolder is on the include path so existing bare includes
+# (#include "mcts_engine.hpp") continue to resolve with no source edits.
 set(INCLUDE_DIRS
     "./src"
+    "./src/core"
+    "./src/train"
+    "./src/play"
+    "./src/third_party"
     "${DEP_ROOT}"
     "${LIBTORCH_DIR}/include"
     "${LIBTORCH_DIR}/include/torch/csrc/api/include"
     "${LMDB_DIR}"
     "${CUDA_PATH}/include"
-    "${DEP_ROOT}/yaml-cpp/include" 
+    "${DEP_ROOT}/yaml-cpp/include"
     "${TRT_DIR}/include"
     "${ZSTD_DIR}/lib"
 )
 
 target_include_directories(talbot_engine PRIVATE ${INCLUDE_DIRS})
-target_include_directories(talbot_inference PRIVATE ${INCLUDE_DIRS})
+target_include_directories(talbot_play   PRIVATE ${INCLUDE_DIRS})
 
 # 5. COMPILER FLAGS
 if(MSVC)
     set(MSVC_FLAGS /O2 /EHsc /MD /wd4267 /wd4244 /wd4172 /wd4333)
-    
+
     target_compile_definitions(talbot_engine PRIVATE NOMINMAX)
     target_compile_options(talbot_engine PRIVATE ${MSVC_FLAGS})
-    
-    target_compile_definitions(talbot_inference PRIVATE NOMINMAX)
-    target_compile_options(talbot_inference PRIVATE ${MSVC_FLAGS})
+
+    target_compile_definitions(talbot_play PRIVATE NOMINMAX)
+    target_compile_options(talbot_play PRIVATE ${MSVC_FLAGS})
 endif()
 
 # 6. LINKER LIBRARIES
@@ -80,27 +91,26 @@ set(LINK_DIRS
 )
 
 target_link_directories(talbot_engine PRIVATE ${LINK_DIRS})
-target_link_directories(talbot_inference PRIVATE ${LINK_DIRS})
+target_link_directories(talbot_play   PRIVATE ${LINK_DIRS})
 
 set(LIBS
-    torch torch_cpu c10 c10_cuda torch_cuda      
-    cudart                                     
-    nvinfer_10 nvonnxparser_10                   
-    yaml-cpp                                     
-    zstd_static                                  
-    ntdll advapi32                               
+    torch torch_cpu c10 c10_cuda torch_cuda
+    cudart
+    nvinfer_10 nvonnxparser_10
+    yaml-cpp
+    zstd_static
+    ntdll advapi32
 )
 
 target_link_libraries(talbot_engine PRIVATE ${LIBS})
-target_link_libraries(talbot_inference PRIVATE ${LIBS})
+target_link_libraries(talbot_play   PRIVATE ${LIBS})
 
 # Special linker flags for LibTorch/CUDA compatibility
 set(LINK_OPTS "/INCLUDE:?warp_size@cuda@at@@YAHXZ /OPT:NOREF /RELEASE")
 set_target_properties(talbot_engine PROPERTIES LINK_FLAGS ${LINK_OPTS})
-set_target_properties(talbot_inference PROPERTIES LINK_FLAGS ${LINK_OPTS})
+set_target_properties(talbot_play   PROPERTIES LINK_FLAGS ${LINK_OPTS})
 
 # 7. POST-BUILD: AUTOMATED DLL DEPLOYMENT
-# This function copies all necessary DLLs to the output directory of the target
 function(deploy_dlls target_name)
     add_custom_command(TARGET ${target_name} POST_BUILD
         # LibTorch Core
@@ -116,7 +126,7 @@ function(deploy_dlls target_name)
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${TRT_DIR}/lib" $<TARGET_FILE_DIR:${target_name}>
         COMMAND ${CMAKE_COMMAND} -E copy "${YAML_DIR}/Release/yaml-cpp.dll" $<TARGET_FILE_DIR:${target_name}>
         COMMAND ${CMAKE_COMMAND} -E copy "${ZSTD_DIR}/build-cmake/build/cmake/lib/Release/zstd.dll" $<TARGET_FILE_DIR:${target_name}>
-        
+
         # CUDA Toolkit
         COMMAND ${CMAKE_COMMAND} -E copy "${CUDA_PATH}/bin/x64/nvrtc64_130_0.dll" $<TARGET_FILE_DIR:${target_name}>
         COMMAND ${CMAKE_COMMAND} -E copy "${CUDA_PATH}/bin/x64/nvrtc-builtins64_130.dll" $<TARGET_FILE_DIR:${target_name}>
@@ -139,4 +149,4 @@ function(deploy_dlls target_name)
 endfunction()
 
 deploy_dlls(talbot_engine)
-deploy_dlls(talbot_inference)
+deploy_dlls(talbot_play)

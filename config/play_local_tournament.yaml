@@ -1,0 +1,43 @@
+global:
+  model_file: 'D:/Projects/talbot/config/model.yaml'              # Path to the secondary architecture config
+  log_dir: 'D:/Projects/talbot/logs/local_tournament'             # Directory for all tournament run logs
+  main_logging_level: 20                                          # Logging level for the Tournament Orchestrator
+
+evaluation:
+  main_cores: [3]                                                 # Dedicated CPU cores for the main C++ orchestrator
+  game_worker_cores: [5, 6, 7, 8, 9, 10, 11, 12]                  # Dedicated CPU cores for concurrent games
+
+inference:
+  batcher_a_cores: [13, 14, 15]                                   # Dedicated CPU cores for Model A's TensorRT batcher
+  batcher_b_cores: [16, 17, 18]                                   # Dedicated CPU cores for Model B's TensorRT batcher
+  batch_size: 128                                                 # Max batch size during inference (per batcher)
+  batch_size_factor: 8                                            # Multiplier for batch size to determine max slots
+  batch_timeout_ms: 10                                            # How long each GPU batcher waits
+  logging_interval_sec: 30                                        # Interval for system metrics logging
+  logging_level: 20                                               # Logging level for the Batcher Diagnostics
+
+mcts:
+  node_pool_size: 1000000                                         # Capacity of the MCTS node pool (allocated PER engine; 2 per worker)
+  worker_minibatch_size: 32                                       # Max positions sent to batcher at once
+  virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored
+  contempt: 0.0                                                   # Contempt for playing drawing positions
+  gumbel_c_visit: 50.0                                            # Sigma used for gumbel score calculation
+  gumbel_c_scale: 1.0                                             # Scale for sigma with visit count
+  gumbel_noise: 0.0                                               # 0.0 for deterministic tournament play
+  gumbel_search_depth: 800                                        # Node evaluation budget per move
+  gumbel_m: 16                                                    # m value for sequential halving
+
+selection:
+  temperature_ply_cutoff: 0                                       # Sample proportional to visit count for first moves (0 = always deterministic)
+  temperature_q_decay: 0.05                                       # Absolute Q value [-1, 1] Boltzmann temperature decay
+  draw_cutoff: 0.0                                                # Value threshold to consider a game a draw
+  resignation_probability: 0.0                                    # Chance the bot checks for resignation allowed
+  resignation_cutoff: -0.80                                       # Value head cutoff for resignation
+
+tournament:
+  opening_file: 'D:/Projects/talbot/data/opening_pgn/8moves_v3.pgn'          # Path to the PGN file of opening lines
+  results_file: 'D:/Projects/talbot/logs/tournament_results.csv'  # Path to CSV file where game results are appended
+  num_openings: 1                                                 # Openings sampled from the suite
+  opening_seed: 42                                                # Seed for deterministic opening selection
+  concurrent_games: 1                                             # Number of simultaneous games / game workers
+  max_ply_length: 400                                             # Hard cutoff in half-moves before a game is forced drawn

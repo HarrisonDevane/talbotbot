@@ -66,5 +66,6 @@ build/*
 *.bat
 *.engine
 *.onnx
-rl_dir/*
+train_dir/*
+backup_dir/*
 python/plot_metrics.py

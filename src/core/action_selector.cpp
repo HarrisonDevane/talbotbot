@@ -23,6 +23,15 @@ void ActionSelector::reset_for_new_game() {
 SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
     SelectionResult result;
     
+    // Calculate move and color
+    int current_move = (ply_count / 2) + 1;
+    std::string color = (ply_count % 2 == 0) ? "WHITE" : "BLACK";
+
+    // Print the header
+    logger.log("INFO", "===============================================================================================");
+    logger.log("INFO", " MOVE " + std::to_string(current_move) + " | PLY " + std::to_string(ply_count) + " | " + color);
+    logger.log("INFO", "===============================================================================================");    
+    
     int num_children = root->num_children;
     if (num_children == 0) return result;
 

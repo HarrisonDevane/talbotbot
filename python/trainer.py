@@ -21,7 +21,7 @@ import ctypes
 from model import ChessAIModel
 
 class AsyncBatchPrefetcher:
-    def __init__(self, db_path, batch_size, input_planes, board_dim, policy_moves, core_ids, prefetch_workers, rl_dir, log_level, rotation_interval):
+    def __init__(self, db_path, batch_size, input_planes, board_dim, policy_moves, core_ids, prefetch_workers, train_dir, log_level, rotation_interval):
         self.ready_queue = mp.Queue(maxsize=3) 
         self.free_queue = mp.Queue(maxsize=3)
         for i in range(3):
@@ -34,7 +34,7 @@ class AsyncBatchPrefetcher:
         self.policy_moves = policy_moves
         self.core_ids = core_ids
         self.prefetch_workers = prefetch_workers
-        self.rl_dir = rl_dir
+        self.train_dir = train_dir
         self.log_level = log_level
         self.rotation_interval = rotation_interval
         
@@ -59,7 +59,7 @@ class AsyncBatchPrefetcher:
         def setup_or_rotate_logger(step):
             nonlocal current_log_dir
             target_folder = (step // self.rotation_interval) * self.rotation_interval
-            new_log_dir = os.path.join(self.rl_dir, f"run_step_{target_folder:06d}")
+            new_log_dir = os.path.join(self.train_dir, f"run_step_{target_folder:06d}")
 
             if new_log_dir != current_log_dir:
                 os.makedirs(new_log_dir, exist_ok=True)
@@ -212,7 +212,7 @@ class TrainTask:
         self.total_input_size = self.input_planes * self.board_dim * self.board_dim
         self.total_policy_moves = c_cfg['total_policy_moves']
 
-        rl_dir = os.path.dirname(db_path)
+        train_dir = os.path.dirname(db_path)
         log_level = self.training_config.get('logging_level', 20)
         rotation_interval = self.global_config['logging_rotation_steps']
 
@@ -225,7 +225,7 @@ class TrainTask:
             policy_moves=self.total_policy_moves,
             core_ids=self.training_config.get('io_read_cores', [3, 4]),
             prefetch_workers=self.training_config.get('prefetch_workers', 16),
-            rl_dir=rl_dir,
+            train_dir=train_dir,
             log_level=log_level,
             rotation_interval=rotation_interval
         )
