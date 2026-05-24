@@ -14,10 +14,14 @@
 //   talbot_play --uci         --config_file <yaml>
 //   talbot_play --tournament  --config_file <yaml>
 //                             --model_a <A.engine> --model_b <B.engine>
+//                             --run_dir <orchestrator-created run directory>
 //
-// Per-pairing model identity is irreducibly per-invocation, so --model_a /
-// --model_b are accepted on the CLI. Everything structural (cores, openings,
-// counts, search params) lives in the YAML.
+// Per-pairing model identity and the run directory are per-invocation, so
+// --model_a / --model_b / --run_dir are accepted on the CLI. Everything
+// structural (cores, openings, counts, search params) lives in the YAML.
+// The orchestrator creates one timestamped run directory per tournament and
+// passes it to every pairing; each pairing logs into <run_dir>/<A>_vs_<B>/
+// and appends to the shared <run_dir>/results.csv.
 // =============================================================================
 
 #define NOMINMAX
@@ -53,6 +57,7 @@
 #include "game_worker.hpp"
 #include "self_play_session.hpp"
 #include "opening_book.hpp"
+#include "trt_builder.hpp"
 
 namespace fs = std::filesystem;
 
@@ -84,7 +89,7 @@ struct PlayConfig {
     std::string base_log_dir;
     std::string base_model_path;   // used by --uci
     std::string engine_path;       // used by --uci
-    int  main_logging_level = 20;
+    int  main_logging_level;
 
     // cores
     std::vector<int> main_cores;
@@ -107,11 +112,14 @@ struct PlayConfig {
 
     // tournament
     std::string opening_file;
-    std::string results_file;
-    int num_openings;
+    int games_per_match;          // total games per pairing; must be even
+    int num_openings;             // derived: games_per_match / 2
     int opening_seed;
-    int concurrent_games;
+    int workers_per_core;         // game-worker threads pinned per core
+    int concurrent_games;         // derived: len(game_worker_cores) * workers_per_core
     int max_ply_length;
+    int worker_logging_level;
+    std::vector<int> tournament_worker_cores;  // game-worker cores (tournament section)
 
     // mcts / selection
     ActionSelectorConfig selector;
@@ -131,9 +139,13 @@ static PlayConfig load_config(const std::string& config_file_path) {
     cfg.model_file_path    = global["model_file"].as<std::string>();
     cfg.base_log_dir       = global["log_dir"].as<std::string>();
     cfg.main_logging_level = global["main_logging_level"].as<int>();
-    if (global["model_path"])
+    // model_path is only needed by --uci (to derive the engine path). The
+    // tournament config legitimately omits it, so this read is guarded --
+    // an unguarded .as<>() on a missing key throws "invalid node".
+    if (global["model_path"]) {
         cfg.base_model_path = global["model_path"].as<std::string>();
-    cfg.engine_path = cfg.base_model_path + ".engine";
+        cfg.engine_path = cfg.base_model_path + ".engine";
+    }
 
     if (eval_n && eval_n["main_cores"])
         for (const auto& c : eval_n["main_cores"]) cfg.main_cores.push_back(c.as<int>());
@@ -159,13 +171,33 @@ static PlayConfig load_config(const std::string& config_file_path) {
     cfg.policy_moves = model["chess"]["total_policy_moves"].as<int>();
 
     if (tour_n) {
-        cfg.opening_file     = tour_n["opening_file"].as<std::string>();
-        cfg.results_file     = tour_n["results_file"].as<std::string>();
-        cfg.num_openings     = tour_n["num_openings"].as<int>();
-        cfg.opening_seed     = tour_n["opening_seed"].as<int>();
-        cfg.concurrent_games = tour_n["concurrent_games"].as<int>();
-        if (tour_n["max_ply_length"])
-            cfg.max_ply_length = tour_n["max_ply_length"].as<int>();
+        cfg.opening_file      = tour_n["opening_file"].as<std::string>();
+        cfg.games_per_match   = tour_n["games_per_match"].as<int>();
+        cfg.opening_seed      = tour_n["opening_seed"].as<int>();
+        cfg.workers_per_core  = tour_n["workers_per_core"].as<int>();
+        cfg.max_ply_length = tour_n["max_ply_length"].as<int>();
+        cfg.worker_logging_level  = tour_n["worker_logging_level"].as<int>();
+
+        if (cfg.games_per_match <= 0 || (cfg.games_per_match % 2) != 0) {
+            throw std::runtime_error(
+                "tournament.games_per_match must be a positive even number "
+                "(each opening is played twice); got " +
+                std::to_string(cfg.games_per_match));
+        }
+        cfg.num_openings = cfg.games_per_match / 2;
+
+        // game-worker cores live in the tournament section (mirrors train.yaml's
+        // data_generation.game_worker_cores).
+        for (const auto& c : tour_n["game_worker_cores"])
+            cfg.tournament_worker_cores.push_back(c.as<int>());
+        if (cfg.tournament_worker_cores.empty()) {
+            throw std::runtime_error("tournament.game_worker_cores is empty");
+        }
+
+        // concurrent_games = cores * workers_per_core (mirrors data_generator).
+        cfg.concurrent_games =
+            static_cast<int>(cfg.tournament_worker_cores.size()) *
+            cfg.workers_per_core;
     }
 
     ActionSelectorConfig& s = cfg.selector;
@@ -437,38 +469,56 @@ struct WorkerEngines {
     std::atomic<int>                wait_b{0};
 };
 
+std::string ensure_engine_exists(const std::string& model_path, int max_batch_size, Logger& logger) {
+    fs::path p(model_path);
+    std::string engine_path = (p.parent_path() / (p.stem().string() + ".engine")).string();
+    if (fs::exists(engine_path)) {
+        logger.log("INFO", "Using existing engine: " + engine_path);
+        return engine_path;
+    }
+
+    logger.log("INFO", "Engine not found. Building: " + engine_path);
+
+    TRTBuilder builder;
+    auto engine = builder.build_engine(model_path, max_batch_size, logger);
+    TRTBuilder::save_engine(*engine, engine_path);
+
+    logger.log("INFO", "Engine build successful.");
+    return engine_path;
+}
+
 static int run_tournament(const PlayConfig& cfg,
                           const std::string& model_a_path,
-                          const std::string& model_b_path) {
-    // ---- run log dir ----
-    auto now = std::chrono::system_clock::now();
-    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-    std::tm* lt = std::localtime(&now_time);
-    std::ostringstream time_oss;
-    time_oss << std::put_time(lt, "%Y-%m-%d_%H-%M-%S");
-    std::string run_log_dir = cfg.base_log_dir + "/" + time_oss.str();
-    fs::create_directories(run_log_dir);
+                          const std::string& model_b_path,
+                          const std::string& run_dir) {
+    // ---- pairing log directory ----
+    // The orchestrator owns the timestamped run directory and passes it in as
+    // --run_dir. This process writes its logs into a per-pairing subdirectory
+    // <run_dir>/<stemA>_vs_<stemB>/ and appends results to <run_dir>/results.csv.
+    // It does NOT mint its own timestamp -- that would scatter one tournament
+    // across many directories.
+    std::string stem_a = fs::path(model_a_path).stem().string();
+    std::string stem_b = fs::path(model_b_path).stem().string();
+    std::string pairing_dir = run_dir + "/" + stem_a + "_vs_" + stem_b;
+    fs::create_directories(pairing_dir);
+
+    std::string run_log_dir = pairing_dir;   // all loggers below write here
+    std::string results_path = run_dir + "/results.csv";
 
     Logger main_logger("tournament_main", run_log_dir, cfg.main_logging_level);
     main_logger.rotate(0, 0);
     main_logger.log("INFO", "Tournament pairing: A=" + model_a_path +
                             "  B=" + model_b_path);
+    main_logger.log("INFO", "Pairing log dir: " + pairing_dir);
+
+    std::string model_a_engine = ensure_engine_exists(model_a_path, cfg.inference_batch_size, main_logger);
+    std::string model_b_engine = ensure_engine_exists(model_b_path, cfg.inference_batch_size, main_logger);
 
     if (!cfg.main_cores.empty()) {
         DWORD_PTR m = mask_from_cores(cfg.main_cores);
         if (m != 0) SetThreadAffinityMask(GetCurrentThread(), m);
     }
 
-    if (!fs::exists(model_a_path)) {
-        main_logger.log("CRITICAL", "Model A engine missing: " + model_a_path);
-        std::cerr << "Fatal: model A engine missing: " << model_a_path << std::endl;
-        return 1;
-    }
-    if (!fs::exists(model_b_path)) {
-        main_logger.log("CRITICAL", "Model B engine missing: " + model_b_path);
-        std::cerr << "Fatal: model B engine missing: " << model_b_path << std::endl;
-        return 1;
-    }
 
     // ---- opening book: load + deterministic seeded subset ----
     OpeningBook book;
@@ -513,14 +563,20 @@ static int run_tournament(const PlayConfig& cfg,
 
     std::atomic<uint64_t> step_a{0}, step_b{0};
 
+    // Distinct logger names so the two batchers write separate log files in
+    // the pairing subdir (e.g. batcher_step_070000_model.log) instead of
+    // clobbering a single inference_batcher.log.
+    std::string batcher_a_name = "batcher_" + fs::path(model_a_path).stem().string();
+    std::string batcher_b_name = "batcher_" + fs::path(model_b_path).stem().string();
+
     InferenceBatcher batcher_a(
-        model_a_path, cfg.inference_batch_size, cfg.batch_timeout_ms, K,
+        model_a_engine, cfg.inference_batch_size, cfg.batch_timeout_ms, K,
         run_log_dir, cfg.batcher_logging_level, cfg.batcher_a_cores,
-        0, step_a, cfg.logging_interval_sec);
+        0, step_a, cfg.logging_interval_sec, batcher_a_name);
     InferenceBatcher batcher_b(
-        model_b_path, cfg.inference_batch_size, cfg.batch_timeout_ms, K,
+        model_b_engine, cfg.inference_batch_size, cfg.batch_timeout_ms, K,
         run_log_dir, cfg.batcher_logging_level, cfg.batcher_b_cores,
-        0, step_b, cfg.logging_interval_sec);
+        0, step_b, cfg.logging_interval_sec, batcher_b_name);
 
     std::thread bt_a([&]() {
         batcher_a.run(iq_a, rq_a, buf_a.input, buf_a.policy, buf_a.value,
@@ -544,7 +600,7 @@ static int run_tournament(const PlayConfig& cfg,
 
     for (int w = 0; w < K; ++w) {
         worker_loggers.push_back(std::make_unique<Logger>(
-            "tw_" + std::to_string(w), run_log_dir, cfg.main_logging_level));
+            "tournament_worker_" + std::to_string(w), run_log_dir, cfg.worker_logging_level));
         worker_loggers.back()->rotate(0, 0);
         Logger& wlog = *worker_loggers.back();
 
@@ -574,6 +630,7 @@ static int run_tournament(const PlayConfig& cfg,
             "sel_b_" + std::to_string(w), w, cfg.selector, wlog);
 
         worker_engines.push_back(std::move(we));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100)); 
     }
 
     // ---- shared work queue + results ----
@@ -581,11 +638,13 @@ static int run_tournament(const PlayConfig& cfg,
     std::vector<GameRecord> records(game_list.size());
     std::mutex records_mtx;
 
-    DWORD_PTR worker_mask = mask_from_cores(cfg.game_worker_cores);
-
+    // Pin each worker to a specific core, mirroring data_generator.cpp:
+    // worker w runs on tournament_worker_cores[w / workers_per_core].
     auto worker_fn = [&](int w) {
-        if (worker_mask != 0)
-            SetThreadAffinityMask(GetCurrentThread(), worker_mask);
+        int core_index = w / cfg.workers_per_core;
+        int core_id = cfg.tournament_worker_cores[core_index];
+        SetThreadAffinityMask(GetCurrentThread(),
+                              static_cast<DWORD_PTR>(1) << core_id);
         at::set_num_threads(1);
 
         WorkerEngines& we = *worker_engines[w];
@@ -649,9 +708,6 @@ static int run_tournament(const PlayConfig& cfg,
     if (bt_b.joinable()) bt_b.join();
 
     // ---- write results CSV ----
-    // Columns: game_index, model_a, model_b, eco, a_color, white_value,
-    //          a_result, reason, plies
-    // a_result is from MODEL A's perspective: 1 win / 0.5 draw / 0 loss.
     auto reason_str = [](SessionEndReason r) -> const char* {
         switch (r) {
             case SessionEndReason::CHECKMATE:   return "checkmate";
@@ -663,58 +719,107 @@ static int run_tournament(const PlayConfig& cfg,
         }
     };
 
-    std::ofstream csv(cfg.results_file, std::ios::app);
+    std::ofstream csv(results_path, std::ios::app);
+
     if (!csv) {
-        main_logger.log("ERROR", "Could not open results file: " + cfg.results_file);
-        std::cerr << "Warning: could not write results to " << cfg.results_file << std::endl;
+        main_logger.log("ERROR", "Could not open results file: " + results_path);
+        std::cerr << "Warning: could not write results to " << results_path << std::endl;
     } else {
-        // Header only if the file is empty.
+        // Header only if file is empty
         csv.seekp(0, std::ios::end);
+
         if (csv.tellp() == 0) {
-            csv << "game_index,model_a,model_b,eco,a_color,"
-                   "white_value,a_result,reason,plies\n";
+            csv << "game_index,eco,model_white,model_black,winner,model_a_score,model_b_score,reason,plies\n";
         }
+
         for (const GameRecord& r : records) {
-            // a_result from model A's perspective.
-            double a_result;
+            std::string model_white = r.model_a_is_white ? stem_a : stem_b;
+            std::string model_black = r.model_a_is_white ? stem_b : stem_a;
+
+            std::string winner;
+            int model_a_score = 0;
+            int model_b_score = 0;
+
             if (r.reason == SessionEndReason::ABORTED) {
-                a_result = -1.0;   // sentinel: game did not produce a result
-            } else if (r.model_a_is_white) {
-                a_result = (r.white_value + 1.0) / 2.0;          // 1/0.5/0
-            } else {
-                a_result = ((-r.white_value) + 1.0) / 2.0;       // flip
+                winner = "aborted";
             }
+            else if (r.white_value > 0.0) {
+                winner = "white";
+
+                if (r.model_a_is_white) {
+                    model_a_score = 1;
+                    model_b_score = -1;
+                } else {
+                    model_a_score = -1;
+                    model_b_score = 1;
+                }
+            }
+            else if (r.white_value < 0.0) {
+                winner = "black";
+
+                if (r.model_a_is_white) {
+                    model_a_score = -1;
+                    model_b_score = 1;
+                } else {
+                    model_a_score = 1;
+                    model_b_score = -1;
+                }
+            }
+            else {
+                winner = "draw";
+            }
+
             csv << r.game_index << ','
-                << model_a_path << ','
-                << model_b_path << ','
                 << r.eco << ','
-                << (r.model_a_is_white ? "white" : "black") << ','
-                << r.white_value << ','
-                << a_result << ','
+                << model_white << ','
+                << model_black << ','
+                << winner << ','
+                << model_a_score << ','
+                << model_b_score << ','
                 << reason_str(r.reason) << ','
                 << r.plies << '\n';
         }
+
         csv.flush();
-        main_logger.log("INFO", "Results appended to " + cfg.results_file);
+        main_logger.log("INFO", "Results appended to " + results_path);
     }
 
     return 0;
 }
 
 // =============================================================================
+static void print_usage() {
+    std::cerr <<
+        "Usage:\n"
+        "  talbot_play --uci        --config_file <yaml>\n"
+        "  talbot_play --tournament --config_file <yaml> "
+        "--model_a <A> --model_b <B> --run_dir <dir>\n";
+}
+
 int main(int argc, char* argv[]) {
-    std::string config_file_path = "D:/Projects/talbot/config/local_inference.yaml";
+    std::string config_file_path;          // required: no default, must be passed
     std::string mode = "--uci";
-    std::string model_a, model_b;
+    std::string model_a, model_b, run_dir;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--config_file" && i + 1 < argc)      config_file_path = argv[++i];
-        else if (arg == "--model_a" && i + 1 < argc)     model_a = argv[++i];
-        else if (arg == "--model_b" && i + 1 < argc)     model_b = argv[++i];
+        if (arg == "--config_file" && i + 1 < argc)       config_file_path = argv[++i];
+        else if (arg == "--model_a" && i + 1 < argc)      model_a = argv[++i];
+        else if (arg == "--model_b" && i + 1 < argc)      model_b = argv[++i];
+        else if (arg == "--run_dir" && i + 1 < argc)      run_dir = argv[++i];
         else if (arg == "--uci" || arg == "--tournament") mode = arg;
+        else {
+            std::cerr << "Fatal: unrecognised argument: " << arg << "\n";
+            print_usage();
+            return 1;
+        }
     }
 
+    if (config_file_path.empty()) {
+        std::cerr << "Fatal: --config_file is required\n";
+        print_usage();
+        return 1;
+    }
     if (!fs::exists(config_file_path)) {
         std::cerr << "Fatal: config file not found at " << config_file_path << std::endl;
         return 1;
@@ -731,9 +836,16 @@ int main(int argc, char* argv[]) {
     if (mode == "--tournament") {
         if (model_a.empty() || model_b.empty()) {
             std::cerr << "Fatal: --tournament requires --model_a and --model_b\n";
+            print_usage();
             return 1;
         }
-        return run_tournament(cfg, model_a, model_b);
+        if (run_dir.empty()) {
+            std::cerr << "Fatal: --tournament requires --run_dir "
+                         "(the orchestrator-created run directory)\n";
+            print_usage();
+            return 1;
+        }
+        return run_tournament(cfg, model_a, model_b, run_dir);
     }
     return run_uci(cfg);
 }

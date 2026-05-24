@@ -24,6 +24,7 @@ private:
     std::string rl_dir;
     int logging_level;
     std::vector<int> core_ids;
+    std::string logger_name;   // name for this batcher's log file (distinguishes A vs B)
     
     int rotation_interval;
     std::atomic<uint64_t>& current_global_step;
@@ -69,7 +70,8 @@ public:
     InferenceBatcher(
         const std::string& path, int b_size, int timeout, int workers, 
         const std::string& rl_dir, int log_level, const std::vector<int>& cores,
-        int rot_interval, std::atomic<uint64_t>& initial_step, int log_interval_sec
+        int rot_interval, std::atomic<uint64_t>& initial_step, int log_interval_sec,
+        const std::string& logger_name = "inference_batcher"
     );
 
     ~InferenceBatcher();

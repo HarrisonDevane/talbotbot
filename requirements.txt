@@ -12,6 +12,8 @@ h5py
 hdf5plugin
 zstandard
 lmdb
+pandas
+choix
 
 # Chess Logic
 chess

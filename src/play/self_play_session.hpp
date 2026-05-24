@@ -93,6 +93,9 @@ private:
     // returns true if the game is over (mate / draw rules / ply limit).
     bool detect_board_termination(SessionResult& result) const;
 
+    // Emit the full game as a PGN at CRITICAL level (mirrors data_generator).
+    void log_pgn(const SessionResult& result);
+
     SearchAgent agent_white;
     SearchAgent agent_black;
     chess::Color our_side;
@@ -102,6 +105,11 @@ private:
 
     chess::Board board;
     std::vector<chess::Board> hist;   // most-recent-first, capped at 4
+
+    // Every move applied this game, in order -- opening moves first, then
+    // played moves. Used to emit a PGN at game end (mirrors data_generator).
+    std::vector<chess::Move> game_moves;
+    int opening_move_count = 0;       // how many leading entries are the opening
 
     int  ply = 1;                     // 1-based, matches data_generator.cpp
     bool setup_failed = false;        // true if opening replay threw

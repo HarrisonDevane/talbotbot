@@ -3,6 +3,7 @@
 // =============================================================================
 
 #include "self_play_session.hpp"
+#include <sstream>
 
 // -----------------------------------------------------------------------------
 SelfPlaySession::SelfPlaySession(SearchAgent white_agent,
@@ -28,6 +29,7 @@ void SelfPlaySession::advance(chess::Move move) {
     hist.insert(hist.begin(), board);
     if (hist.size() > 4) hist.pop_back();
     board.makeMove(move);
+    game_moves.push_back(move);
     ply++;
 }
 
@@ -39,6 +41,8 @@ void SelfPlaySession::advance(chess::Move move) {
 void SelfPlaySession::on_game_start() {
     board.setFen(chess::constants::STARTPOS);
     hist.clear();
+    game_moves.clear();
+    opening_move_count = 0;
     ply = 1;
     finished = false;
     setup_failed = false;
@@ -63,6 +67,7 @@ void SelfPlaySession::on_game_start() {
         }
         advance(mv);
     }
+    opening_move_count = static_cast<int>(game_moves.size());
 
     if (setup_failed) {
         finished = true;
@@ -79,10 +84,16 @@ void SelfPlaySession::on_game_start() {
         final_result = r;
     }
 
+    // Log the opening explicitly: ECO plus the opening line in UCI moves.
+    std::string opening_line;
+    for (int i = 0; i < opening_move_count; ++i) {
+        if (i) opening_line += " ";
+        opening_line += chess::uci::moveToUci(game_moves[i]);
+    }
     logger.log("INFO",
-        "Game start: opening ECO " + opening.eco + ", " +
-        std::to_string(opening.san_moves.size()) + " opening plies, " +
-        "we play " + (our_side == chess::Color::WHITE ? "White" : "Black"));
+        "Game start: opening ECO " + opening.eco + " | " +
+        std::to_string(opening_move_count) + " opening plies | moves: " +
+        opening_line);
 }
 
 // -----------------------------------------------------------------------------
@@ -218,4 +229,50 @@ void SelfPlaySession::on_game_end(const SessionResult& result) {
         "Game end: ECO " + opening.eco + " | reason=" + reason +
         " | white_value=" + std::to_string(result.white_value) +
         " | plies=" + std::to_string(ply - 1));
+
+    log_pgn(result);
+}
+
+// -----------------------------------------------------------------------------
+// log_pgn: emit the whole game as a PGN at CRITICAL level, mirroring
+// DataGenerator::_generate_pgn. Opening moves and played moves are all in
+// game_moves; replaying them through a fresh board gives correct SAN.
+// -----------------------------------------------------------------------------
+void SelfPlaySession::log_pgn(const SessionResult& result) {
+    std::string result_str;
+    switch (result.reason) {
+        case SessionEndReason::CHECKMATE:
+            result_str = (result.white_value > 0.0) ? "1-0" : "0-1";
+            break;
+        case SessionEndReason::RESIGNATION:
+            result_str = (result.white_value > 0.0) ? "1-0" : "0-1";
+            break;
+        case SessionEndReason::DRAW_RULES:
+        case SessionEndReason::PLY_LIMIT:
+            result_str = "1/2-1/2";
+            break;
+        default:
+            result_str = "*";
+            break;
+    }
+
+    std::stringstream pgn;
+    pgn << "[Event \"Tournament Self-Play\"]\n";
+    pgn << "[Site \"Talbot C++ Engine\"]\n";
+    pgn << "[Result \"" << result_str << "\"]\n";
+    pgn << "[Eco \"" << opening.eco << "\"]\n";
+    pgn << "[OpeningPlies \"" << opening_move_count << "\"]\n\n";
+
+    chess::Board temp_board;
+    temp_board.setFen(chess::constants::STARTPOS);
+
+    for (size_t i = 0; i < game_moves.size(); ++i) {
+        if (i % 12 == 0 && i != 0) pgn << "\n";
+        if (i % 2 == 0) pgn << (i / 2 + 1) << ". ";
+        pgn << chess::uci::moveToSan(temp_board, game_moves[i]) << " ";
+        temp_board.makeMove(game_moves[i]);
+    }
+
+    pgn << result_str << "\n";
+    logger.log("CRITICAL", "Game PGN:\n" + pgn.str());
 }

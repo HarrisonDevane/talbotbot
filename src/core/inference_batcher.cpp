@@ -30,9 +30,11 @@ struct PipelineJob {
 InferenceBatcher::InferenceBatcher(
     const std::string& path, int b_size, int timeout, int workers, 
     const std::string& r_dir, int log_level, const std::vector<int>& cores,
-    int rot_interval, std::atomic<uint64_t>& initial_step, int log_interval_sec
+    int rot_interval, std::atomic<uint64_t>& initial_step, int log_interval_sec,
+    const std::string& lg_name
 ) : model_path(path), batch_size(b_size), timeout_ms(timeout), 
     num_workers(workers), rl_dir(r_dir), logging_level(log_level), core_ids(cores),
+    logger_name(lg_name),
     rotation_interval(rot_interval), current_global_step(initial_step), 
     logging_interval_sec(log_interval_sec),
     device(torch::kCUDA) 
@@ -121,7 +123,7 @@ void InferenceBatcher::run(
 ) {
     at::set_num_threads(1);
 
-    Logger logger("inference_batcher", rl_dir, logging_level);
+    Logger logger(logger_name, rl_dir, logging_level);
     logger.rotate(current_global_step.load(), rotation_interval);
     
     if (logger.get_level() <= 20) {

@@ -68,4 +68,5 @@ build/*
 *.onnx
 train_dir/*
 backup_dir/*
-python/plot_metrics.py
+python/plot_rl_metrics.py
+python/plot_tournament_metrics.py
