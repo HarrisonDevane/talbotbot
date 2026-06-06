@@ -52,9 +52,6 @@ DataGenerator::DataGenerator(
     selector_config.gumbel_noise = mcts_cfg["gumbel_noise"].as<double>();
     selector_config.gumbel_search_depth = mcts_cfg["gumbel_search_depth"].as<int>();
     selector_config.gumbel_m = mcts_cfg["gumbel_m"].as<int>();
-    selector_config.minimax_target_override = mcts_cfg["minimax_target_override"].as<bool>();
-    selector_config.minimax_win_target = mcts_cfg["minimax_win_target"].as<double>();
-    selector_config.minimax_loss_target = mcts_cfg["minimax_loss_target"].as<double>();
     selector_config.temperature_ply_cutoff = sel_cfg["temperature_ply_cutoff"].as<int>();
     selector_config.temperature_q_decay = sel_cfg["temperature_q_decay"].as<double>();
     selector_config.draw_cutoff = sel_cfg["draw_cutoff"].as<double>();
@@ -186,7 +183,7 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
 
             // 2. Generate Targets
             TargetResult targets = TargetGenerator::generate_targets(
-                mcts.root, root_v_mix, board, selector_config, model_config, logger
+                mcts.root, board, selector_config, model_config, logger
             );
 
             // 3. Select Action

@@ -16,7 +16,6 @@ public:
     // Pure stateless mathematical observer
     static TargetResult generate_targets(
         MCTSNode* root, 
-        double root_v_mix, 
         const chess::Board& board,
         const ActionSelectorConfig& config, 
         const ModelConfig& model_config, 

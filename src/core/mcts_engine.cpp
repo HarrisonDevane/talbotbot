@@ -269,7 +269,7 @@ void MCTSEngine::_handle_terminal_node(MCTSNode* leaf) {
     if (result.second == chess::GameResult::LOSE) {
         l = 1.0; 
         term_type = "Loss (Mate)";
-    } else if (result.second == chess::GameResult::DRAW || root_board.isRepetition(3)) {
+    } else if (result.second == chess::GameResult::DRAW || root_board.isRepetition(2)) {
         d = 1.0;
     }
 
@@ -391,7 +391,7 @@ void MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
             logger.log("DEBUG", "Selected path: " + path_str);
         }
 
-        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(3)) {
+        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(2)) {
             _handle_terminal_node(leaf);
             break;
         }
@@ -497,7 +497,7 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
         child->gumbel_score = child->gumbel_noise + child->raw_logit;
 
         root_board.makeMove(child->move);
-        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(3)) {
+        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(2)) {
             _handle_terminal_node(child);
         } else {
             active_candidates.push_back(child);
@@ -529,7 +529,7 @@ int MCTSEngine::run_simulations(int search_depth, int max_m) {
             for (MCTSNode* child : active_candidates) {
                 remaining_search_depth -= 1;
                 root_board.makeMove(child->move);
-                if (root_board.isGameOver().second == chess::GameResult::NONE && !root_board.isRepetition(3)) {
+                if (root_board.isGameOver().second == chess::GameResult::NONE && !root_board.isRepetition(2)) {
                     _queue_leaf_for_inference(child, {child}); 
                 }
                 root_board.unmakeMove(child->move);
@@ -674,10 +674,13 @@ void MCTSEngine::_backpropagate_minimax(MCTSNode* node) {
         }
     }
 
+    // Rule 1: We can win (a child loses) — take shortest mate
     if (has_winning_child) {
         node->forced_outcome = 1;
         node->distance_to_mate = best_win_dtm + 1;
-    } else if (all_children_proven) {
+    } 
+    // Rule 2: All children fully proven
+    else if (all_children_proven) {
         if (has_drawing_child) {
             node->forced_outcome = 0;
             node->distance_to_mate = 0; 
@@ -685,11 +688,46 @@ void MCTSEngine::_backpropagate_minimax(MCTSNode* node) {
             node->forced_outcome = -1;
             node->distance_to_mate = worst_loss_dtm + 1;
         }
-    } else {
+    }
+    // Rule 3: A draw exists but not all children proven.
+    // Check if the draw is the best option by Q. If every visited
+    // alternative is worse than the draw, the side to move takes it.
+    else if (has_drawing_child) {
+        MCTSNode* best_child = nullptr;
+        double best_q = -2.0;
+
+        for (int i = 0; i < node->num_children; ++i) {
+            MCTSNode* child = node->first_child + i;
+
+            // Skip proven wins — already handled by Rule 1
+            if (child->forced_outcome.has_value() && child->forced_outcome.value() == -1) continue;
+
+            // No visits = no Q, skip
+            if (child->visits == 0) continue;
+
+            // Q from side-to-move's perspective
+            double child_q = -child->expected_value(contempt);
+
+            if (child_q > best_q) {
+                best_q = child_q;
+                best_child = child;
+            }
+        }
+
+        if (best_child != nullptr &&
+            best_child->forced_outcome.has_value() &&
+            best_child->forced_outcome.value() == 0) {
+            node->forced_outcome = 0;
+            node->distance_to_mate = 0;
+        }
+    }
+    // Rule 4: Nothing conclusive
+    else {
         node->forced_outcome = std::nullopt;
         node->distance_to_mate = std::nullopt;
     }
 
+    // If this node just became proven, remove from parent's available children
     if ((!had_outcome && node->forced_outcome.has_value()) && node->parent != nullptr) {
         if (!node->unavailable_for_selection) {
             node->parent->num_available_children -= 1;

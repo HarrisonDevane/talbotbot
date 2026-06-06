@@ -19,9 +19,6 @@ struct ActionSelectorConfig {
     double gumbel_search_depth;
     double gumbel_m;                   
     
-    bool minimax_target_override;
-    double minimax_win_target;
-    double minimax_loss_target;
     int temperature_ply_cutoff;
     double temperature_q_decay;
     

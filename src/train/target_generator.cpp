@@ -4,7 +4,7 @@
 #include <algorithm>
 
 TargetResult TargetGenerator::generate_targets(
-    MCTSNode* root, double root_v_mix, const chess::Board& board,
+    MCTSNode* root, const chess::Board& board,
     const ActionSelectorConfig& config, const ModelConfig& model_config, Logger& logger) 
 {
     TargetResult result;
@@ -36,94 +36,43 @@ TargetResult TargetGenerator::generate_targets(
     }
     for (int i = 0; i < num_children; ++i) base_probs[i] /= sum_exp;
 
-    std::vector<MCTSNode*> winning_nodes, losing_nodes, draw_nodes, non_forced_nodes;
+    std::vector<MCTSNode*> losing_nodes;
     for (MCTSNode* child : all_children) {
-        if (child->forced_outcome.has_value()) {
-            if (child->forced_outcome.value() == -1) winning_nodes.push_back(child);
-            else if (child->forced_outcome.value() == 1) losing_nodes.push_back(child);
-            else draw_nodes.push_back(child);
-        } else {
-            non_forced_nodes.push_back(child);
+        if (child->forced_outcome.has_value() && child->forced_outcome.value() == 1) {
+            losing_nodes.push_back(child);
         }
     }
 
     std::vector<float> final_probs(num_children, 0.0f);
     
-    auto apply_reallocation = [&](const std::vector<int>& target_indices, float target_mass, bool distribute_targets_evenly) {
-        if (target_indices.size() == (size_t)num_children) {
-            for (int i = 0; i < num_children; ++i) final_probs[i] = base_probs[i];
-            return;
-        }
-        
-        float sum_targets = 0.0f;
-        float sum_others = 0.0f;
-        std::vector<bool> is_target(num_children, false);
-        
-        for (int idx : target_indices) {
-            is_target[idx] = true;
-            sum_targets += base_probs[idx];
-        }
+    // Zero out forced losses, renormalize the rest.
+    // Wins and draws keep their smooth improved-policy probabilities.
+    if (!losing_nodes.empty()) {
+        float non_loss_mass = 0.0f;
+
         for (int i = 0; i < num_children; ++i) {
-            if (!is_target[i]) sum_others += base_probs[i];
-        }
-        
-        for (int i = 0; i < num_children; ++i) {
-            if (is_target[i]) {
-                if (distribute_targets_evenly) {
-                    final_probs[i] = target_mass / target_indices.size();
-                } else {
-                    final_probs[i] = (sum_targets > 0.0f) ? target_mass * (base_probs[i] / sum_targets) : target_mass / target_indices.size();
-                }
+            bool is_loss = all_children[i]->forced_outcome.has_value() && 
+                           all_children[i]->forced_outcome.value() == 1;
+            if (is_loss) {
+                final_probs[i] = 0.0f;
             } else {
-                if (sum_others > 0.0f) {
-                    final_probs[i] = (1.0f - target_mass) * (base_probs[i] / sum_others);
+                non_loss_mass += base_probs[i];
+            }
+        }
+
+        for (int i = 0; i < num_children; ++i) {
+            bool is_loss = all_children[i]->forced_outcome.has_value() && 
+                           all_children[i]->forced_outcome.value() == 1;
+            if (!is_loss) {
+                if (non_loss_mass > 0.0f) {
+                    final_probs[i] = base_probs[i] / non_loss_mass;
                 } else {
-                    final_probs[i] = (1.0f - target_mass) / (num_children - target_indices.size());
+                    final_probs[i] = 1.0f / (num_children - (int)losing_nodes.size());
                 }
             }
         }
-    };
-    
-    if (config.minimax_target_override) {
-        if (!winning_nodes.empty()) {
-            int min_dtm = 999999;
-            for (MCTSNode* child : winning_nodes) {
-                if (child->distance_to_mate.value() < min_dtm) min_dtm = child->distance_to_mate.value();
-            }
-            std::vector<int> target_indices;
-            for (int i = 0; i < num_children; ++i) {
-                if (all_children[i]->forced_outcome.has_value() && 
-                    all_children[i]->forced_outcome.value() == -1 && 
-                    all_children[i]->distance_to_mate.value() == min_dtm) {
-                    target_indices.push_back(i);
-                }
-            }
-            apply_reallocation(target_indices, config.minimax_win_target, true);
-            logger.log("INFO", std::to_string(target_indices.size()) + " fastest win(s) found. Reallocating " + std::to_string(config.minimax_win_target) + " mass.");
 
-        } else if (!draw_nodes.empty() && root_v_mix <= config.draw_cutoff) {
-            std::vector<int> target_indices;
-            for (int i = 0; i < num_children; ++i) {
-                if (all_children[i]->forced_outcome.has_value() && all_children[i]->forced_outcome.value() == 0) {
-                    target_indices.push_back(i);
-                }
-            }
-            apply_reallocation(target_indices, config.minimax_win_target, true);
-            logger.log("INFO", "Forced draw condition met. Reallocating " + std::to_string(config.minimax_win_target) + " mass.");
-
-        } else if (!losing_nodes.empty() && !non_forced_nodes.empty()) {
-            std::vector<int> target_indices;
-            for (int i = 0; i < num_children; ++i) {
-                if (all_children[i]->forced_outcome.has_value() && all_children[i]->forced_outcome.value() == 1) {
-                    target_indices.push_back(i);
-                }
-            }
-            apply_reallocation(target_indices, config.minimax_loss_target, false);
-            logger.log("INFO", std::to_string(losing_nodes.size()) + " forced loss(es) squashed to " + std::to_string(config.minimax_loss_target) + " mass.");
-
-        } else {
-            final_probs = base_probs; 
-        }
+        logger.log("INFO", std::to_string(losing_nodes.size()) + " forced loss(es) zeroed out and mass redistributed.");
     } else {
         final_probs = base_probs;
     }

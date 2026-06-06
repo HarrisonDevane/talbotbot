@@ -815,10 +815,24 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Config file resolution:
+    //   --tournament : --config_file is REQUIRED (orchestrator always passes it).
+    //   --uci        : --config_file is OPTIONAL. If omitted it falls back to
+    //                  DEFAULT_UCI_CONFIG. This lets a chess GUI launch the bare
+    //                  talbot_play.exe with no arguments -- which is what every
+    //                  UCI GUI expects and the only reliable way to run under
+    //                  CuteChess et al. (GUIs cannot pass startup args cleanly).
+    static const char* DEFAULT_UCI_CONFIG =
+        "D:/Projects/talbot/config/play_uci.yaml";
+
     if (config_file_path.empty()) {
-        std::cerr << "Fatal: --config_file is required\n";
-        print_usage();
-        return 1;
+        if (mode == "--uci") {
+            config_file_path = DEFAULT_UCI_CONFIG;
+        } else {
+            std::cerr << "Fatal: --tournament requires --config_file\n";
+            print_usage();
+            return 1;
+        }
     }
     if (!fs::exists(config_file_path)) {
         std::cerr << "Fatal: config file not found at " << config_file_path << std::endl;
