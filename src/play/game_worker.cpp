@@ -13,7 +13,7 @@ SelectionResult SearchAgent::think(const chess::Board& board,
                                    const std::vector<chess::Board>& history,
                                    int ply) {
     engine.reset(board, history);
-    engine.run_simulations(search_budget, gumbel_m);
+    engine.run_simulations_fixed(search_budget, gumbel_m);
     return selector.select_move(engine.root, ply);
 }
 

@@ -115,9 +115,14 @@ class ChessAIModel(nn.Module):
         self.policy_fc = nn.Linear(2 * self.board_dim * self.board_dim, c_cfg['total_policy_moves'])
 
         # --- Value Head (WDL) ---
-        self.value_conv = nn.Conv2d(self.num_filters, 1, kernel_size=1, bias=False)
-        self.value_bn = nn.BatchNorm2d(1)
-        self.value_fc1 = nn.Linear(1 * self.board_dim * self.board_dim, 64)
+        # value_channels > 1 widens the 1x1 projection before the FC layers.
+        # The original AlphaZero head squeezes the whole backbone to a single
+        # 8x8 plane; widening gives the head room to carry several spatial
+        # features (e.g. relational ones) into the FC instead of one summary.
+        value_channels = m_cfg['value_channels']
+        self.value_conv = nn.Conv2d(self.num_filters, value_channels, kernel_size=1, bias=False)
+        self.value_bn = nn.BatchNorm2d(value_channels)
+        self.value_fc1 = nn.Linear(value_channels * self.board_dim * self.board_dim, 64)
         self.value_fc2 = nn.Linear(64, 3)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

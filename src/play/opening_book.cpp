@@ -174,22 +174,22 @@ bool OpeningBook::load(const std::string& pgn_path, std::string& error) {
 // -----------------------------------------------------------------------------
 // sample
 //
-// Deterministic: shuffle an index list with mt19937(seed), take the first
-// `count`. Same (file, seed, count) -> identical result every run.
+// SEQUENTIAL read: take the first `count` openings in file order. No shuffling.
+//
+// The opening file (8moves_v3.pgn) is already pre-shuffled on disk, so the
+// first `count` lines are a representative, fixed set. Reading them straight
+// through means the internal tournament and any external tournament pointed at
+// the SAME file (in file order) play the identical opening set -- which is the
+// whole reason for not shuffling here.
+//
 // -----------------------------------------------------------------------------
-std::vector<Opening> OpeningBook::sample(size_t count, uint64_t seed) const {
-    std::vector<size_t> idx(openings_.size());
-    std::iota(idx.begin(), idx.end(), 0);
-
-    std::mt19937_64 rng(seed);
-    std::shuffle(idx.begin(), idx.end(), rng);
-
-    if (count > idx.size()) count = idx.size();
+std::vector<Opening> OpeningBook::sample(size_t count) const {
+    if (count > openings_.size()) count = openings_.size();
 
     std::vector<Opening> result;
     result.reserve(count);
     for (size_t i = 0; i < count; ++i) {
-        result.push_back(openings_[idx[i]]);
+        result.push_back(openings_[i]);
     }
     return result;
 }

@@ -28,9 +28,10 @@
 //     move generator and is trivially testable in isolation.
 //
 // DETERMINISM:
-//   load() reads every opening in file order. sample(count, seed) shuffles a
-//   copy of the index list with std::mt19937(seed) and takes the first
-//   `count`. The seed comes from the tournament YAML, never the CLI.
+//   load() reads every opening in file order. sample(count, seed) returns the
+//   first `count` of them in that order -- a plain sequential read, no shuffle.
+//   The opening file is already pre-shuffled on disk, so the first N lines are
+//   a fixed, representative set. `seed` is ignored; see opening_book.cpp::sample.
 // =============================================================================
 
 #include <string>
@@ -59,12 +60,13 @@ public:
     // All parsed openings, in file order.
     const std::vector<Opening>& all() const { return openings_; }
 
-    // Deterministic seeded subset.
-    //   count : how many openings to return. If count >= size(), returns ALL
-    //           openings (shuffled by the seed).
-    //   seed  : RNG seed; same seed + same file => same subset, same order.
+    // Sequential subset: the first `count` openings in file order. No shuffle.
+    //   count : how many openings to return. If count >= size(), returns ALL.
+    //   seed  : IGNORED. Kept only for call-site compatibility. The opening
+    //           file is already pre-shuffled on disk, so a straight first-N
+    //           read is the fixed set. See opening_book.cpp.
     // The returned vector is a copy; callers may keep it for the tournament.
-    std::vector<Opening> sample(size_t count, uint64_t seed) const;
+    std::vector<Opening> sample(size_t count) const;
 
 private:
     std::vector<Opening> openings_;

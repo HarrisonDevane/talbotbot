@@ -1,5 +1,5 @@
 global:
-  total_training_steps: 60000                                     # Total gradient updates to perform
+  total_training_steps: 20000                                     # Total gradient updates to perform
   logging_rotation_steps: 1000                                    # How often to make a new log folder
   min_buffer_size: 2000000                                        # Minimum replay buffer size
   max_buffer_size: 24000000                                       # Max buffer size
@@ -9,7 +9,7 @@ global:
 
 inference:
   inference_worker_cores: [13, 14, 15]                            # Dedicated CPU cores for the Batching Process (dispatcher, collector, filler)
-  batch_size: 512                                                 # Max batch size during inference
+  batch_size: 256                                                 # Max batch size during inference
   batch_size_factor: 8                                            # Multiplier for batch size to determine max slots available in RAM
   batch_timeout_ms: 10                                            # How long the GPU batcher waits for more data before running partial batch
   logging_interval_sec: 10                                        # Interval for system metrics logging
@@ -18,7 +18,7 @@ inference:
 data_generation:
   data_generator_cores: [19]                                      # Dedicated CPU cores for the main C++ orchestrator and data generator task
   io_write_cores: [19]                                            # Dedicated CPU cores LMDB writing
-  game_worker_cores: [24, 25, 26, 27, 28, 29, 30, 31]             # Dedicated CPU cores for games
+  game_worker_cores: [26, 27, 28, 29, 30, 31]                     # Dedicated CPU cores for games
   workers_per_core: 16                                            # Number of game workers to pin to each core
   max_ply_length: 400                                             # Hard cutoff to force a draw
   main_logging_level: 20                                          # Logging level for the UCI Orchestrator
@@ -53,6 +53,8 @@ training:
   policy_loss_weight: 1.0                                         # Weight for Move Prediction loss
   value_loss_weight: 1.0                                          # Weight for Win/Loss Prediction loss
   weight_decay: 1e-4                                              # L2 Regularization
-  learning_rate: 1e-1                                             # SGD Learning Rate
+  learning_rate: 2e-1                                             # SGD Learning Rate
+  warmup_start_lr: 2e-3                                           # LR at step 0 (ramps to learning_rate over warmup_steps)
+  warmup_steps: 1000
   momentum_rate: 0.9                                              # SGD Momentum
   logging_level: 20                                               # Logging level for training operations

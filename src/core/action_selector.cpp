@@ -23,15 +23,6 @@ void ActionSelector::reset_for_new_game() {
 SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
     SelectionResult result;
     
-    // Calculate move and color
-    int current_move = (ply_count / 2) + 1;
-    std::string color = (ply_count % 2 == 0) ? "WHITE" : "BLACK";
-
-    // Print the header
-    logger.log("INFO", "===============================================================================================");
-    logger.log("INFO", " MOVE " + std::to_string(current_move) + " | PLY " + std::to_string(ply_count) + " | " + color);
-    logger.log("INFO", "===============================================================================================");    
-    
     int num_children = root->num_children;
     if (num_children == 0) return result;
 
@@ -47,13 +38,41 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
             else if (child->forced_outcome.value() == 1) losing_nodes.push_back(child);
             else draw_nodes.push_back(child);
         } else {
-            if (child->visits > 0) non_forced_visited.push_back(child);
+            // Check if the opponent's best response to this move is a forced draw.
+            // If so, this move's true value is a draw regardless of its Q.
+            bool is_practical_draw = false;
+            if (child->expanded && child->num_children > 0) {
+                MCTSNode* best_grandchild = nullptr;
+                double best_gq = -2.0;
+                for (int i = 0; i < child->num_children; ++i) {
+                    MCTSNode* gc = child->first_child + i;
+                    // Skip grandchildren that are proven wins for us (opponent avoids them)
+                    if (gc->forced_outcome.has_value() && gc->forced_outcome.value() == -1) continue;
+                    if (gc->visits == 0) continue;
+                    double gq = -gc->expected_value(config.contempt);  // opponent's perspective
+                    if (gq > best_gq) { best_gq = gq; best_grandchild = gc; }
+                }
+                if (best_grandchild != nullptr &&
+                    best_grandchild->forced_outcome.has_value() &&
+                    best_grandchild->forced_outcome.value() == 0) {
+                    is_practical_draw = true;
+                }
+            }
+
+            if (is_practical_draw) {
+                draw_nodes.push_back(child);
+                logger.log("INFO", "Practical draw detected: " + chess::uci::moveToUci(child->move)
+                    + " (opponent's best response is a forced draw)");
+            } else if (child->visits > 0) {
+                non_forced_visited.push_back(child);
+            }
         }
     }
 
     MCTSNode* top_node;
     double best_q = -2.0;
 
+    // Find best Q of child nodes
     if (!non_forced_visited.empty()) {
         std::sort(non_forced_visited.begin(), non_forced_visited.end(), [](MCTSNode* a, MCTSNode* b) {
             if (a->visits != b->visits) return a->visits > b->visits;

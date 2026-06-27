@@ -58,6 +58,7 @@
 #include "self_play_session.hpp"
 #include "opening_book.hpp"
 #include "trt_builder.hpp"
+#include "time_control.hpp"
 
 namespace fs = std::filesystem;
 
@@ -114,7 +115,6 @@ struct PlayConfig {
     std::string opening_file;
     int games_per_match;          // total games per pairing; must be even
     int num_openings;             // derived: games_per_match / 2
-    int opening_seed;
     int workers_per_core;         // game-worker threads pinned per core
     int concurrent_games;         // derived: len(game_worker_cores) * workers_per_core
     int max_ply_length;
@@ -123,6 +123,9 @@ struct PlayConfig {
 
     // mcts / selection
     ActionSelectorConfig selector;
+
+    // time control (used by --uci)
+    TimeControlConfig time_control;
 };
 
 static PlayConfig load_config(const std::string& config_file_path) {
@@ -173,7 +176,6 @@ static PlayConfig load_config(const std::string& config_file_path) {
     if (tour_n) {
         cfg.opening_file      = tour_n["opening_file"].as<std::string>();
         cfg.games_per_match   = tour_n["games_per_match"].as<int>();
-        cfg.opening_seed      = tour_n["opening_seed"].as<int>();
         cfg.workers_per_core  = tour_n["workers_per_core"].as<int>();
         cfg.max_ply_length = tour_n["max_ply_length"].as<int>();
         cfg.worker_logging_level  = tour_n["worker_logging_level"].as<int>();
@@ -216,6 +218,19 @@ static PlayConfig load_config(const std::string& config_file_path) {
     s.resignation_probability= sel_n["resignation_probability"].as<double>();
     s.resignation_cutoff     = sel_n["resignation_cutoff"].as<double>();
 
+    YAML::Node tc_n = root["time_control"];
+    TimeControlConfig& tc = cfg.time_control;
+    tc.move_horizon       = tc_n["move_horizon"].as<double>();
+    tc.increment_fraction = tc_n["increment_fraction"].as<double>();
+    tc.base_fraction      = tc_n["base_fraction"].as<double>();
+    tc.hard_multiplier    = tc_n["hard_multiplier"].as<double>();
+    tc.max_time_fraction  = tc_n["max_time_fraction"].as<double>();
+    tc.move_overhead_ms   = tc_n["move_overhead_ms"].as<int64_t>();
+    tc.min_think_ms       = tc_n["min_think_ms"].as<int64_t>();
+    tc.nps_ewma_alpha     = tc_n["nps_ewma_alpha"].as<double>();
+    tc.nps_ewma           = tc_n["nps_ewma_default"].as<double>();
+
+
     return cfg;
 }
 
@@ -234,6 +249,9 @@ struct SearchWorker {
     std::vector<chess::Board> history;
     int search_nodes = 0;
     int gumbel_m     = 0;
+    bool timed       = false;
+    std::chrono::steady_clock::time_point soft_deadline;
+    std::chrono::steady_clock::time_point hard_deadline;
     MCTSEngine* mcts = nullptr;
     DWORD_PTR core_mask = 0;
 };
@@ -318,6 +336,9 @@ static int run_uci(const PlayConfig& cfg) {
         buf.input, buf.policy, buf.value,
         buffer_free_slots, &wait_count, 1);
 
+    mcts_engine->set_nps_alpha(cfg.time_control.nps_ewma_alpha);
+    TimeControl time_control(cfg.time_control);
+
     SearchWorker search_worker;
     search_worker.mcts = mcts_engine.get();
     search_worker.core_mask = mask_from_cores(cfg.game_worker_cores);
@@ -330,7 +351,14 @@ static int run_uci(const PlayConfig& cfg) {
             worker->cv_start.wait(lock, [&]{ return worker->start_flag || worker->quit_flag; });
             if (worker->quit_flag) break;
             worker->mcts->reset(worker->board, worker->history);
-            worker->mcts->run_simulations(worker->search_nodes, worker->gumbel_m);
+            if (worker->timed) {
+                worker->mcts->run_simulations_timed(
+                    worker->gumbel_m,
+                    worker->soft_deadline, 
+                    worker->hard_deadline);
+            } else {
+                worker->mcts->run_simulations_fixed(worker->search_nodes, worker->gumbel_m);
+            }
             worker->start_flag = false;
             worker->done_flag  = true;
             lock.unlock();
@@ -361,6 +389,7 @@ static int run_uci(const PlayConfig& cfg) {
             board.setFen(chess::constants::STARTPOS);
             history.clear();
             agent.reset_for_new_game();
+            mcts_engine->reset_nps_history(cfg.time_control.nps_ewma);
             ply_count = 1;
         }
         else if (command == "position") {
@@ -371,13 +400,16 @@ static int run_uci(const PlayConfig& cfg) {
             }
             if (tokens.size() > 1 && tokens[1] == "startpos") {
                 board.setFen(chess::constants::STARTPOS);
+                ply_count = 1;
             } else if (tokens.size() > 2 && tokens[1] == "fen") {
                 std::string fen;
                 for (size_t i = 2; i < moves_idx; ++i)
                     fen += tokens[i] + (i == moves_idx - 1 ? "" : " ");
                 board.setFen(fen);
+                
+                ply_count = ((board.fullMoveNumber() - 1) * 2) + (board.sideToMove() == chess::Color::BLACK ? 2 : 1);
             }
-            ply_count = 1;
+            
             for (size_t i = moves_idx + 1; i < tokens.size(); ++i) {
                 history.insert(history.begin(), board);
                 if (history.size() > 4) history.pop_back();
@@ -387,21 +419,69 @@ static int run_uci(const PlayConfig& cfg) {
             }
         }
         else if (command == "go") {
+            // Parse the subset of UCI `go` params we support.
+            int64_t wtime = -1, btime = -1, winc = 0, binc = 0, movetime = -1;
+            int movestogo = 0;
             int total_search_nodes = static_cast<int>(cfg.selector.gumbel_search_depth);
             for (size_t i = 1; i + 1 < tokens.size(); ++i) {
-                if (tokens[i] == "nodes") total_search_nodes = std::stoi(tokens[i + 1]);
+                if      (tokens[i] == "nodes")     total_search_nodes = std::stoi(tokens[i + 1]);
+                else if (tokens[i] == "wtime")     wtime     = std::stoll(tokens[i + 1]);
+                else if (tokens[i] == "btime")     btime     = std::stoll(tokens[i + 1]);
+                else if (tokens[i] == "winc")      winc      = std::stoll(tokens[i + 1]);
+                else if (tokens[i] == "binc")      binc      = std::stoll(tokens[i + 1]);
+                else if (tokens[i] == "movestogo") movestogo = std::stoi(tokens[i + 1]);
+                else if (tokens[i] == "movetime")  movetime  = std::stoll(tokens[i + 1]);
             }
-            main_logger.log("INFO", "Dispatching search. Budget: " +
-                            std::to_string(total_search_nodes));
+
+            bool timed = false;
+            std::chrono::steady_clock::time_point soft_dl, hard_dl;
+            auto now = std::chrono::steady_clock::now();
+
+            if (ply_count <= 2) {
+                // Use fixed node at beginning of game
+                timed = false;
+                total_search_nodes = static_cast<int>(cfg.selector.gumbel_search_depth);
+                main_logger.log("INFO", "Opening ply " + std::to_string(ply_count) + " detected. Forcing fixed-node search.");
+            } else if (movetime >= 0) {
+                // Fixed per-move time: spend (almost) all of it, no soft target.
+                timed = true;
+                int64_t budget = std::max<int64_t>(1, movetime - cfg.time_control.move_overhead_ms);
+                soft_dl = now + std::chrono::milliseconds(budget);
+                hard_dl = soft_dl;
+            } else if (wtime >= 0 || btime >= 0) {
+                // Clock-based: allocate from our side's clock via TimeControl.
+                bool white = (board.sideToMove() == chess::Color::WHITE);
+                ClockState cs;
+                cs.time_left_ms = white ? wtime : btime;
+                cs.increment_ms = white ? winc  : binc;
+                cs.moves_to_go  = movestogo;
+                cs.ply          = ply_count;
+                TimeBudget tb = time_control.allocate(cs);
+                timed = true;
+                soft_dl = now + std::chrono::milliseconds(tb.target_ms);
+                hard_dl = now + std::chrono::milliseconds(tb.hard_limit_ms);
+                main_logger.log("INFO", "Time alloc: target=" + std::to_string(tb.target_ms) +
+                                "ms hard=" + std::to_string(tb.hard_limit_ms) + "ms");
+            }
+
+            // else: no clock, no movetime -> fixed node budget (`go`, `go nodes`, `go infinite`).
+
             {
                 std::lock_guard<std::mutex> lock(search_worker.mtx);
-                search_worker.board        = board;
-                search_worker.history      = history;
-                search_worker.search_nodes = total_search_nodes;
-                search_worker.gumbel_m     = static_cast<int>(cfg.selector.gumbel_m);
-                search_worker.done_flag    = false;
-                search_worker.start_flag   = true;
+                search_worker.board    = board;
+                search_worker.history  = history;
+                search_worker.gumbel_m = static_cast<int>(cfg.selector.gumbel_m);
+                search_worker.timed    = timed;
+                if (timed) {
+                    search_worker.soft_deadline = soft_dl;
+                    search_worker.hard_deadline = hard_dl;
+                } else {
+                    search_worker.search_nodes = total_search_nodes;
+                }
+                search_worker.done_flag  = false;
+                search_worker.start_flag = true;
                 search_worker.cv_start.notify_one();
+
             }
             {
                 std::unique_lock<std::mutex> lock(search_worker.mtx);
@@ -520,7 +600,7 @@ static int run_tournament(const PlayConfig& cfg,
     }
 
 
-    // ---- opening book: load + deterministic seeded subset ----
+    // ---- opening book: load + deterministic subset ----
     OpeningBook book;
     std::string book_error;
     if (!book.load(cfg.opening_file, book_error)) {
@@ -529,11 +609,9 @@ static int run_tournament(const PlayConfig& cfg,
         return 1;
     }
     std::vector<Opening> chosen =
-        book.sample(static_cast<size_t>(cfg.num_openings),
-                    static_cast<uint64_t>(cfg.opening_seed));
+        book.sample(static_cast<size_t>(cfg.num_openings));
     main_logger.log("INFO", "Opening book: " + std::to_string(book.size()) +
-                            " parsed, " + std::to_string(chosen.size()) +
-                            " sampled (seed " + std::to_string(cfg.opening_seed) + ")");
+                            " parsed, " + std::to_string(chosen.size()) + ")");
 
     // ---- build the game list: each opening twice, colours swapped ----
     std::vector<GameSpec> game_list;

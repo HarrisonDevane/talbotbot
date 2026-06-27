@@ -141,7 +141,7 @@ public:
         double draw_cutoff, 
         double gumbel_c_visit, 
         double gumbel_c_scale, 
-        double gumbel_noise, 
+        double gumbel_noise,
         const chess::Board& board, 
         const std::vector<chess::Board>& base_history,
         Logger& logger, 
@@ -154,7 +154,23 @@ public:
     );
 
     void reset(const chess::Board& board, const std::vector<chess::Board>& history);
-    int run_simulations(int search_depth, int max_m);
+
+    // Self-play / fixed-budget path. Runs the full sequential-halving schedule
+    // to completion. Body is UNCHANGED from the original run_simulations.
+    int run_simulations_fixed(int search_depth, int max_m);
+
+    // Clocked path. Plans the schedule from the trailing NPS estimate, stops at
+    // the soft deadline (phase boundary) or hard deadline (mid-phase, with drain).
+    // Deadlines are steady_clock (monotonic). max_nodes is the pool-safety cap.
+    int run_simulations_timed(int max_m,
+                              std::chrono::steady_clock::time_point soft_deadline,
+                              std::chrono::steady_clock::time_point hard_deadline);
+
+    // Trailing nodes/sec estimate (EWMA). 0.0 == no data yet. Survives reset();
+    // cleared per game via reset_nps_history().
+    double estimated_nps() const { return nps_ewma_; }
+    void   reset_nps_history(double e) { nps_ewma_ = e; }
+    void   set_nps_alpha(double a) { nps_alpha_ = a; }   // wired from time_control.nps_ewma_alpha
 
 private:
     void _wait_for_inference();
@@ -172,6 +188,25 @@ private:
     void _run_single_async_simulation(MCTSNode* start_node);
     
     void _log_tournament_results(const std::vector<MCTSNode*>& candidates, const std::string& phase_name);
+
+    // Debug: navigate from root following a UCI move path and dump the target
+    // node's RAW network value plus its children. For "why is this node's Q
+    // wrong" questions -- the raw value tells you if the value head is blind.
+    void _log_node_by_path(const std::vector<std::string>& uci_path, int top_n);
+
+    // Shared sequential-halving building blocks (used by both _fixed and _timed).
+    void _expand_root();
+    int  _build_candidates(int max_m, std::vector<MCTSNode*>& all_nodes,
+                           std::vector<MCTSNode*>& active_candidates);
+    void _run_round0(std::vector<MCTSNode*>& active_candidates, int& remaining_search_depth);
+    void _rescore(std::vector<MCTSNode*>& nodes);
+    void _halve(std::vector<MCTSNode*>& active_candidates);
+    void _flush_inflight();
+
+    // Fold one completed search's (sims, seconds) into the trailing NPS EWMA.
+    void _record_nps(int sims, double seconds);
+    double nps_ewma_;   // trailing nodes/sec; NOT touched by reset()
+    double nps_alpha_;   // EWMA smoothing; default preserves prior behaviour, override via set_nps_alpha()
 
     template <typename Predicate, typename WorkFn>
     void _spin_wait(Predicate should_keep_waiting, WorkFn work_fn);

@@ -17,7 +17,7 @@ struct ActionSelectorConfig {
     double gumbel_c_scale;
     double gumbel_noise;
     double gumbel_search_depth;
-    double gumbel_m;                   
+    double gumbel_m;              
     
     int temperature_ply_cutoff;
     double temperature_q_decay;

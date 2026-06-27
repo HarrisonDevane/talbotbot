@@ -25,7 +25,7 @@ mcts:
   gumbel_c_visit: 50.0                                           # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                            # Scale for sigma with visit count
   gumbel_noise: 0.0                                              # 0.0 for deterministic tournament play
-  gumbel_search_depth: 800                                       # Node evaluation budget per move
+  gumbel_search_depth: 400                                       # Node evaluation budget per move
   gumbel_m: 32                                                   # m value for sequential halving
 
 selection:
@@ -40,7 +40,6 @@ tournament:
   workers_per_core: 5                                           # Number of game workers to pin to each core
   games_per_match: 100                                          # Total games per pairing (must be even; each opening played twice)
   opening_file: 'D:/Projects/talbot/data/opening_pgn/8moves_v3.pgn'  # Path to the PGN file of opening lines
-  opening_seed: 42                                               # Seed for deterministic opening selection
   max_ply_length: 400                                            # Hard cutoff in half-moves before a game is forced drawn
   worker_logging_level: 50                                       # Logging level for MCTS game worker: 20 = per move analysis, 50 = only PGN
 
@@ -51,4 +50,4 @@ tournament_models:
   - step_045000_model.pth
   - step_050000_model.pth
   - step_055000_model.pth
-  - step_060000_model.pth
+  - step_058000_model.pth

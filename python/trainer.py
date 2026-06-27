@@ -213,7 +213,7 @@ class TrainTask:
         self.total_policy_moves = c_cfg['total_policy_moves']
 
         train_dir = os.path.dirname(db_path)
-        log_level = self.training_config.get('logging_level', 20)
+        log_level = self.training_config['logging_level']
         rotation_interval = self.global_config['logging_rotation_steps']
 
         # Pass the rotation interval so the prefetcher knows when to switch folders
@@ -223,8 +223,8 @@ class TrainTask:
             input_planes=self.input_planes,
             board_dim=self.board_dim,
             policy_moves=self.total_policy_moves,
-            core_ids=self.training_config.get('io_read_cores', [3, 4]),
-            prefetch_workers=self.training_config.get('prefetch_workers', 16),
+            core_ids=self.training_config['io_read_cores'],
+            prefetch_workers=self.training_config['prefetch_workers'],
             train_dir=train_dir,
             log_level=log_level,
             rotation_interval=rotation_interval
@@ -274,6 +274,30 @@ class TrainTask:
             'scaler_state_dict': self.scaler.state_dict()
         }, path)
 
+    def pause_for_build(self):
+        """
+        Release cached activation memory back to the OS so the C++ TensorRT
+        builder has headroom, WITHOUT tearing the task down. Model params,
+        optimizer momentum, scaler, and the prefetcher process all stay
+        resident, so resuming is warm (no checkpoint reload, no optimizer
+        realloc, no prefetcher restart, no cuDNN re-benchmark).
+
+        Call this only when no training step is in flight (i.e. right after a
+        completed run_single_step). The synchronize() ensures all kernels have
+        finished and their intermediate buffers are returned to the caching
+        allocator before we hand that memory back to the OS.
+        """
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+    def resume_after_build(self):
+        """
+        Counterpart to pause_for_build(). Nothing to rebuild — the task never
+        left memory. The next run_single_step() will re-grow the activation
+        working set on demand, exactly as a normal step does.
+        """
+        pass
+
     def run_single_step(self, current_log_dir: str, state_config: dict):
         self.state_config = state_config
 
@@ -312,13 +336,31 @@ class TrainTask:
         data_time = (time.perf_counter() - data_start) * 1000
 
         global_step = self.state_config['lifetime']['training_steps']
+
+        # Linear LR warmup over the first build_steps gradient updates.
+        # Ramps from warmup_start_lr (default 1e-3) up to the target learning_rate.
+        target_lr  = float(self.training_config['learning_rate'])
+        warmup_lr0 = float(self.training_config['warmup_start_lr'])
+        warmup_n   = int(self.training_config['warmup_steps'])
+
+        if warmup_n > 0 and global_step < warmup_n:
+            frac = global_step / warmup_n            # 0.0 -> 1.0 linear
+            current_lr = warmup_lr0 + frac * (target_lr - warmup_lr0)
+        else:
+            current_lr = target_lr
+
         for param_group in self.optimizer.param_groups:
-            param_group['lr'] = float(self.training_config['learning_rate'])
+            param_group['lr'] = current_lr
 
         value_targets_wdl = torch.zeros((value_targets.size(0), 3), device=self.device, dtype=torch.float32)
         value_targets_wdl[:, 0] = (value_targets == 1.0).float()  # Win
         value_targets_wdl[:, 1] = (value_targets == 0.0).float()  # Draw
         value_targets_wdl[:, 2] = (value_targets == -1.0).float() # Loss
+
+        # Diagnostic: rows whose WDL target sums to zero mean value_target was not
+        # exactly +1/0/-1 (e.g. FP rounding or contempt leak upstream). These rows
+        # contribute a degenerate KLDiv term and silently corrupt the value gradient.
+        bad_wdl_rows = (value_targets_wdl.sum(dim=1) == 0).sum().item()
 
         with torch.no_grad():
             total_v = len(value_targets)
@@ -349,6 +391,11 @@ class TrainTask:
         with torch.no_grad():
             policy_probs   = torch.exp(policy_log_softmax)
             policy_entropy = -(policy_probs * policy_log_softmax).sum(dim=1).mean()
+            # Entropy of the TARGET distribution. If this is high and flat while the
+            # net won't learn, the targets themselves carry little signal (data problem,
+            # not optimizer problem).
+            tgt = policy_target.float()
+            target_entropy = -(tgt * torch.log(tgt + 1e-10)).sum(dim=1).mean()
             v_out_mean     = (value_outputs[:, 0] - value_outputs[:, 2]).mean()
             v_tar_mean     = value_targets.mean()
 
@@ -374,6 +421,8 @@ class TrainTask:
             f"Tar (W/D/L): {pct_w:.1f}% / {pct_d:.1f}% / {pct_l:.1f}% | "
             f"Pred: {pred_w_mean:.1f}% / {pred_d_mean:.1f}% / {pred_l_mean:.1f}% | "
             f"P_Ent={policy_entropy.item():.4f} | "
+            f"T_Ent={target_entropy.item():.4f} | "
+            f"BadWDL={bad_wdl_rows} | "
             f"Grad={grad_norm.item():.2f} | LR={self.optimizer.param_groups[0]['lr']:.6f} | "
             f"Data={data_time:.0f}ms FW={fw_time:.0f}ms BW={bw_time:.0f}ms"
         )
@@ -383,6 +432,8 @@ class TrainTask:
             self.tb_writer.add_scalar('Loss/Policy', policy_loss.item() * self.training_config['policy_loss_weight'], global_step)
             self.tb_writer.add_scalar('Loss/Value', value_loss.item() * self.training_config['value_loss_weight'], global_step)
             self.tb_writer.add_scalar('Metrics/Policy_Entropy', policy_entropy.item(), global_step)
+            self.tb_writer.add_scalar('Metrics/Target_Entropy', target_entropy.item(), global_step)
+            self.tb_writer.add_scalar('Metrics/Bad_WDL_Rows', bad_wdl_rows, global_step)
             self.tb_writer.add_scalar('Metrics/Value_Output_Mean', v_out_mean.item(), global_step)
             self.tb_writer.add_scalar('Metrics/Value_Target_Mean', v_tar_mean.item(), global_step)
             self.tb_writer.add_scalar('Metrics/Grad_Norm', grad_norm.item(), global_step)

@@ -165,20 +165,12 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
             chess::Color current_turn = board.sideToMove();
             int move_number = ((ply_count - 1) / 2) + 1;
             std::string side_str = (current_turn == chess::Color::WHITE) ? "White" : "Black";
-            
-            char move_banner[512];
-            snprintf(move_banner, sizeof(move_banner), 
-                "\n============================================================\n"
-                "                    --- MOVE %d: %s, PLY %d STARTED ---\n"
-                "============================================================", 
-                move_number, side_str.c_str(), ply_count);
-            logger.log("INFO", move_banner);
 
             auto move_start_time = std::chrono::high_resolution_clock::now();
 
             // 1. Search
             mcts.reset(board, history);
-            int sim_count = mcts.run_simulations(selector_config.gumbel_search_depth, selector_config.gumbel_m);
+            int sim_count = mcts.run_simulations_fixed(selector_config.gumbel_search_depth, selector_config.gumbel_m);
             double root_v_mix = mcts.root->calculate_v_mix(selector_config.contempt);
 
             // 2. Generate Targets

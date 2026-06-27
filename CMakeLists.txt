@@ -46,6 +46,8 @@ add_executable(talbot_play
     src/play/game_worker.cpp
     src/play/self_play_session.cpp
     src/play/opening_book.cpp
+    src/play/time_control.cpp
+
 )
 
 # 4. SETUP INCLUDES (Apply to both)

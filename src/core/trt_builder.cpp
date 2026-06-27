@@ -1,6 +1,22 @@
 #include "trt_builder.hpp"
 #include <fstream>
+#include <vector>
 #include <cuda_runtime_api.h>
+
+namespace {
+// Read an entire file into a byte buffer. Returns empty on any failure
+// (missing file is the normal "cold cache" case, not an error).
+std::vector<char> read_file_bytes(const std::string& path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return {};
+    std::streamsize size = f.tellg();
+    if (size <= 0) return {};
+    f.seekg(0, std::ios::beg);
+    std::vector<char> buf(static_cast<size_t>(size));
+    if (!f.read(buf.data(), size)) return {};
+    return buf;
+}
+}  // namespace
 
 std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::string& onnx_path, int max_batch_size, Logger& logger) {
     cudaSetDevice(0);
@@ -28,12 +44,55 @@ std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::st
 
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 512ULL * 1024 * 1024);
 
+    // ---- Timing cache (load) ------------------------------------------------
+    // Reuse tactic-selection results from previous builds so the builder skips
+    // the live hardware profiling phase. The cache is a separate file next to
+    // the ONNX; missing/empty -> cold build that re-profiles, then writes it.
+    // ignoreMismatch=false makes TRT reject a cache from a different GPU / TRT
+    // version, so a stale file is safely regenerated rather than misused.
+    const std::string cache_path = onnx_path + ".timing.cache";
+    std::vector<char> cache_blob = read_file_bytes(cache_path);
+    std::unique_ptr<nvinfer1::ITimingCache> timing_cache(
+        config->createTimingCache(cache_blob.data(), cache_blob.size()));
+    if (timing_cache) {
+        if (!config->setTimingCache(*timing_cache, /*ignoreMismatch=*/false)) {
+            logger.log("WARN", "TensorRT: setTimingCache failed; building without cache.");
+        } else if (cache_blob.empty()) {
+            logger.log("INFO", "TensorRT: timing cache cold (no usable file); will profile and write.");
+        } else {
+            logger.log("INFO", "TensorRT: timing cache loaded (" +
+                       std::to_string(cache_blob.size()) + " bytes).");
+        }
+    } else {
+        logger.log("WARN", "TensorRT: createTimingCache returned null; building without cache.");
+    }
+    // -------------------------------------------------------------------------
+
     auto plan = std::unique_ptr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
     
     if (!plan) {
         logger.log("ERROR", "TensorRT: Engine build failed");
         return nullptr;
     }
+
+    // ---- Timing cache (serialize) -------------------------------------------
+    // Persist the (possibly newly-populated) cache so the next build -- and
+    // crucially the next *process run* -- reuses it instead of profiling cold.
+    if (timing_cache) {
+        std::unique_ptr<nvinfer1::IHostMemory> serialized(timing_cache->serialize());
+        if (serialized && serialized->size() > 0) {
+            std::ofstream out(cache_path, std::ios::binary);
+            if (out) {
+                out.write(reinterpret_cast<const char*>(serialized->data()),
+                          static_cast<std::streamsize>(serialized->size()));
+                logger.log("INFO", "TensorRT: timing cache written (" +
+                           std::to_string(serialized->size()) + " bytes).");
+            } else {
+                logger.log("WARN", "TensorRT: could not open timing cache for writing: " + cache_path);
+            }
+        }
+    }
+    // -------------------------------------------------------------------------
 
     auto result = std::make_unique<EngineResult>();
     result->serialized_data.assign(

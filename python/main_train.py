@@ -320,16 +320,14 @@ class RLOrchestrator:
 
                 if self.current_step >= self.next_build_step:
                     self.train_task.save_checkpoint(self.model_pth)
-                    
-                    self.train_task.cleanup()
-                    del self.train_task
-                    self.train_task = None
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-                    
+
+                    # Free cached activations so the C++ builder has headroom, but
+                    # keep model/optimizer/prefetcher resident (warm resume).
+                    self.train_task.pause_for_build()
+
                     self._export_to_cpp()
                     self._wait_for_trt_engine()
-                    
+
                     # Store backup and state accurately corresponding to the build step
                     backup_dir = os.path.join(RL_DIR, 'models', 'checkpoints')
                     os.makedirs(backup_dir, exist_ok=True)
@@ -339,17 +337,9 @@ class RLOrchestrator:
                     shutil.copy(RL_PARAMS_FILE, os.path.join(current_log_dir, f'step_{self.current_step:06d}_config.yaml'))
                     self.logger.info(f"Periodic backup saved at step {self.current_step}.")
 
-                                    
-                    self.logger.info("Reinitializing PyTorch TrainTask...")
-                    self.train_task = TrainTask(
-                        model_path=self.model_pth,
-                        model_config=self.model_config,
-                        training_config=self.params_config['training'],
-                        state_config=self.state_config,
-                        global_config=self.params_config['global'],
-                        db_path=self.buffer_file_path
-                    )
-                    
+                    self.train_task.resume_after_build()
+                    self.logger.info("Resumed PyTorch TrainTask after build (warm, no rebuild).")
+
                     self.next_build_step = self._calculate_next_build_step(self.current_step)
 
                 total_time = time.time() - step_start_time
