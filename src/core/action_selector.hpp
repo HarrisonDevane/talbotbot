@@ -11,13 +11,15 @@
 struct ActionSelectorConfig {
     int node_pool_size;
     double contempt;
+    double policy_softmax_temp;
     double virtual_loss;
     double draw_cutoff;
     double gumbel_c_visit;
     double gumbel_c_scale;
     double gumbel_noise;
     double gumbel_search_depth;
-    double gumbel_m;              
+    double gumbel_m;
+    double puct_c;
     
     int temperature_ply_cutoff;
     double temperature_q_decay;

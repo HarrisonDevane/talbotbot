@@ -20,6 +20,7 @@ private:
     int batch_size;
     int timeout_ms;
     int num_workers;
+    int input_planes;
     
     std::string rl_dir;
     int logging_level;
@@ -68,7 +69,7 @@ private:
 
 public:
     InferenceBatcher(
-        const std::string& path, int b_size, int timeout, int workers, 
+        const std::string& path, int b_size, int timeout, int workers, int input_planes,
         const std::string& rl_dir, int log_level, const std::vector<int>& cores,
         int rot_interval, std::atomic<uint64_t>& initial_step, int log_interval_sec,
         const std::string& logger_name = "inference_batcher"

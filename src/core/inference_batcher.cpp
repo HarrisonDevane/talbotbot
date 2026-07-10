@@ -28,13 +28,13 @@ struct PipelineJob {
 };
 
 InferenceBatcher::InferenceBatcher(
-    const std::string& path, int b_size, int timeout, int workers, 
+    const std::string& path, int b_size, int timeout, int workers, int input_planes,
     const std::string& r_dir, int log_level, const std::vector<int>& cores,
     int rot_interval, std::atomic<uint64_t>& initial_step, int log_interval_sec,
     const std::string& lg_name
 ) : model_path(path), batch_size(b_size), timeout_ms(timeout), 
-    num_workers(workers), rl_dir(r_dir), logging_level(log_level), core_ids(cores),
-    logger_name(lg_name),
+    num_workers(workers), input_planes(input_planes), rl_dir(r_dir), 
+    logging_level(log_level), core_ids(cores), logger_name(lg_name),
     rotation_interval(rot_interval), current_global_step(initial_step), 
     logging_interval_sec(log_interval_sec),
     device(torch::kCUDA) 
@@ -474,7 +474,7 @@ void InferenceBatcher::run(
 
             cudaEventRecord(compute_start[current_slot], raw_streams[current_slot]);
             
-            trt_contexts[current_slot]->setInputShape("input", nvinfer1::Dims4{padded_size, 69, 8, 8});
+            trt_contexts[current_slot]->setInputShape("input", nvinfer1::Dims4{padded_size, 111, 8, 8});
             trt_contexts[current_slot]->setTensorAddress("input", gpu_input_fp16[current_slot].data_ptr());
             trt_contexts[current_slot]->setTensorAddress("policy", gpu_policy_fp16[current_slot].data_ptr());
             trt_contexts[current_slot]->setTensorAddress("value", gpu_value_fp16[current_slot].data_ptr());

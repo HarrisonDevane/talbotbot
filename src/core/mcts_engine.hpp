@@ -88,6 +88,7 @@ class MCTSEngine {
 public:
     int worker_batch_size;
     int worker_id;
+    double policy_softmax_temp;
     double virtual_loss;
     double contempt;
     double draw_cutoff;
@@ -97,6 +98,8 @@ public:
     double gumbel_c_visit;
     double gumbel_c_scale;
     double gumbel_noise;
+    double puct_c;   // 0 => deterministic Gumbel deficit selection (self-play).
+                     // >0 => PUCT selection at non-root nodes (inference test).
     std::mt19937 rng;
 
     double time_selection = 0.0;
@@ -136,12 +139,14 @@ public:
         moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue,
         ThreadSafeQueue<std::vector<int>>& result_queue, 
         int worker_id, 
+        double policy_softmax_temp,
         double virtual_loss,
         double contempt,
         double draw_cutoff, 
         double gumbel_c_visit, 
         double gumbel_c_scale, 
         double gumbel_noise,
+        double puct_c,
         const chess::Board& board, 
         const std::vector<chess::Board>& base_history,
         Logger& logger, 

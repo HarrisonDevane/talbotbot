@@ -34,8 +34,8 @@ def export_pth_to_onnx(pth_path, onnx_path, model_cfg, logger):
     model = fuse_bn_for_export(model)
     model = model.cuda().half()
 
-    planes = model_cfg['chess']['input_planes']
-    dims = model_cfg['chess']['board_dim']
+    planes = model_cfg['model']['input_planes']
+    dims = model_cfg['model']['board_dim']
 
     dummy_input = torch.zeros(
         1,

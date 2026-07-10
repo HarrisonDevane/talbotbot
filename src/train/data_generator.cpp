@@ -39,19 +39,21 @@ DataGenerator::DataGenerator(
         core_wait_counts.push_back(std::make_unique<std::atomic<int>>(0));
     }
 
-    model_config.input_planes = model_cfg["chess"]["input_planes"].as<int>();
-    model_config.board_dim = model_cfg["chess"]["board_dim"].as<int>();
-    model_config.policy_moves = model_cfg["chess"]["total_policy_moves"].as<int>();
+    model_config.input_planes = model_cfg["model"]["input_planes"].as<int>();
+    model_config.board_dim = model_cfg["model"]["board_dim"].as<int>();
+    model_config.policy_moves = model_cfg["model"]["total_policy_moves"].as<int>();
 
     selector_config.node_pool_size = mcts_cfg["node_pool_size"].as<int>();
     selector_config.batch_size_per_worker = mcts_cfg["worker_minibatch_size"].as<int>();
     selector_config.virtual_loss = mcts_cfg["virtual_loss"].as<double>();
     selector_config.contempt = mcts_cfg["contempt"].as<double>();
+    selector_config.policy_softmax_temp = mcts_cfg["policy_softmax_temp"].as<double>();
     selector_config.gumbel_c_visit = mcts_cfg["gumbel_c_visit"].as<double>();
     selector_config.gumbel_c_scale = mcts_cfg["gumbel_c_scale"].as<double>();
     selector_config.gumbel_noise = mcts_cfg["gumbel_noise"].as<double>();
     selector_config.gumbel_search_depth = mcts_cfg["gumbel_search_depth"].as<int>();
     selector_config.gumbel_m = mcts_cfg["gumbel_m"].as<int>();
+    selector_config.puct_c = mcts_cfg["puct_c"].as<double>();
     selector_config.temperature_ply_cutoff = sel_cfg["temperature_ply_cutoff"].as<int>();
     selector_config.temperature_q_decay = sel_cfg["temperature_q_decay"].as<double>();
     selector_config.draw_cutoff = sel_cfg["draw_cutoff"].as<double>();
@@ -121,9 +123,9 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
     MCTSEngine mcts(
         selector_config.node_pool_size, selector_config.batch_size_per_worker, 
         inference_queue, result_queues[logical_idx], logical_idx,
-        selector_config.virtual_loss, selector_config.contempt, selector_config.draw_cutoff, 
-        selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
-        selector_config.gumbel_noise, dummy, std::vector<chess::Board>(), logger,
+        selector_config.virtual_loss,  selector_config.policy_softmax_temp, selector_config.contempt,
+        selector_config.draw_cutoff, selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
+        selector_config.gumbel_noise, selector_config.puct_c, dummy, std::vector<chess::Board>(), logger,
         shared_input_buffer, shared_policy_buffer, shared_value_buffer,
         buffer_free_slots, core_wait_count, config.workers_per_core
     );
@@ -208,7 +210,7 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
             transition.board_state.resize(total_input_size, 0);
             transition.policy = targets.policy_vector;
             
-            board_to_tensor_69(board, history, transition.board_state.data());
+            board_to_tensor(board, history, transition.board_state.data());
             
             get_legal_move_mask(board, temp_mask.get()); // FIX: Use pre-allocated mask memory
             transition.legal_mask.clear();
@@ -216,7 +218,7 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
             
             raw_training_data.push_back(transition);
             history.insert(history.begin(), board);
-            if (history.size() > 4) history.pop_back();
+            if (history.size() > 7) history.pop_back();
 
             board.makeMove(move_result.best_move);
             ply_count++;

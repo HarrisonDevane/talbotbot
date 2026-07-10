@@ -105,12 +105,12 @@ int main(int argc, char* argv[]) {
     const size_t batch_size = config["training"]["batch_size"].as<size_t>();
     const size_t flush_threshold = static_cast<size_t>(batch_size / sampling_ratio);
 
-    const int input_planes = model["chess"]["input_planes"].as<int>();
-    const int board_dim = model["chess"]["board_dim"].as<int>(); 
-    const int policy_moves = model["chess"]["total_policy_moves"].as<int>();
+    const int input_planes = model["model"]["input_planes"].as<int>();
+    const int board_dim = model["model"]["board_dim"].as<int>(); 
+    const int policy_moves = model["model"]["total_policy_moves"].as<int>();
             
     mdb_env_create(&lmdb_env);
-    mdb_env_set_mapsize(lmdb_env, (size_t)1024 * 1024 * 1024 * 16); 
+    mdb_env_set_mapsize(lmdb_env, (size_t)1024 * 1024 * 1024 * config["global"]["buffer_size_gb"].as<int>()); 
     mdb_env_open(lmdb_env, db_path.c_str(), MDB_NOSYNC | MDB_NOTLS, 0664);
 
     MDB_dbi shared_dbi;
@@ -206,7 +206,7 @@ int main(int argc, char* argv[]) {
 
     if (needs_initial_build) {
         main_logger.log("INFO", "[BUILD] TensorRT is cooking. Terminal will be silent for ~60s...");
-        auto result = TRTBuilder::build_engine(onnx_path, inference_batch_size, main_logger);
+        auto result = TRTBuilder::build_engine(onnx_path, inference_batch_size, input_planes, main_logger);
         if (result) {
             TRTBuilder::save_engine(*result, engine_path);
             write_lmdb_signal(lmdb_env, shared_dbi, "__TRT_ENGINE_READY", export_signal);
@@ -229,7 +229,7 @@ int main(int argc, char* argv[]) {
 
     main_logger.log("INFO", "[MAIN] Initializing Batcher...");
     InferenceBatcher batcher(
-        model_path, inference_batch_size, batch_timeout, num_workers, 
+        model_path, inference_batch_size, batch_timeout, num_workers, input_planes,
         train_dir, batcher_log_level, batcher_cores, rot_interval, current_step, log_interval_sec
     );
 
@@ -292,7 +292,7 @@ int main(int argc, char* argv[]) {
                 uint64_t current_export_signal = exported_step;
 
                 std::thread([&batcher, &main_logger, onnx_path, engine_path, inference_batch_size, 
-                                lmdb_env, shared_dbi, current_train_step, current_export_signal]() {
+                                lmdb_env, shared_dbi, current_train_step, current_export_signal, input_planes]() {
                     
                     auto start_time = std::chrono::steady_clock::now();
                     
@@ -316,7 +316,8 @@ int main(int argc, char* argv[]) {
 
                         auto result = TRTBuilder::build_engine(
                             onnx_path, 
-                            inference_batch_size, 
+                            inference_batch_size,
+                            input_planes, 
                             main_logger
                         );
                         

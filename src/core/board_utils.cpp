@@ -88,64 +88,87 @@ void _fill_piece_planes(const Board& board, Color orientation_color, c10::Half* 
     }
 }
 
-void board_to_tensor_69(const Board& board, const std::vector<Board>& history_boards, c10::Half* planes_out) {
-    // 0. Clear the buffer (crucial since we no longer use memset for bytes)
-    // We use std::fill for type safety with c10::Half
+void board_to_tensor(const Board& board, const std::vector<Board>& history_boards, c10::Half* planes_out) {
     std::fill(planes_out, planes_out + TOTAL_INPUT_SIZE, c10::Half(0.0f));
 
-    // 1. Current Piece Planes (0-11)
-    _fill_piece_planes(board, board.sideToMove(), planes_out, 0);
+    const c10::Half one = c10::Half(1.0f);
+    const Color orient = board.sideToMove();  // all stacks relative to current mover
 
-    // 2. Side to Move (12)
-    c10::Half turn_val = (board.sideToMove() == Color::WHITE) ? c10::Half(1.0f) : c10::Half(0.0f);
-    for(int i=0; i<64; ++i) planes_out[12 * 64 + i] = turn_val;
+    // --- History stacks: 8 x 13 planes (planes 0..103) ---
+    // Stack 0 = current position; stacks 1..7 = previous 7 positions,
+    // most-recent first (history_boards[0] = most recent previous). Each stack:
+    // 6 mine + 6 theirs + 1 repetition. Piece planes are always oriented to the
+    // CURRENT side to move (relative encoding), for all stacks.
+    //
+    // Repetition (13th plane): computed directly via each board's own
+    // isRepetition(). This is valid because these boards are produced by
+    // make/unmake on the live game board, so each carries its correct internal
+    // position-history buffer.
+    //
+    // Missing history (fewer than 7 previous positions available): the entire
+    // 13-plane stack is left zero -- piece planes AND repetition plane. Missing
+    // stacks are NOT filled with the current/base position.
+    for (int s = 0; s < HISTORY_STACKS; ++s) {
+        const Board* b = nullptr;
+        if (s == 0) {
+            b = &board;
+        } else if (static_cast<size_t>(s - 1) < history_boards.size()) {
+            b = &history_boards[s - 1];
+        }
+        if (b == nullptr) continue;   // missing -> whole 13-plane stack stays zero
 
-    // 3. Castling Rights (13-16)
-    Color us = board.sideToMove();
-    const auto rights = board.castlingRights();
+        int stack_base = s * PLANES_PER_STACK;
 
-    c10::Half us_ks_val   = rights.has(us,  Board::CastlingRights::Side::KING_SIDE) ? c10::Half(1.0f) : c10::Half(0.0f);
-    c10::Half us_qs_val   = rights.has(us,  Board::CastlingRights::Side::QUEEN_SIDE) ? c10::Half(1.0f) : c10::Half(0.0f);
-    c10::Half them_ks_val = rights.has(~us, Board::CastlingRights::Side::KING_SIDE) ? c10::Half(1.0f) : c10::Half(0.0f);
-    c10::Half them_qs_val = rights.has(~us, Board::CastlingRights::Side::QUEEN_SIDE) ? c10::Half(1.0f) : c10::Half(0.0f);
+        // 12 piece planes (mine 0-5, theirs 6-11), oriented to current mover.
+        _fill_piece_planes(*b, orient, planes_out, stack_base);
 
-    for(int i=0; i<64; ++i) {
-        planes_out[13 * 64 + i] = us_ks_val;
-        planes_out[14 * 64 + i] = us_qs_val;
-        planes_out[15 * 64 + i] = them_ks_val;
-        planes_out[16 * 64 + i] = them_qs_val;
-    }
-
-    // 4. En Passant (17)
-    Square ep_sq = board.enpassantSq();
-    if (ep_sq != Square::NO_SQ) {
-        int ep_file = ep_sq.index() % 8;
-        c10::Half one = c10::Half(1.0f);
-        for (int row = 0; row < 8; ++row) {
-            planes_out[(17 * 64) + (row * 8) + ep_file] = one;
+        // 13th plane: repetition of this position (its own game history).
+        if (b->isRepetition(1)) {
+            int rep_plane = stack_base + 12;
+            for (int i = 0; i < 64; ++i) planes_out[rep_plane * 64 + i] = one;
         }
     }
 
-    // 5. History (18-65)
-    for (size_t i = 0; i < 4; ++i) {
-        int start_plane_idx = 18 + (i * 12);
-        if (i < history_boards.size()) {
-            _fill_piece_planes(history_boards[i], board.sideToMove(), planes_out, start_plane_idx);
+    // --- Metadata planes (104..110) ---
+    int m = HISTORY_STACKS * PLANES_PER_STACK;   // = 104, first metadata plane
+
+    // Side to move (104)
+    {
+        c10::Half turn_val = (orient == Color::WHITE) ? one : c10::Half(0.0f);
+        for (int i = 0; i < 64; ++i) planes_out[m * 64 + i] = turn_val;
+    }
+
+    // Castling rights (105..108), relative: us-KS, us-QS, them-KS, them-QS
+    {
+        Color us = orient;
+        const auto rights = board.castlingRights();
+        c10::Half us_ks   = rights.has(us,  Board::CastlingRights::Side::KING_SIDE)  ? one : c10::Half(0.0f);
+        c10::Half us_qs   = rights.has(us,  Board::CastlingRights::Side::QUEEN_SIDE) ? one : c10::Half(0.0f);
+        c10::Half them_ks = rights.has(~us, Board::CastlingRights::Side::KING_SIDE)  ? one : c10::Half(0.0f);
+        c10::Half them_qs = rights.has(~us, Board::CastlingRights::Side::QUEEN_SIDE) ? one : c10::Half(0.0f);
+        for (int i = 0; i < 64; ++i) {
+            planes_out[(m + 1) * 64 + i] = us_ks;
+            planes_out[(m + 2) * 64 + i] = us_qs;
+            planes_out[(m + 3) * 64 + i] = them_ks;
+            planes_out[(m + 4) * 64 + i] = them_qs;
         }
     }
 
-    // 6. Repetition (66-67)
-    c10::Half rep_2 = board.isRepetition(1) ? c10::Half(1.0f) : c10::Half(0.0f);
-    c10::Half rep_3 = board.isRepetition(2) ? c10::Half(1.0f) : c10::Half(0.0f);
-    for(int i=0; i<64; ++i) {
-        planes_out[66 * 64 + i] = rep_2;
-        planes_out[67 * 64 + i] = rep_3;
+    // En passant (109) -- kept as a dedicated plane (your convention, not Leela's)
+    {
+        Square ep_sq = board.enpassantSq();
+        if (ep_sq != Square::NO_SQ) {
+            int ep_file = ep_sq.index() % 8;
+            for (int row = 0; row < 8; ++row) {
+                planes_out[((m + 5) * 64) + (row * 8) + ep_file] = one;
+            }
+        }
     }
 
-    // 7. 50-Move Rule (68) - Normalized FP16
-    c10::Half clock_val = c10::Half(static_cast<float>(board.halfMoveClock()) / 100.0f);
-    for(int i=0; i<64; ++i) {
-        planes_out[68 * 64 + i] = clock_val;
+    // Fifty-move clock (110), normalized
+    {
+        c10::Half clock_val = c10::Half(static_cast<float>(board.halfMoveClock()) / 100.0f);
+        for (int i = 0; i < 64; ++i) planes_out[(m + 6) * 64 + i] = clock_val;
     }
 }
 
@@ -330,14 +353,17 @@ Move policy_components_to_move(int from_row_norm, int from_col_norm, int channel
 }
 
 inline int policy_components_to_flat_index(int from_row, int from_col, int channel) {
-    return from_row * (BOARD_DIM * POLICY_CHANNELS) + from_col * POLICY_CHANNELS + channel;
+    // Channel-major layout: matches a plain PyTorch conv output (N,73,8,8)
+    // flattened as channel*64 + row*8 + col. This lets the model policy head be
+    // a plain conv+flatten with no permute.
+    return channel * (BOARD_DIM * BOARD_DIM) + from_row * BOARD_DIM + from_col;
 }
 
 PolicyComponent policy_flat_index_to_components(int flat_index) {
-    int channel = flat_index % POLICY_CHANNELS;
-    int remaining = flat_index / POLICY_CHANNELS;
-    int from_col = remaining % BOARD_DIM;
-    int from_row = remaining / BOARD_DIM;
+    int spatial = flat_index % (BOARD_DIM * BOARD_DIM);
+    int channel = flat_index / (BOARD_DIM * BOARD_DIM);
+    int from_col = spatial % BOARD_DIM;
+    int from_row = spatial / BOARD_DIM;
     return {from_row, from_col, channel};
 }
 

@@ -13,14 +13,14 @@
 
 MCTSEngine::MCTSEngine(
     int node_pool_capacity, int worker_batch_size, moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue, 
-    ThreadSafeQueue<std::vector<int>>& result_queue, int worker_id, double virtual_loss, double contempt,
-    double draw_cutoff, double gumbel_c_visit, double gumbel_c_scale, double gumbel_noise,
+    ThreadSafeQueue<std::vector<int>>& result_queue, int worker_id, double virtual_loss, double policy_softmax_temp, double contempt,
+    double draw_cutoff, double gumbel_c_visit, double gumbel_c_scale, double gumbel_noise, double puct_c,
     const chess::Board& board, const std::vector<chess::Board>& base_history, Logger& logger, 
     std::vector<torch::Tensor>& shared_input_buffer, std::vector<torch::Tensor>& shared_policy_buffer, std::vector<torch::Tensor>& shared_value_buffer,
     ThreadSafeQueue<int>& buffer_free_slots, std::atomic<int>* core_wait_count, int workers_per_core
-) : worker_batch_size(worker_batch_size), worker_id(worker_id), virtual_loss(virtual_loss), contempt(contempt),
+) : worker_batch_size(worker_batch_size), worker_id(worker_id), virtual_loss(virtual_loss), policy_softmax_temp(policy_softmax_temp), contempt(contempt),
     draw_cutoff(draw_cutoff), gumbel_c_visit(gumbel_c_visit), gumbel_c_scale(gumbel_c_scale), 
-    gumbel_noise(gumbel_noise), root_board(board), base_history(base_history), 
+    gumbel_noise(gumbel_noise), puct_c(puct_c), root_board(board), base_history(base_history), 
     node_pool(node_pool_capacity), logger(logger), inference_queue(inference_queue), result_queue(result_queue), 
     buffer_free_slots(buffer_free_slots), shared_input_buffer(shared_input_buffer), 
     shared_policy_buffer(shared_policy_buffer), shared_value_buffer(shared_value_buffer),
@@ -86,6 +86,63 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
 
     while (true) {
         if (node->num_children == 0 || !node->expanded || node->unavailable_for_selection || node->forced_outcome.has_value()) break;
+
+        // ---- PUCT selection (inference only; puct_c > 0) ----------------------
+        // argmax_a [ Q(a) + puct_c * P(a) * sqrt(sum_b N(b)) / (1 + N(a)) ]
+        // P(a) = softmax over children raw_logit (raw_logit already divided by
+        // policy_softmax_temp at expansion). Q(a) is from THIS node's mover's
+        // perspective: a visited child stores value in the child's mover frame,
+        // so we negate (same convention as the Gumbel path's q_val). An
+        // unvisited child uses v_mix as its Q prior (FPU), matching the
+        // completed-Q behaviour so unvisited moves are neither over- nor
+        // under-favoured relative to the deficit path.
+        if (puct_c > 0.0) {
+            int num_children = node->num_children;
+            double sum_visits_p = 0.0;
+            double max_logit = -1e20;
+            for (int i = 0; i < num_children; ++i) {
+                MCTSNode* child = node->first_child + i;
+                if (child->forced_outcome.has_value() || child->unavailable_for_selection) continue;
+                sum_visits_p += child->visits;
+                if (child->raw_logit > max_logit) max_logit = child->raw_logit;
+            }
+
+            // softmax priors over available children
+            double sum_exp = 0.0;
+            for (int i = 0; i < num_children; ++i) {
+                MCTSNode* child = node->first_child + i;
+                if (child->forced_outcome.has_value() || child->unavailable_for_selection) {
+                    exp_cache[i] = 0.0;
+                    continue;
+                }
+                exp_cache[i] = std::exp(child->raw_logit - max_logit);
+                sum_exp += exp_cache[i];
+            }
+
+            double v_mix_p = node->calculate_v_mix(contempt);
+            double sqrt_sum = std::sqrt(std::max(0.0, sum_visits_p));
+            MCTSNode* best_child_p = nullptr;
+            double best_ucb = -1e20;
+            for (int i = 0; i < num_children; ++i) {
+                MCTSNode* child = node->first_child + i;
+                if (exp_cache[i] == 0.0) continue;
+                double prior = exp_cache[i] / sum_exp;
+                double q = (child->visits > 0) ? -child->expected_value(contempt) : v_mix_p;
+                double u = puct_c * prior * sqrt_sum / (1.0 + child->visits);
+                double ucb = q + u;
+                if (ucb > best_ucb) {
+                    best_ucb = ucb;
+                    best_child_p = child;
+                }
+            }
+
+            if (best_child_p == nullptr) break;
+            root_board.makeMove(best_child_p->move);
+            simulation_path.push_back(best_child_p);
+            node = best_child_p;
+            continue;
+        }
+        // ---- end PUCT branch --------------------------------------------------
 
         MCTSNode* best_child = nullptr;
         double best_deficit = -1e20;
@@ -228,9 +285,10 @@ void MCTSEngine::_retrieve_inference(bool block) {
             if (node != nullptr) {
                 if (!node->expanded) {
                     auto exp_start = NOW();
+                    double node_temp = (node == root) ? 1.0 : policy_softmax_temp;
                     for (int i = 0; i < node->num_children; ++i) {
                         MCTSNode* child = node->first_child + i;
-                        child->raw_logit = policy_ptr[child->policy_flat_index];
+                        child->raw_logit = policy_ptr[child->policy_flat_index] / node_temp;
                     }
                     node->expanded = true;
                     time_expansion += ELAPSED(exp_start, NOW());
@@ -318,13 +376,13 @@ void MCTSEngine::_queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCT
     std::vector<chess::Board> combined_history;
     std::vector<chess::Move> unmade_moves;
 
-    for (int i = (int)simulation_path.size() - 1; i >= 0 && combined_history.size() < 4; --i) {
+    for (int i = (int)simulation_path.size() - 1; i >= 0 && combined_history.size() < 7; --i) {
         root_board.unmakeMove(simulation_path[i]->move);
         unmade_moves.push_back(simulation_path[i]->move);
         combined_history.push_back(root_board);
     }
 
-    for (size_t i = 0; i < base_history.size() && combined_history.size() < 4; ++i) {
+    for (size_t i = 0; i < base_history.size() && combined_history.size() < 7; ++i) {
         combined_history.push_back(base_history[i]);
     }
 
@@ -333,7 +391,7 @@ void MCTSEngine::_queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCT
     }
 
     c10::Half* destination_ptr = shared_input_buffer[buffer_index].data_ptr<c10::Half>();
-    board_to_tensor_69(root_board, combined_history, destination_ptr);
+    board_to_tensor(root_board, combined_history, destination_ptr);
 
     batch_buffer.push_back({worker_id, buffer_index});
     _virtual_loss(leaf, true);
@@ -875,8 +933,9 @@ int MCTSEngine::run_simulations_timed(int max_m,
 
     _rescore(all_nodes);
     _log_tournament_results(all_nodes, "Final scores");
-    _log_node_by_path({"g1g5"}, 40);
-    _log_node_by_path({"g1g5", "f5g5"}, 40);
+    _log_node_by_path({"d1d4"}, 40);
+    _log_node_by_path({"d1d4", "c4c2"}, 40);
+    _log_node_by_path({"d1d4", "c4c2", "d4b4"}, 40);
 
     _flush_inflight();
 

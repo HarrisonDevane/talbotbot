@@ -1,12 +1,10 @@
 model:
-  filters: 256                                                    # Number of convolutional filters in residual blocks
-  bottleneck_channels: 128                                        # Number of channels for bottleneck layers
-  resblocks: 16                                                   # Total number of residual blocks in the network (including broadcasting blocks)
-  broadcast_interval: 8                                           # Interval for global broadcasting block
-  value_channels: 32                                              # Channels in the value-head 1x1 projection
- 
-chess:
-  board_dim: 8                                                    # Spatial dimension of the chess board (8x8)
-  policy_channels: 73                                             # Number of output channels for the policy head
-  total_policy_moves: 4672                                        # Total possible discrete moves in the action space
-  input_planes: 69                                                # Number of input feature planes representing the state
+  filters: 64
+  se_channels: 32
+  resblocks: 6
+  value_channels: 32
+  value_fc_hidden: 128
+  policy_channels: 73
+  total_policy_moves: 4672
+  input_planes: 111
+  board_dim: 8

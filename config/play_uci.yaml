@@ -2,7 +2,7 @@ global:
   model_file: 'D:/Projects/talbot/config/model.yaml'              # Path to the secondary architecture config
   model_path: 'D:/Projects/talbot/train_dir/models/model'         # Path to best model base name
   log_dir: 'D:/Projects/talbot/logs/local_inference'              # Directory for all engine logs
-  main_logging_level: 50                                          # Logging level for the UCI Orchestrator
+  main_logging_level: 20                                          # Logging level for the UCI Orchestrator
 
 evaluation:
   main_cores: [3]                                                 # Dedicated CPU cores for the main C++ orchestrator
@@ -19,13 +19,15 @@ inference:
 mcts:
   node_pool_size: 10000000                                        # Capacity of the persistent MCTS node pool
   worker_minibatch_size: 64                                       # Max positions sent to batcher at once
-  virtual_loss: 1.0                                               # Penalty applied to nodes currently being explored
+  virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored
   contempt: 0.0                                                   # Contempt for playing drawing positions
+  policy_softmax_temp: 1.4                                        # Flatten the non-root policy logits by this value
   gumbel_c_visit: 50.0                                            # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                             # Scale for sigma with visit count
   gumbel_noise: 0.0                                               # 0.0 for deterministic tournament play
-  gumbel_search_depth: 10000                                      # Fallback node budget when UCI gives no time (go infinite / go / nodes)
+  gumbel_search_depth: 1000                                       # Fallback node budget when UCI gives no time (go infinite / go / nodes)
   gumbel_m: 64                                                    # m value for sequential halving
+  puct_c: 1.5                                                     # Use PUCT for non-root action selection. If set to 0.0, use determenistic selection
   
 selection:
   temperature_ply_cutoff: 0                                       # Sample proportional to visit count for first moves

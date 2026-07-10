@@ -169,9 +169,9 @@ static PlayConfig load_config(const std::string& config_file_path) {
     cfg.logging_interval_sec  = infer_n["logging_interval_sec"].as<int>();
 
     YAML::Node model = YAML::LoadFile(cfg.model_file_path);
-    cfg.input_planes = model["chess"]["input_planes"].as<int>();
-    cfg.board_dim    = model["chess"]["board_dim"].as<int>();
-    cfg.policy_moves = model["chess"]["total_policy_moves"].as<int>();
+    cfg.input_planes = model["model"]["input_planes"].as<int>();
+    cfg.board_dim    = model["model"]["board_dim"].as<int>();
+    cfg.policy_moves = model["model"]["total_policy_moves"].as<int>();
 
     if (tour_n) {
         cfg.opening_file      = tour_n["opening_file"].as<std::string>();
@@ -206,29 +206,37 @@ static PlayConfig load_config(const std::string& config_file_path) {
     s.node_pool_size         = mcts_n["node_pool_size"].as<int>();
     s.virtual_loss           = mcts_n["virtual_loss"].as<double>();
     s.contempt               = mcts_n["contempt"].as<double>();
+    s.policy_softmax_temp    = mcts_n["policy_softmax_temp"].as<double>();
     s.draw_cutoff            = sel_n["draw_cutoff"].as<double>();
     s.gumbel_c_visit         = mcts_n["gumbel_c_visit"].as<double>();
     s.gumbel_c_scale         = mcts_n["gumbel_c_scale"].as<double>();
     s.gumbel_noise           = mcts_n["gumbel_noise"].as<double>();
     s.gumbel_search_depth    = mcts_n["gumbel_search_depth"].as<double>();
     s.gumbel_m               = mcts_n["gumbel_m"].as<double>();
+    s.puct_c                 = mcts_n["puct_c"].as<double>();
     s.batch_size_per_worker  = mcts_n["worker_minibatch_size"].as<int>();
     s.temperature_ply_cutoff = sel_n["temperature_ply_cutoff"].as<int>();
     s.temperature_q_decay    = sel_n["temperature_q_decay"].as<double>();
     s.resignation_probability= sel_n["resignation_probability"].as<double>();
     s.resignation_cutoff     = sel_n["resignation_cutoff"].as<double>();
 
+    // time_control is only used by --uci (clock-based search). The tournament
+    // config legitimately omits it (tournaments run on fixed node budgets), so
+    // this whole block is guarded -- an unguarded .as<>() on the missing
+    // section throws "bad conversion" and kills every tournament pairing.
     YAML::Node tc_n = root["time_control"];
-    TimeControlConfig& tc = cfg.time_control;
-    tc.move_horizon       = tc_n["move_horizon"].as<double>();
-    tc.increment_fraction = tc_n["increment_fraction"].as<double>();
-    tc.base_fraction      = tc_n["base_fraction"].as<double>();
-    tc.hard_multiplier    = tc_n["hard_multiplier"].as<double>();
-    tc.max_time_fraction  = tc_n["max_time_fraction"].as<double>();
-    tc.move_overhead_ms   = tc_n["move_overhead_ms"].as<int64_t>();
-    tc.min_think_ms       = tc_n["min_think_ms"].as<int64_t>();
-    tc.nps_ewma_alpha     = tc_n["nps_ewma_alpha"].as<double>();
-    tc.nps_ewma           = tc_n["nps_ewma_default"].as<double>();
+    if (tc_n) {
+        TimeControlConfig& tc = cfg.time_control;
+        tc.move_horizon       = tc_n["move_horizon"].as<double>();
+        tc.increment_fraction = tc_n["increment_fraction"].as<double>();
+        tc.base_fraction      = tc_n["base_fraction"].as<double>();
+        tc.hard_multiplier    = tc_n["hard_multiplier"].as<double>();
+        tc.max_time_fraction  = tc_n["max_time_fraction"].as<double>();
+        tc.move_overhead_ms   = tc_n["move_overhead_ms"].as<int64_t>();
+        tc.min_think_ms       = tc_n["min_think_ms"].as<int64_t>();
+        tc.nps_ewma_alpha     = tc_n["nps_ewma_alpha"].as<double>();
+        tc.nps_ewma           = tc_n["nps_ewma_default"].as<double>();
+    }
 
 
     return cfg;
@@ -311,7 +319,7 @@ static int run_uci(const PlayConfig& cfg) {
     std::atomic<uint64_t> dummy_step{0};
 
     InferenceBatcher batcher(
-        cfg.engine_path, cfg.inference_batch_size, cfg.batch_timeout_ms, 1,
+        cfg.engine_path, cfg.inference_batch_size, cfg.batch_timeout_ms, 1, cfg.input_planes,
         run_log_dir, cfg.batcher_logging_level, cfg.inference_worker_cores,
         0, dummy_step, cfg.logging_interval_sec);
 
@@ -330,9 +338,9 @@ static int run_uci(const PlayConfig& cfg) {
     auto mcts_engine = std::make_unique<MCTSEngine>(
         cfg.selector.node_pool_size, cfg.selector.batch_size_per_worker,
         inference_queue, result_queues[0], 0,
-        cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
+        cfg.selector.virtual_loss, cfg.selector.policy_softmax_temp, cfg.selector.contempt, cfg.selector.draw_cutoff,
         cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-        cfg.selector.gumbel_noise, board, history, main_logger,
+        cfg.selector.gumbel_noise, cfg.selector.puct_c, board, history, main_logger,
         buf.input, buf.policy, buf.value,
         buffer_free_slots, &wait_count, 1);
 
@@ -549,7 +557,7 @@ struct WorkerEngines {
     std::atomic<int>                wait_b{0};
 };
 
-std::string ensure_engine_exists(const std::string& model_path, int max_batch_size, Logger& logger) {
+std::string ensure_engine_exists(const std::string& model_path, int max_batch_size, int input_planes, Logger& logger) {
     fs::path p(model_path);
     std::string engine_path = (p.parent_path() / (p.stem().string() + ".engine")).string();
     if (fs::exists(engine_path)) {
@@ -560,7 +568,7 @@ std::string ensure_engine_exists(const std::string& model_path, int max_batch_si
     logger.log("INFO", "Engine not found. Building: " + engine_path);
 
     TRTBuilder builder;
-    auto engine = builder.build_engine(model_path, max_batch_size, logger);
+    auto engine = builder.build_engine(model_path, max_batch_size, input_planes, logger);
     TRTBuilder::save_engine(*engine, engine_path);
 
     logger.log("INFO", "Engine build successful.");
@@ -591,8 +599,8 @@ static int run_tournament(const PlayConfig& cfg,
                             "  B=" + model_b_path);
     main_logger.log("INFO", "Pairing log dir: " + pairing_dir);
 
-    std::string model_a_engine = ensure_engine_exists(model_a_path, cfg.inference_batch_size, main_logger);
-    std::string model_b_engine = ensure_engine_exists(model_b_path, cfg.inference_batch_size, main_logger);
+    std::string model_a_engine = ensure_engine_exists(model_a_path, cfg.inference_batch_size, cfg.input_planes, main_logger);
+    std::string model_b_engine = ensure_engine_exists(model_b_path, cfg.inference_batch_size, cfg.input_planes, main_logger);
 
     if (!cfg.main_cores.empty()) {
         DWORD_PTR m = mask_from_cores(cfg.main_cores);
@@ -648,11 +656,11 @@ static int run_tournament(const PlayConfig& cfg,
     std::string batcher_b_name = "batcher_" + fs::path(model_b_path).stem().string();
 
     InferenceBatcher batcher_a(
-        model_a_engine, cfg.inference_batch_size, cfg.batch_timeout_ms, K,
+        model_a_engine, cfg.inference_batch_size, cfg.batch_timeout_ms, K, cfg.input_planes,
         run_log_dir, cfg.batcher_logging_level, cfg.batcher_a_cores,
         0, step_a, cfg.logging_interval_sec, batcher_a_name);
     InferenceBatcher batcher_b(
-        model_b_engine, cfg.inference_batch_size, cfg.batch_timeout_ms, K,
+        model_b_engine, cfg.inference_batch_size, cfg.batch_timeout_ms, K, cfg.input_planes,
         run_log_dir, cfg.batcher_logging_level, cfg.batcher_b_cores,
         0, step_b, cfg.logging_interval_sec, batcher_b_name);
 
@@ -687,18 +695,18 @@ static int run_tournament(const PlayConfig& cfg,
         we->engine_a = std::make_unique<MCTSEngine>(
             cfg.selector.node_pool_size, cfg.selector.batch_size_per_worker,
             iq_a, rq_a[w], w,
-            cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
+            cfg.selector.virtual_loss, cfg.selector.policy_softmax_temp, cfg.selector.contempt, cfg.selector.draw_cutoff,
             cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-            cfg.selector.gumbel_noise, dummy, empty_hist, wlog,
+            cfg.selector.gumbel_noise, cfg.selector.puct_c, dummy, empty_hist, wlog,
             buf_a.input, buf_a.policy, buf_a.value,
             free_a, &we->wait_a, 1);
 
         we->engine_b = std::make_unique<MCTSEngine>(
             cfg.selector.node_pool_size, cfg.selector.batch_size_per_worker,
             iq_b, rq_b[w], w,
-            cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
+            cfg.selector.virtual_loss, cfg.selector.policy_softmax_temp, cfg.selector.contempt, cfg.selector.draw_cutoff,
             cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-            cfg.selector.gumbel_noise, dummy, empty_hist, wlog,
+            cfg.selector.gumbel_noise, cfg.selector.puct_c, dummy, empty_hist, wlog,
             buf_b.input, buf_b.policy, buf_b.value,
             free_b, &we->wait_b, 1);
 

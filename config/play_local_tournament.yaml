@@ -22,10 +22,11 @@ mcts:
   worker_minibatch_size: 32                                      # Max positions a single worker sends at once
   virtual_loss: 0.3                                              # Penalty applied to nodes currently being explored
   contempt: 0.0                                                  # Contempt for playing drawing positions
+  policy_softmax_temp: 1.4                                       # Flatten the policy logits by this value
   gumbel_c_visit: 50.0                                           # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                            # Scale for sigma with visit count
   gumbel_noise: 0.0                                              # 0.0 for deterministic tournament play
-  gumbel_search_depth: 400                                       # Node evaluation budget per move
+  gumbel_search_depth: 800                                       # Node evaluation budget per move
   gumbel_m: 32                                                   # m value for sequential halving
 
 selection:
@@ -44,10 +45,12 @@ tournament:
   worker_logging_level: 50                                       # Logging level for MCTS game worker: 20 = per move analysis, 50 = only PGN
 
 tournament_models:
+  - step_020000_model.pth
+  - step_025000_model.pth
   - step_030000_model.pth
   - step_035000_model.pth
   - step_040000_model.pth
   - step_045000_model.pth
   - step_050000_model.pth
   - step_055000_model.pth
-  - step_058000_model.pth
+  - step_060000_model.pth

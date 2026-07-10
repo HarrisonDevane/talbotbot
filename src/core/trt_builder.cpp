@@ -18,7 +18,7 @@ std::vector<char> read_file_bytes(const std::string& path) {
 }
 }  // namespace
 
-std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::string& onnx_path, int max_batch_size, Logger& logger) {
+std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::string& onnx_path, int max_batch_size, int input_planes, Logger& logger) {
     cudaSetDevice(0);
 
     auto builder = std::unique_ptr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(gTRTLogger));
@@ -35,9 +35,9 @@ std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::st
 
     auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     auto profile = builder->createOptimizationProfile();
-    profile->setDimensions("input", nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{1, 69, 8, 8});
-    profile->setDimensions("input", nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{max_batch_size, 69, 8, 8});
-    profile->setDimensions("input", nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{max_batch_size, 69, 8, 8});
+    profile->setDimensions("input", nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{1, input_planes, 8, 8});
+    profile->setDimensions("input", nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{max_batch_size, input_planes, 8, 8});
+    profile->setDimensions("input", nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{max_batch_size, input_planes, 8, 8});
     config->addOptimizationProfile(profile);
 
     if (builder->platformHasFastFp16()) config->setFlag(nvinfer1::BuilderFlag::kFP16);

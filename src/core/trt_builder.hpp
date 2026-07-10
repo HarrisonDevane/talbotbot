@@ -24,7 +24,8 @@ public:
 
     static std::unique_ptr<EngineResult> build_engine(
         const std::string& onnx_path, 
-        int max_batch_size, 
+        int max_batch_size,
+        int input_planes,
         Logger& logger
     );
 

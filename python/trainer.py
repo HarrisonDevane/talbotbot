@@ -21,7 +21,7 @@ import ctypes
 from model import ChessAIModel
 
 class AsyncBatchPrefetcher:
-    def __init__(self, db_path, batch_size, input_planes, board_dim, policy_moves, core_ids, prefetch_workers, train_dir, log_level, rotation_interval):
+    def __init__(self, db_path, batch_size, input_planes, board_dim, policy_moves, core_ids, prefetch_workers, train_dir, lmdb_size, log_level, rotation_interval):
         self.ready_queue = mp.Queue(maxsize=3) 
         self.free_queue = mp.Queue(maxsize=3)
         for i in range(3):
@@ -37,6 +37,7 @@ class AsyncBatchPrefetcher:
         self.train_dir = train_dir
         self.log_level = log_level
         self.rotation_interval = rotation_interval
+        self.buffer_size = lmdb_size
         
         # Allocate exactly 3 static buffers in Shared Memory. This locks the RAM usage permanently.
         self.shm_b = torch.zeros((3, batch_size, input_planes, board_dim, board_dim), dtype=torch.float32).share_memory_()
@@ -84,7 +85,7 @@ class AsyncBatchPrefetcher:
 
             env = lmdb.open(
                 self.db_path, 
-                map_size=1024 * 1024 * 1024 * 16,
+                map_size=1024 * 1024 * 1024 * self.buffer_size,
                 readonly=True, 
                 lock=False, 
                 readahead=False
@@ -205,12 +206,11 @@ class TrainTask:
         self.device = torch.device("cuda")
 
         m_cfg = self.model_config['model']
-        c_cfg = self.model_config['chess']
 
-        self.input_planes = c_cfg['input_planes']
-        self.board_dim = c_cfg['board_dim']
+        self.input_planes = m_cfg['input_planes']
+        self.board_dim = m_cfg['board_dim']
         self.total_input_size = self.input_planes * self.board_dim * self.board_dim
-        self.total_policy_moves = c_cfg['total_policy_moves']
+        self.total_policy_moves = m_cfg['total_policy_moves']
 
         train_dir = os.path.dirname(db_path)
         log_level = self.training_config['logging_level']
@@ -226,6 +226,7 @@ class TrainTask:
             core_ids=self.training_config['io_read_cores'],
             prefetch_workers=self.training_config['prefetch_workers'],
             train_dir=train_dir,
+            lmdb_size=self.global_config['buffer_size_gb'],
             log_level=log_level,
             rotation_interval=rotation_interval
         )

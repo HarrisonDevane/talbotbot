@@ -83,7 +83,7 @@ public:
     virtual const chess::Board& current_position() const = 0;
 
     // History of prior positions, most-recent-first, capped at the 4 plies
-    // board_to_tensor_69 consumes. Returned so GameWorker can hand it straight
+    // board_to_tensor consumes. Returned so GameWorker can hand it straight
     // to MCTSEngine::reset(board, history) without each session re-deriving it.
     virtual const std::vector<chess::Board>& history() const = 0;
 

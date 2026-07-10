@@ -48,7 +48,7 @@ class RLOrchestrator:
 
         self.env = lmdb.open(
             self.buffer_file_path,
-            map_size=1024 * 1024 * 1024 * 16, 
+            map_size=1024 * 1024 * 1024 * self.params_config['global']['buffer_size_gb'], 
             readonly=False,
             lock=True,
             readahead=False,
@@ -370,9 +370,9 @@ class RLOrchestrator:
 
         dummy_input = torch.zeros(
             1, 
-            self.model_config['chess']['input_planes'], 
-            self.model_config['chess']['board_dim'], 
-            self.model_config['chess']['board_dim'], 
+            self.model_config['model']['input_planes'], 
+            self.model_config['model']['board_dim'], 
+            self.model_config['model']['board_dim'], 
             dtype=torch.float16
         ).cuda()
 

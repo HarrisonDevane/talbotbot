@@ -5,7 +5,13 @@
 
 // --- Core Constants ---
 constexpr int BOARD_DIM = 8;
-constexpr int INPUT_CHANNELS = 69;
+// History: 8 board stacks (current + 7 previous), 13 planes each = 104
+//   (6 mine + 6 theirs + 1 repetition-of-that-position), kept relative to the
+//   side to move for all stacks. Metadata: side-to-move(1) + castling(4) +
+//   en passant(1) + fifty-move(1) = 7. Total = 111.
+constexpr int HISTORY_STACKS   = 8;
+constexpr int PLANES_PER_STACK = 13;
+constexpr int INPUT_CHANNELS   = HISTORY_STACKS * PLANES_PER_STACK + 7;  // 111
 constexpr int TOTAL_INPUT_SIZE = INPUT_CHANNELS * BOARD_DIM * BOARD_DIM;
 constexpr int POLICY_CHANNELS = 73;
 constexpr int TOTAL_POLICY_MOVES = POLICY_CHANNELS * BOARD_DIM * BOARD_DIM;
@@ -19,8 +25,9 @@ struct PolicyComponent {
 
 // --- Main External Functions ---
 
-// Fills the 69-channel float array with the current board state and history
-void board_to_tensor_69(const chess::Board& board, const std::vector<chess::Board>& history_boards, c10::Half* planes_out);
+// Fills the input tensor (INPUT_CHANNELS planes) with the current board state
+// and 7-position history (8 stacks total), relative to the side to move.
+void board_to_tensor(const chess::Board& board, const std::vector<chess::Board>& history_boards, c10::Half* planes_out);
 
 // Creates a boolean mask of valid moves aligned with the 4672-length policy vector
 void get_legal_move_mask(const chess::Board& board, bool* mask_out);
