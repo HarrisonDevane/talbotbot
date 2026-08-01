@@ -1,17 +1,17 @@
 global:
-  total_training_steps: 40000                                     # Total gradient updates to perform
+  total_training_steps: 100000                                    # Total gradient updates to perform
   logging_rotation_steps: 1000                                    # How often to make a new log folder
   min_buffer_size: 2000000                                        # Minimum replay buffer size
-  max_buffer_size: 24000000                                       # Max buffer size
-  buffer_ramp_steps: 30000                                        # Steps to reach max buffer size (linear)
-  buffer_size_gb: 16                                              # Size of LMDB on disk
+  max_buffer_size: 40000000                                       # Max buffer size
+  buffer_ramp_steps: 40000                                        # Steps to reach max buffer size (linear)
+  buffer_size_gb: 32                                              # Size of LMDB on disk
   build_steps: 500                                                # Steps for a new engine build
   model_path: 'train_dir/models/model'                            # Path to model base name
 
 inference:
   inference_worker_cores: [13, 14, 15]                            # Dedicated CPU cores for the Batching Process (dispatcher, collector, filler)
   batch_size: 256                                                 # Max batch size during inference
-  batch_size_factor: 8                                            # Multiplier for batch size to determine max slots available in RAM
+  batch_size_factor: 32                                           # Multiplier for batch size to determine max slots available in RAM
   batch_timeout_ms: 10                                            # How long the GPU batcher waits for more data before running partial batch
   logging_interval_sec: 10                                        # Interval for system metrics logging
   logging_level: 20                                               # Logging level for the Batcher Diagnostics
@@ -22,6 +22,7 @@ data_generation:
   game_worker_cores: [22, 23, 24, 25, 26, 27, 28, 29, 30, 31]     # Dedicated CPU cores for games
   workers_per_core: 16                                            # Number of game workers to pin to each core
   max_ply_length: 400                                             # Hard cutoff to force a draw
+  target_shrinkage_k: 2.0                                  
   main_logging_level: 20                                          # Logging level for the UCI Orchestrator
   worker_logging_level: 50                                        # Logging level for MCTS game worker: 20 = per move analysis, 50 = only PGN
   io_logging_level: 20                                            # Logging level for IO operations
@@ -31,20 +32,20 @@ mcts:
   worker_minibatch_size: 16                                       # Max positions a single worker sends at once
   virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored (prevents threads flocking)
   contempt: 0.0                                                   # Contempt for playing drawing positions
-  policy_softmax_temp: 1.4                                        # Flatten the non-root policy logits by this value
+  deficit_eps: 0.0
   gumbel_c_visit: 50.0                                            # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                             # Scale for sigma with visit count
   gumbel_noise: 1.0                                               # Gumbel noise value
   gumbel_search_depth: 128                                        # Search depth budget
   gumbel_m: 16                                                    # m value for sequential halving (top m moves sampled)
-  puct_c: 0.0                                                     # Use PUCT for non-root action selection. If set to 0.0, use determenistic selection
 
 selection:
   temperature_ply_cutoff: 30                                      # Sample proportional to visit count for first moves
-  temperature_q_decay: 0.05                                       # Absolute Q value [-1, 1] Boltzmann temperature decay
+  temperature_q_decay: 0.1                                        # Absolute Q value [-1, 1] Boltzmann temperature decay
   draw_cutoff: 0.0                                                # Value threshold to consider a game a draw
   resignation_probability: 0.9                                    # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.80                                       # Value head cutoff for resignation
+  mlh_tiebreak_cutoff: 0.90                                       # abs Q; moves at/above this are eligible for the fastest-finish (min MLH) tiebreak
 
 training:
   training_cores: [10]                                            # Dedicated CPU cores for python tasks (main_train.py and trainer.py)
@@ -55,9 +56,15 @@ training:
   sampling_ratio: 1.0                                             # Train on x the amount of data generated
   policy_loss_weight: 1.0                                         # Weight for Move Prediction loss
   value_loss_weight: 1.0                                          # Weight for Win/Loss Prediction loss
+  mlh_loss_weight: 1.0
+  mlh_delta_ply: 10
   weight_decay: 1e-4                                              # L2 Regularization
-  learning_rate: 2e-1                                             # SGD Learning Rate
-  warmup_start_lr: 2e-3                                           # LR at step 0 (ramps to learning_rate over warmup_steps)
-  warmup_steps: 1000
+  lr_warmup: 2e-3                                                 # LR at step 0 (ramps to learning_rate over warmup_steps)
+  lr_warmup_steps: 1000
+  lr_high: 2e-1
+  lr_high_steps: 30000
+  lr_mid: 2e-2
+  lr_mid_steps: 60000
+  lr_low: 2e-3
   momentum_rate: 0.9                                              # SGD Momentum
   logging_level: 20                                               # Logging level for training operations

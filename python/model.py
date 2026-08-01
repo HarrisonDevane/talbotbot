@@ -77,7 +77,19 @@ class ChessAIModel(nn.Module):
         self.value_fc1 = nn.Linear(value_channels * self.board_dim * self.board_dim, value_fc_hidden)
         self.value_fc2 = nn.Linear(value_fc_hidden, 3)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Moves-left head (MLH). Predicts normalized plies remaining until game
+        # end (plies_left / MLH_SCALE, MLH_SCALE=100 by convention -- must match
+        # the C++ target writer and the C++ consumer). Softplus keeps the output
+        # non-negative. Auxiliary head: trained at low weight, consumed only by
+        # action selection (never by search) as a tiebreak in decided positions.
+        mlh_channels = m_cfg['mlh_channels']
+        mlh_fc_hidden = m_cfg['mlh_fc_hidden']
+        self.mlh_conv = nn.Conv2d(self.num_filters, mlh_channels, kernel_size=1, bias=False)
+        self.mlh_bn = nn.BatchNorm2d(mlh_channels)
+        self.mlh_fc1 = nn.Linear(mlh_channels * self.board_dim * self.board_dim, mlh_fc_hidden)
+        self.mlh_fc2 = nn.Linear(mlh_fc_hidden, 1)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = F.relu(self.initial_bn(self.initial_conv(x)))
         for block in self.residual_blocks:
             x = block(x)
@@ -95,7 +107,12 @@ class ChessAIModel(nn.Module):
         v = F.relu(self.value_fc1(v))
         value_out = F.softmax(self.value_fc2(v), dim=1)
 
-        return policy_logits, value_out
+        m = F.relu(self.mlh_bn(self.mlh_conv(x)))
+        m = m.flatten(1)
+        m = F.relu(self.mlh_fc1(m))
+        mlh_out = F.softplus(self.mlh_fc2(m)).squeeze(-1)   # (N,), >= 0, units of MLH_SCALE plies
+
+        return policy_logits, value_out, mlh_out
 
 
 def fuse_bn_for_export(model: ChessAIModel) -> ChessAIModel:
@@ -129,5 +146,7 @@ def fuse_bn_for_export(model: ChessAIModel) -> ChessAIModel:
     # policy_conv2 has its own bias and no BN -> nothing to fuse.
     model.value_conv = fuse_conv_bn(model.value_conv, model.value_bn)
     model.value_bn = nn.Identity()
+    model.mlh_conv = fuse_conv_bn(model.mlh_conv, model.mlh_bn)
+    model.mlh_bn = nn.Identity()
 
     return model

@@ -23,6 +23,7 @@ struct DataGenConfig {
     int max_ply_length;
     int worker_logging_level;
     int rotation_interval;
+    double target_shrinkage_k;
     std::string rl_dir;
 };
 
@@ -63,6 +64,7 @@ public:
         std::vector<torch::Tensor>& in_buffer,
         std::vector<torch::Tensor>& p_buffer,
         std::vector<torch::Tensor>& v_buffer,
+        std::vector<torch::Tensor>& m_buffer,
         ThreadSafeQueue<int>& free_slots,
         ThreadSafeQueue<CompletedGame>& completed_games_queue,
         int start_game_id,
@@ -88,6 +90,7 @@ private:
     std::vector<torch::Tensor>& shared_input_buffer;
     std::vector<torch::Tensor>& shared_policy_buffer;
     std::vector<torch::Tensor>& shared_value_buffer;
+    std::vector<torch::Tensor>& shared_mlh_buffer;
     std::vector<std::unique_ptr<std::atomic<int>>> core_wait_counts;
     ThreadSafeQueue<int>& buffer_free_slots;
 

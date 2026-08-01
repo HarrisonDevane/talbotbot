@@ -13,6 +13,7 @@ set(CUDA_PATH "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0")
 set(CUDNN_PATH "C:/Program Files/NVIDIA/CUDNN/v9.20/bin/13.2/x64")
 set(TRT_DIR "${DEP_ROOT}/TensorRT-10.10.0.31")
 set(ZSTD_DIR "${DEP_ROOT}/zstd")
+set(FATHOM_DIR "${DEP_ROOT}/Fathom")
 
 # 2. DEFINE SHARED SOURCES
 # Core engine: used by both the training and play executables.
@@ -24,6 +25,7 @@ set(SHARED_SOURCES
     src/core/mcts_node.cpp
     src/core/inference_batcher.cpp
     src/core/board_utils.cpp
+    "${FATHOM_DIR}/src/tbprobe.c"
 )
 
 # 3. DEFINE EXECUTABLES
@@ -67,6 +69,7 @@ set(INCLUDE_DIRS
     "${DEP_ROOT}/yaml-cpp/include"
     "${TRT_DIR}/include"
     "${ZSTD_DIR}/lib"
+    "${FATHOM_DIR}/src"
 )
 
 target_include_directories(talbot_engine PRIVATE ${INCLUDE_DIRS})
@@ -81,6 +84,14 @@ if(MSVC)
 
     target_compile_definitions(talbot_play PRIVATE NOMINMAX)
     target_compile_options(talbot_play PRIVATE ${MSVC_FLAGS})
+
+    # Fathom's tbprobe.c uses C11 <stdatomic.h>; MSVC only enables C atomics
+    # under /std:c11 (or c17). Scoped to this one source so the LMDB C files
+    # (mdb.c / midl.c) keep compiling under the MSVC default, untouched.
+    set_source_files_properties(
+        "${FATHOM_DIR}/src/tbprobe.c"
+        PROPERTIES COMPILE_OPTIONS "/std:c11;/experimental:c11atomics"
+    )
 endif()
 
 # 6. LINKER LIBRARIES

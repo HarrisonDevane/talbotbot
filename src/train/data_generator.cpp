@@ -16,11 +16,11 @@ DataGenerator::DataGenerator(
     Logger& logger,
     moodycamel::ConcurrentQueue<std::pair<int, int>>& i_queue,
     std::vector<ThreadSafeQueue<std::vector<int>>>& r_queues,
-    std::vector<torch::Tensor>& in_buffer, std::vector<torch::Tensor>& p_buffer, std::vector<torch::Tensor>& v_buffer,
+    std::vector<torch::Tensor>& in_buffer, std::vector<torch::Tensor>& p_buffer, std::vector<torch::Tensor>& v_buffer, std::vector<torch::Tensor>& m_buffer,
     ThreadSafeQueue<int>& free_slots, ThreadSafeQueue<CompletedGame>& completed_games_queue,
     int start_game_id, std::atomic<uint64_t>& step_ref
 ) : main_logger(logger), inference_queue(i_queue), result_queues(r_queues),
-    shared_input_buffer(in_buffer), shared_policy_buffer(p_buffer), shared_value_buffer(v_buffer),
+    shared_input_buffer(in_buffer), shared_policy_buffer(p_buffer), shared_value_buffer(v_buffer), shared_mlh_buffer(m_buffer),
     buffer_free_slots(free_slots), completed_games_queue(completed_games_queue),
     stop_event(false), game_counter(start_game_id), interval_games(0), interval_samples(0), current_step(step_ref)
 {
@@ -32,6 +32,7 @@ DataGenerator::DataGenerator(
     }
     config.max_ply_length = data_gen_cfg["max_ply_length"].as<int>();
     config.worker_logging_level = data_gen_cfg["worker_logging_level"].as<int>();
+    config.target_shrinkage_k = data_gen_cfg["target_shrinkage_k"].as<double>();
     config.rl_dir = rl_dir_in;
     config.rotation_interval = rot_interval;
 
@@ -42,23 +43,24 @@ DataGenerator::DataGenerator(
     model_config.input_planes = model_cfg["model"]["input_planes"].as<int>();
     model_config.board_dim = model_cfg["model"]["board_dim"].as<int>();
     model_config.policy_moves = model_cfg["model"]["total_policy_moves"].as<int>();
+    model_config.mlh_scale = model_cfg["model"]["mlh_scale"].as<double>();
 
     selector_config.node_pool_size = mcts_cfg["node_pool_size"].as<int>();
     selector_config.batch_size_per_worker = mcts_cfg["worker_minibatch_size"].as<int>();
     selector_config.virtual_loss = mcts_cfg["virtual_loss"].as<double>();
     selector_config.contempt = mcts_cfg["contempt"].as<double>();
-    selector_config.policy_softmax_temp = mcts_cfg["policy_softmax_temp"].as<double>();
+    selector_config.deficit_eps = mcts_cfg["deficit_eps"].as<double>();
     selector_config.gumbel_c_visit = mcts_cfg["gumbel_c_visit"].as<double>();
     selector_config.gumbel_c_scale = mcts_cfg["gumbel_c_scale"].as<double>();
     selector_config.gumbel_noise = mcts_cfg["gumbel_noise"].as<double>();
     selector_config.gumbel_search_depth = mcts_cfg["gumbel_search_depth"].as<int>();
     selector_config.gumbel_m = mcts_cfg["gumbel_m"].as<int>();
-    selector_config.puct_c = mcts_cfg["puct_c"].as<double>();
     selector_config.temperature_ply_cutoff = sel_cfg["temperature_ply_cutoff"].as<int>();
     selector_config.temperature_q_decay = sel_cfg["temperature_q_decay"].as<double>();
     selector_config.draw_cutoff = sel_cfg["draw_cutoff"].as<double>();
     selector_config.resignation_probability = sel_cfg["resignation_probability"].as<double>();
     selector_config.resignation_cutoff = sel_cfg["resignation_cutoff"].as<double>();
+    selector_config.mlh_tiebreak_cutoff = sel_cfg["mlh_tiebreak_cutoff: 0.95"].as<double>();
 
     main_logger.log("INFO", "DataGenerator logic loop initialized.");
 }
@@ -123,10 +125,10 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
     MCTSEngine mcts(
         selector_config.node_pool_size, selector_config.batch_size_per_worker, 
         inference_queue, result_queues[logical_idx], logical_idx,
-        selector_config.virtual_loss,  selector_config.policy_softmax_temp, selector_config.contempt,
+        selector_config.deficit_eps, selector_config.virtual_loss, selector_config.contempt,
         selector_config.draw_cutoff, selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
-        selector_config.gumbel_noise, selector_config.puct_c, dummy, std::vector<chess::Board>(), logger,
-        shared_input_buffer, shared_policy_buffer, shared_value_buffer,
+        selector_config.gumbel_noise, model_config.mlh_scale, dummy, std::vector<chess::Board>(), logger,
+        shared_input_buffer, shared_policy_buffer, shared_value_buffer, shared_mlh_buffer,
         buffer_free_slots, core_wait_count, config.workers_per_core
     );
 
@@ -177,7 +179,7 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
 
             // 2. Generate Targets
             TargetResult targets = TargetGenerator::generate_targets(
-                mcts.root, board, selector_config, model_config, logger
+                mcts.root, board, selector_config, model_config, config.target_shrinkage_k, logger
             );
 
             // 3. Select Action

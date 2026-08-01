@@ -25,6 +25,9 @@ struct MCTSNode {
     double raw_d = 0.0;
     double raw_l = 0.0;
 
+    double raw_mlh = 0.0;
+    double mlh_sum = 0.0;
+
     double gumbel_noise = 0.0;
     double gumbel_score = 0.0;
     

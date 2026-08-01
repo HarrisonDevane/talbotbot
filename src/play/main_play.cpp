@@ -60,6 +60,8 @@
 #include "trt_builder.hpp"
 #include "time_control.hpp"
 
+#include "tbprobe.h"
+
 namespace fs = std::filesystem;
 
 static std::atomic<bool> global_stop_event{false};
@@ -110,6 +112,7 @@ struct PlayConfig {
     int input_planes;
     int board_dim;
     int policy_moves;
+    double mlh_scale;
 
     // tournament
     std::string opening_file;
@@ -126,6 +129,10 @@ struct PlayConfig {
 
     // time control (used by --uci)
     TimeControlConfig time_control;
+
+    // tablebase (used by --uci only)
+    bool        tablebase_enabled = false;
+    std::string tablebase_path;
 };
 
 static PlayConfig load_config(const std::string& config_file_path) {
@@ -172,6 +179,20 @@ static PlayConfig load_config(const std::string& config_file_path) {
     cfg.input_planes = model["model"]["input_planes"].as<int>();
     cfg.board_dim    = model["model"]["board_dim"].as<int>();
     cfg.policy_moves = model["model"]["total_policy_moves"].as<int>();
+    cfg.mlh_scale    = model["model"]["mlh_scale"].as<double>();
+
+    // Tablebase config lives only in play_uci.yaml. Tournament/train configs
+    // omit the block -> stays disabled. Path is required iff enabled.
+    if (YAML::Node tb_n = root["tablebase"]) {
+        if (tb_n["enabled"] && tb_n["enabled"].as<bool>()) {
+            if (!tb_n["path"]) {
+                throw std::runtime_error(
+                    "tablebase.enabled is true but tablebase.path is missing");
+            }
+            cfg.tablebase_enabled = true;
+            cfg.tablebase_path    = tb_n["path"].as<std::string>();
+        }
+    }
 
     if (tour_n) {
         cfg.opening_file      = tour_n["opening_file"].as<std::string>();
@@ -206,19 +227,19 @@ static PlayConfig load_config(const std::string& config_file_path) {
     s.node_pool_size         = mcts_n["node_pool_size"].as<int>();
     s.virtual_loss           = mcts_n["virtual_loss"].as<double>();
     s.contempt               = mcts_n["contempt"].as<double>();
-    s.policy_softmax_temp    = mcts_n["policy_softmax_temp"].as<double>();
+    s.deficit_eps            = mcts_n["deficit_eps"].as<double>();
     s.draw_cutoff            = sel_n["draw_cutoff"].as<double>();
     s.gumbel_c_visit         = mcts_n["gumbel_c_visit"].as<double>();
     s.gumbel_c_scale         = mcts_n["gumbel_c_scale"].as<double>();
     s.gumbel_noise           = mcts_n["gumbel_noise"].as<double>();
     s.gumbel_search_depth    = mcts_n["gumbel_search_depth"].as<double>();
     s.gumbel_m               = mcts_n["gumbel_m"].as<double>();
-    s.puct_c                 = mcts_n["puct_c"].as<double>();
     s.batch_size_per_worker  = mcts_n["worker_minibatch_size"].as<int>();
     s.temperature_ply_cutoff = sel_n["temperature_ply_cutoff"].as<int>();
     s.temperature_q_decay    = sel_n["temperature_q_decay"].as<double>();
     s.resignation_probability= sel_n["resignation_probability"].as<double>();
     s.resignation_cutoff     = sel_n["resignation_cutoff"].as<double>();
+    s.mlh_tiebreak_cutoff    = sel_n["mlh_tiebreak_cutoff"].as<double>();
 
     // time_control is only used by --uci (clock-based search). The tournament
     // config legitimately omits it (tournaments run on fixed node budgets), so
@@ -269,6 +290,7 @@ struct SharedBuffers {
     std::vector<torch::Tensor> input;
     std::vector<torch::Tensor> policy;
     std::vector<torch::Tensor> value;
+    std::vector<torch::Tensor> mlh;
 };
 
 static SharedBuffers make_shared_buffers(const PlayConfig& cfg) {
@@ -278,8 +300,104 @@ static SharedBuffers make_shared_buffers(const PlayConfig& cfg) {
         b.input.push_back(torch::zeros({cfg.input_planes, cfg.board_dim, cfg.board_dim}, opts));
         b.policy.push_back(torch::zeros({cfg.policy_moves}, opts));
         b.value.push_back(torch::zeros({3}, opts));
+        b.mlh.push_back(torch::zeros({1}, opts));
     }
     return b;
+}
+
+// =============================================================================
+// ROOT SYZYGY PROBE (UCI only)
+// =============================================================================
+// If the position on `board` is within the loaded tables and has no castling
+// rights, probe DTZ at the root and return the TB-optimal move -- the one that
+// preserves the result AND makes progress toward mate under the 50-move rule.
+// This is what actually *converts* won endings (KBN-v-K etc.); the in-tree WDL
+// probe only scores positions exactly, it cannot order winning moves by
+// progress, so on its own it shuffles. Returns true and fills `out`/`wdl_out`/
+// `dtz_out` on a hit; false means "not a TB position / probe failed -> run the
+// normal search". Bridge accessors match _try_tablebase (known to compile).
+static bool probe_root_tablebase(const chess::Board& board,
+                                 chess::Move& out,
+                                 unsigned& wdl_out,
+                                 unsigned& dtz_out) {
+    using chess::PieceType;
+    using chess::Color;
+
+    const chess::Bitboard wp = board.pieces(PieceType::PAWN,   Color::WHITE);
+    const chess::Bitboard wn = board.pieces(PieceType::KNIGHT, Color::WHITE);
+    const chess::Bitboard wb = board.pieces(PieceType::BISHOP, Color::WHITE);
+    const chess::Bitboard wr = board.pieces(PieceType::ROOK,   Color::WHITE);
+    const chess::Bitboard wq = board.pieces(PieceType::QUEEN,  Color::WHITE);
+    const chess::Bitboard wk = board.pieces(PieceType::KING,   Color::WHITE);
+
+    const chess::Bitboard bp = board.pieces(PieceType::PAWN,   Color::BLACK);
+    const chess::Bitboard bn = board.pieces(PieceType::KNIGHT, Color::BLACK);
+    const chess::Bitboard bb = board.pieces(PieceType::BISHOP, Color::BLACK);
+    const chess::Bitboard br = board.pieces(PieceType::ROOK,   Color::BLACK);
+    const chess::Bitboard bq = board.pieces(PieceType::QUEEN,  Color::BLACK);
+    const chess::Bitboard bk = board.pieces(PieceType::KING,   Color::BLACK);
+
+    const chess::Bitboard white_bb = wp | wn | wb | wr | wq | wk;
+    const chess::Bitboard black_bb = bp | bn | bb | br | bq | bk;
+
+    if ((white_bb | black_bb).count() > (int)TB_LARGEST) return false;
+
+    // DTZ root probe requires no castling rights.
+    const auto& cr = board.castlingRights();
+    const bool any_castle =
+        cr.has(Color::WHITE, chess::Board::CastlingRights::Side::KING_SIDE)  ||
+        cr.has(Color::WHITE, chess::Board::CastlingRights::Side::QUEEN_SIDE) ||
+        cr.has(Color::BLACK, chess::Board::CastlingRights::Side::KING_SIDE)  ||
+        cr.has(Color::BLACK, chess::Board::CastlingRights::Side::QUEEN_SIDE);
+    if (any_castle) return false;
+
+    const chess::Square ep_sq = board.enpassantSq();
+    const unsigned ep = (ep_sq == chess::Square::NO_SQ) ? 0u : (unsigned)ep_sq.index();
+    const unsigned rule50        = (unsigned)board.halfMoveClock();
+    const bool     white_to_move = (board.sideToMove() == Color::WHITE);
+
+    // tb_probe_root accounts for rule50 via DTZ -- this is the conversion path.
+    const unsigned res = tb_probe_root(
+        white_bb.getBits(), black_bb.getBits(),
+        (wk | bk).getBits(), (wq | bq).getBits(), (wr | br).getBits(),
+        (wb | bb).getBits(), (wn | bn).getBits(), (wp | bp).getBits(),
+        rule50, /*castling=*/0u, ep, white_to_move,
+        nullptr /*results array not needed*/);
+
+    if (res == TB_RESULT_FAILED || res == TB_RESULT_CHECKMATE || res == TB_RESULT_STALEMATE)
+        return false;
+
+    wdl_out = TB_GET_WDL(res);
+    dtz_out = TB_GET_DTZ(res);
+
+    const unsigned from  = TB_GET_FROM(res);
+    const unsigned to    = TB_GET_TO(res);
+    const unsigned promo = TB_GET_PROMOTES(res);
+
+    // Match Fathom's from/to/promo against a generated legal move: this inherits
+    // the correct move flags (en passant etc.) and validates legality for free.
+    chess::Movelist moves;
+    chess::movegen::legalmoves(moves, board);
+    for (const auto& m : moves) {
+        if ((unsigned)m.from().index() != from) continue;
+        if ((unsigned)m.to().index()   != to)   continue;
+
+        const bool is_promo = (m.typeOf() == chess::Move::PROMOTION);
+        if (promo == TB_PROMOTES_NONE) {
+            if (is_promo) continue;
+        } else {
+            if (!is_promo) continue;
+            const chess::PieceType want =
+                (promo == TB_PROMOTES_QUEEN)  ? PieceType::QUEEN  :
+                (promo == TB_PROMOTES_ROOK)   ? PieceType::ROOK   :
+                (promo == TB_PROMOTES_BISHOP) ? PieceType::BISHOP :
+                                                PieceType::KNIGHT;
+            if (m.promotionType() != want) continue;
+        }
+        out = m;
+        return true;
+    }
+    return false;   // decoded move not found among legal moves -> run search
 }
 
 // =============================================================================
@@ -309,6 +427,26 @@ static int run_uci(const PlayConfig& cfg) {
         return 1;
     }
 
+    // ---- Syzygy tablebases (UCI only) --------------------------------------
+    // tb_init is the one non-thread-safe Fathom call; do it here at startup,
+    // before the search worker thread can probe. tb_ready is what we hand to
+    // the engine -- false if disabled OR if init found no tables.
+    bool tb_ready = false;
+    if (cfg.tablebase_enabled) {
+        if (tb_init(cfg.tablebase_path.c_str())) {
+            tb_ready = (TB_LARGEST > 0);
+            main_logger.log("INFO", "Syzygy initialised from " + cfg.tablebase_path +
+                            " (TB_LARGEST=" + std::to_string(TB_LARGEST) + ")");
+            if (!tb_ready) {
+                main_logger.log("WARNING",
+                    "tb_init ok but TB_LARGEST=0 -- no tables at path. Probing disabled.");
+            }
+        } else {
+            main_logger.log("ERROR",
+                "tb_init failed for " + cfg.tablebase_path + " -- probing disabled.");
+        }
+    }
+
     SharedBuffers buf = make_shared_buffers(cfg);
 
     moodycamel::ConcurrentQueue<std::pair<int, int>> inference_queue;
@@ -325,7 +463,7 @@ static int run_uci(const PlayConfig& cfg) {
 
     std::thread batcher_thread([&]() {
         batcher.run(inference_queue, result_queues,
-                    buf.input, buf.policy, buf.value,
+                    buf.input, buf.policy, buf.value, buf.mlh,
                     global_stop_event, &buffer_free_slots);
     });
 
@@ -338,11 +476,11 @@ static int run_uci(const PlayConfig& cfg) {
     auto mcts_engine = std::make_unique<MCTSEngine>(
         cfg.selector.node_pool_size, cfg.selector.batch_size_per_worker,
         inference_queue, result_queues[0], 0,
-        cfg.selector.virtual_loss, cfg.selector.policy_softmax_temp, cfg.selector.contempt, cfg.selector.draw_cutoff,
+        cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
         cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-        cfg.selector.gumbel_noise, cfg.selector.puct_c, board, history, main_logger,
-        buf.input, buf.policy, buf.value,
-        buffer_free_slots, &wait_count, 1);
+        cfg.selector.gumbel_noise, cfg.mlh_scale, board, history, main_logger,
+        buf.input, buf.policy, buf.value, buf.mlh,
+        buffer_free_slots, &wait_count, 1, tb_ready);
 
     mcts_engine->set_nps_alpha(cfg.time_control.nps_ewma_alpha);
     TimeControl time_control(cfg.time_control);
@@ -427,6 +565,27 @@ static int run_uci(const PlayConfig& cfg) {
             }
         }
         else if (command == "go") {
+            // Root tablebase probe (UCI only). If the position is inside the
+            // loaded tables, play the DTZ-optimal move immediately and skip the
+            // search entirely -- this is the path that converts won endings.
+            // ply_count is owned by the `position` handler, so we DON'T touch it.
+            if (tb_ready) {
+                chess::Move tb_move;
+                unsigned tb_wdl = 0, tb_dtz = 0;
+                if (probe_root_tablebase(board, tb_move, tb_wdl, tb_dtz)) {
+                    static const char* WDL_NAME[5] =
+                        {"loss", "blessed-loss", "draw", "cursed-win", "win"};
+                    const char* wdl_str = WDL_NAME[tb_wdl <= 4 ? tb_wdl : 2];
+                    const std::string mv = chess::uci::moveToUci(tb_move);
+                    main_logger.log("INFO", "Root TB hit: " + mv + " wdl=" + wdl_str +
+                                    " dtz=" + std::to_string(tb_dtz) + " -- skipping search.");
+                    std::cout << "info string syzygy " << wdl_str
+                              << " dtz " << tb_dtz << std::endl;
+                    std::cout << "bestmove " << mv << std::endl;
+                    continue;
+                }
+            }
+
             // Parse the subset of UCI `go` params we support.
             int64_t wtime = -1, btime = -1, winc = 0, binc = 0, movetime = -1;
             int movestogo = 0;
@@ -517,6 +676,8 @@ static int run_uci(const PlayConfig& cfg) {
 
     global_stop_event.store(true);
     if (batcher_thread.joinable()) batcher_thread.join();
+
+    if (tb_ready) tb_free();
     return 0;
 }
 
@@ -665,11 +826,11 @@ static int run_tournament(const PlayConfig& cfg,
         0, step_b, cfg.logging_interval_sec, batcher_b_name);
 
     std::thread bt_a([&]() {
-        batcher_a.run(iq_a, rq_a, buf_a.input, buf_a.policy, buf_a.value,
+        batcher_a.run(iq_a, rq_a, buf_a.input, buf_a.policy, buf_a.value, buf_a.mlh,
                       global_stop_event, &free_a);
     });
     std::thread bt_b([&]() {
-        batcher_b.run(iq_b, rq_b, buf_b.input, buf_b.policy, buf_b.value,
+        batcher_b.run(iq_b, rq_b, buf_b.input, buf_b.policy, buf_b.value, buf_b.mlh,
                       global_stop_event, &free_b);
     });
 
@@ -695,19 +856,19 @@ static int run_tournament(const PlayConfig& cfg,
         we->engine_a = std::make_unique<MCTSEngine>(
             cfg.selector.node_pool_size, cfg.selector.batch_size_per_worker,
             iq_a, rq_a[w], w,
-            cfg.selector.virtual_loss, cfg.selector.policy_softmax_temp, cfg.selector.contempt, cfg.selector.draw_cutoff,
+            cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
             cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-            cfg.selector.gumbel_noise, cfg.selector.puct_c, dummy, empty_hist, wlog,
-            buf_a.input, buf_a.policy, buf_a.value,
+            cfg.selector.gumbel_noise, cfg.mlh_scale, dummy, empty_hist, wlog,
+            buf_a.input, buf_a.policy, buf_a.value, buf_a.mlh,
             free_a, &we->wait_a, 1);
 
         we->engine_b = std::make_unique<MCTSEngine>(
             cfg.selector.node_pool_size, cfg.selector.batch_size_per_worker,
             iq_b, rq_b[w], w,
-            cfg.selector.virtual_loss, cfg.selector.policy_softmax_temp, cfg.selector.contempt, cfg.selector.draw_cutoff,
+            cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
             cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-            cfg.selector.gumbel_noise, cfg.selector.puct_c, dummy, empty_hist, wlog,
-            buf_b.input, buf_b.policy, buf_b.value,
+            cfg.selector.gumbel_noise, cfg.mlh_scale, dummy, empty_hist, wlog,
+            buf_b.input, buf_b.policy, buf_b.value, buf_b.mlh,
             free_b, &we->wait_b, 1);
 
         we->selector_a = std::make_unique<ActionSelector>(

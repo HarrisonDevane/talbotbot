@@ -109,6 +109,7 @@ public:
         std::vector<torch::Tensor>& shared_input_buffer,
         std::vector<torch::Tensor>& shared_policy_buffer,
         std::vector<torch::Tensor>& shared_value_buffer,
+        std::vector<torch::Tensor>& shared_mlh_buffer,
         std::atomic<bool>& stop_event,
         ThreadSafeQueue<int>* buffer_free_slots = nullptr
     );

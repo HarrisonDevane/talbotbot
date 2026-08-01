@@ -118,6 +118,7 @@ void InferenceBatcher::run(
     std::vector<torch::Tensor>& shared_input_buffer,
     std::vector<torch::Tensor>& shared_policy_buffer,
     std::vector<torch::Tensor>& shared_value_buffer,
+    std::vector<torch::Tensor>& shared_mlh_buffer,
     std::atomic<bool>& stop_event,
     ThreadSafeQueue<int>* buffer_free_slots
 ) {
@@ -165,6 +166,8 @@ void InferenceBatcher::run(
     std::vector<int64_t> policy_batch_shape = {batch_size, policy_shape[0]};
     auto value_shape = shared_value_buffer[0].sizes();
     std::vector<int64_t> value_batch_shape = {batch_size, value_shape[0]};
+    auto mlh_shape = shared_mlh_buffer[0].sizes();
+    std::vector<int64_t> mlh_batch_shape = {batch_size, mlh_shape[0]};
 
     auto pinned_opts = torch::TensorOptions().dtype(torch::kHalf).pinned_memory(true);
     auto gpu_opts_fp16 = torch::TensorOptions().dtype(torch::kHalf).device(device);
@@ -174,18 +177,22 @@ void InferenceBatcher::run(
     torch::Tensor pinned_staging[NUM_SLOTS] = { torch::zeros(batch_shape, pinned_opts), torch::zeros(batch_shape, pinned_opts), torch::zeros(batch_shape, pinned_opts) };
     torch::Tensor policy_cpu[NUM_SLOTS]     = { torch::zeros(policy_batch_shape, pinned_opts), torch::zeros(policy_batch_shape, pinned_opts), torch::zeros(policy_batch_shape, pinned_opts) };
     torch::Tensor value_cpu[NUM_SLOTS]      = { torch::zeros(value_batch_shape, pinned_opts), torch::zeros(value_batch_shape, pinned_opts), torch::zeros(value_batch_shape, pinned_opts) };
+    torch::Tensor mlh_cpu[NUM_SLOTS]        = { torch::zeros(mlh_batch_shape, pinned_opts), torch::zeros(mlh_batch_shape, pinned_opts), torch::zeros(mlh_batch_shape, pinned_opts) };
 
     torch::Tensor gpu_policy_fp16[NUM_SLOTS] = { torch::zeros(policy_batch_shape, gpu_opts_fp16), torch::zeros(policy_batch_shape, gpu_opts_fp16), torch::zeros(policy_batch_shape, gpu_opts_fp16) };
     torch::Tensor gpu_value_fp16[NUM_SLOTS]  = { torch::zeros(value_batch_shape, gpu_opts_fp16), torch::zeros(value_batch_shape, gpu_opts_fp16), torch::zeros(value_batch_shape, gpu_opts_fp16) };
+    torch::Tensor gpu_mlh_fp16[NUM_SLOTS]    = { torch::zeros(mlh_batch_shape, gpu_opts_fp16), torch::zeros(mlh_batch_shape, gpu_opts_fp16), torch::zeros(mlh_batch_shape, gpu_opts_fp16) };
     torch::Tensor gpu_input_fp16[NUM_SLOTS]  = { torch::zeros(batch_shape, gpu_opts_fp16), torch::zeros(batch_shape, gpu_opts_fp16), torch::zeros(batch_shape, gpu_opts_fp16) };
 
     size_t input_bytes_per_tensor = shared_input_buffer[0].numel() * sizeof(uint16_t);
     size_t policy_bytes_per_tensor = shared_policy_buffer[0].numel() * sizeof(uint16_t);
     size_t value_bytes_per_tensor = shared_value_buffer[0].numel() * sizeof(uint16_t);
+    size_t mlh_bytes_per_tensor = shared_mlh_buffer[0].numel() * sizeof(uint16_t);
 
     size_t input_numel = shared_input_buffer[0].numel();
     size_t policy_numel = shared_policy_buffer[0].numel();
     size_t value_numel = shared_value_buffer[0].numel();
+    size_t mlh_numel = shared_mlh_buffer[0].numel();
 
     c10::cuda::CUDAStream* streams[NUM_SLOTS] = {
         &stream_a.value(), 
@@ -225,6 +232,7 @@ void InferenceBatcher::run(
 
                 c10::Half* src_policy_base = policy_cpu[job.slot].data_ptr<c10::Half>();
                 c10::Half* src_value_base = value_cpu[job.slot].data_ptr<c10::Half>();
+                c10::Half* src_mlh_base = mlh_cpu[job.slot].data_ptr<c10::Half>();
                 std::vector<std::vector<int>> worker_notifications(num_workers);
 
                 for (size_t i = 0; i < job.requests.size(); ++i) {
@@ -233,6 +241,7 @@ void InferenceBatcher::run(
 
                     std::memcpy(shared_policy_buffer[s_idx].data_ptr<c10::Half>(), src_policy_base + (i * policy_numel), policy_bytes_per_tensor);
                     std::memcpy(shared_value_buffer[s_idx].data_ptr<c10::Half>(), src_value_base + (i * value_numel), value_bytes_per_tensor);
+                    std::memcpy(shared_mlh_buffer[s_idx].data_ptr<c10::Half>(), src_mlh_base + (i * mlh_numel), mlh_bytes_per_tensor);
                     worker_notifications[w_id].push_back(s_idx);
                 }
                 for (int w_id = 0; w_id < num_workers; ++w_id) {
@@ -478,6 +487,10 @@ void InferenceBatcher::run(
             trt_contexts[current_slot]->setTensorAddress("input", gpu_input_fp16[current_slot].data_ptr());
             trt_contexts[current_slot]->setTensorAddress("policy", gpu_policy_fp16[current_slot].data_ptr());
             trt_contexts[current_slot]->setTensorAddress("value", gpu_value_fp16[current_slot].data_ptr());
+            // "mlh" MUST match the third output_names entry in your torch.onnx.export
+            // call (order in model.forward is policy, value, mlh). If the export used
+            // a different name, TRT will not bind this address and the MLH output is junk.
+            trt_contexts[current_slot]->setTensorAddress("mlh", gpu_mlh_fp16[current_slot].data_ptr());
 
             trt_contexts[current_slot]->enqueueV3(raw_streams[current_slot]);
             
@@ -485,6 +498,7 @@ void InferenceBatcher::run(
 
             cudaMemcpyAsync(policy_cpu[current_slot].data_ptr(), gpu_policy_fp16[current_slot].data_ptr(), req_size * policy_bytes_per_tensor, cudaMemcpyDeviceToHost, raw_streams[current_slot]);
             cudaMemcpyAsync(value_cpu[current_slot].data_ptr(), gpu_value_fp16[current_slot].data_ptr(), req_size * value_bytes_per_tensor, cudaMemcpyDeviceToHost, raw_streams[current_slot]);
+            cudaMemcpyAsync(mlh_cpu[current_slot].data_ptr(), gpu_mlh_fp16[current_slot].data_ptr(), req_size * mlh_bytes_per_tensor, cudaMemcpyDeviceToHost, raw_streams[current_slot]);
             cudaEventRecord(fw_stop_events[current_slot], raw_streams[current_slot]);
 
             if (logger.get_level() <= 10) {

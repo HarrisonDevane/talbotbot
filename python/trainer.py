@@ -43,6 +43,7 @@ class AsyncBatchPrefetcher:
         self.shm_b = torch.zeros((3, batch_size, input_planes, board_dim, board_dim), dtype=torch.float32).share_memory_()
         self.shm_p = torch.zeros((3, batch_size, policy_moves), dtype=torch.float32).share_memory_()
         self.shm_v = torch.zeros((3, batch_size), dtype=torch.float16).share_memory_()
+        self.shm_ml = torch.zeros((3, batch_size), dtype=torch.float16).share_memory_()
         self.shm_m = torch.zeros((3, batch_size, policy_moves), dtype=torch.bool).share_memory_()
         self.shm_valid = torch.zeros(3, dtype=torch.int32).share_memory_()
 
@@ -112,6 +113,7 @@ class AsyncBatchPrefetcher:
             b_arr = np.empty((self.batch_size, self.input_planes, self.board_dim, self.board_dim), dtype=np.float32)
             p_arr = np.empty((self.batch_size, self.policy_moves), dtype=np.float32)
             v_arr = np.empty(self.batch_size, dtype=np.float16)
+            ml_arr = np.empty(self.batch_size, dtype=np.float16)
             m_arr = np.empty((self.batch_size, self.policy_moves), dtype=np.bool_)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.prefetch_workers) as executor:
@@ -169,6 +171,17 @@ class AsyncBatchPrefetcher:
                         p_arr[valid_idx, move_indices] = move_probs
 
                         v_arr[valid_idx] = np.frombuffer(buf[off_val:off_val + 2], dtype=np.float16)[0]
+
+                        # MLH target: normalized plies-left (plies_left / 100),
+                        # f16, appended by the C++ IOWriter directly after the
+                        # value. Guard for legacy records without the field so
+                        # a stale buffer degrades to a zero target instead of
+                        # crashing the prefetcher.
+                        off_mlh = off_val + 2
+                        if len(buf) >= off_mlh + 2:
+                            ml_arr[valid_idx] = np.frombuffer(buf[off_mlh:off_mlh + 2], dtype=np.float16)[0]
+                        else:
+                            ml_arr[valid_idx] = 0.0
                         valid_idx += 1
 
                     t_unpack = (time.perf_counter() - (t_start + (t_fetch / 1000))) * 1000
@@ -177,6 +190,7 @@ class AsyncBatchPrefetcher:
                     self.shm_b[slot][:valid_idx].copy_(torch.from_numpy(b_arr[:valid_idx]))
                     self.shm_p[slot][:valid_idx].copy_(torch.from_numpy(p_arr[:valid_idx]))
                     self.shm_v[slot][:valid_idx].copy_(torch.from_numpy(v_arr[:valid_idx]))
+                    self.shm_ml[slot][:valid_idx].copy_(torch.from_numpy(ml_arr[:valid_idx]))
                     self.shm_m[slot][:valid_idx].copy_(torch.from_numpy(m_arr[:valid_idx]))
                     self.shm_valid[slot] = valid_idx
 
@@ -235,14 +249,17 @@ class TrainTask:
 
         self.optimizer = optim.SGD(
             self.model.parameters(),
-            lr=float(self.training_config['learning_rate']),
+            lr=float(self.training_config['lr_warmup']),
             momentum=self.training_config['momentum_rate'],
             weight_decay=float(self.training_config['weight_decay'])
         )
 
+        mlh_delta = self.training_config['mlh_delta_ply'] / m_cfg['mlh_scale']
+
         self.scaler = GradScaler('cuda')
         self.policy_criterion = nn.KLDivLoss(reduction='batchmean')
         self.value_criterion = nn.KLDivLoss(reduction='batchmean')
+        self.mlh_criterion = nn.HuberLoss(delta=mlh_delta)
 
         checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -322,6 +339,7 @@ class TrainTask:
         t_b = self.prefetcher.shm_b[slot][:valid_idx]
         t_p = self.prefetcher.shm_p[slot][:valid_idx]
         t_v = self.prefetcher.shm_v[slot][:valid_idx]
+        t_ml = self.prefetcher.shm_ml[slot][:valid_idx]
         t_m = self.prefetcher.shm_m[slot][:valid_idx]
 
         shuffle_idx = torch.randperm(valid_idx)
@@ -329,6 +347,7 @@ class TrainTask:
         board_tensors    = t_b[shuffle_idx].to(self.device, non_blocking=True)
         policy_target    = t_p[shuffle_idx].to(self.device, non_blocking=True)
         value_targets    = t_v[shuffle_idx].float().to(self.device, non_blocking=True).flatten()
+        mlh_targets      = t_ml[shuffle_idx].float().to(self.device, non_blocking=True).flatten()
         true_legal_masks = t_m[shuffle_idx].to(self.device, non_blocking=True)
 
         # CRITICAL: Tell the worker it can overwrite this buffer for the next batch
@@ -340,15 +359,23 @@ class TrainTask:
 
         # Linear LR warmup over the first build_steps gradient updates.
         # Ramps from warmup_start_lr (default 1e-3) up to the target learning_rate.
-        target_lr  = float(self.training_config['learning_rate'])
-        warmup_lr0 = float(self.training_config['warmup_start_lr'])
-        warmup_n   = int(self.training_config['warmup_steps'])
+        lr_warmup  = float(self.training_config['lr_warmup'])
+        warmup_n   = int(self.training_config['lr_warmup_steps'])
+        lr_high    = float(self.training_config['lr_high'])
+        lr_mid     = float(self.training_config['lr_mid'])
+        lr_low     = float(self.training_config['lr_low'])
+        high_steps = int(self.training_config['lr_high_steps'])
+        mid_steps  = int(self.training_config['lr_mid_steps'])
 
         if warmup_n > 0 and global_step < warmup_n:
             frac = global_step / warmup_n            # 0.0 -> 1.0 linear
-            current_lr = warmup_lr0 + frac * (target_lr - warmup_lr0)
+            current_lr = lr_warmup + frac * (lr_high - lr_warmup)
+        elif global_step < high_steps:
+            current_lr = lr_high
+        elif global_step < mid_steps:
+            current_lr = lr_mid
         else:
-            current_lr = target_lr
+            current_lr = lr_low
 
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = current_lr
@@ -357,11 +384,6 @@ class TrainTask:
         value_targets_wdl[:, 0] = (value_targets == 1.0).float()  # Win
         value_targets_wdl[:, 1] = (value_targets == 0.0).float()  # Draw
         value_targets_wdl[:, 2] = (value_targets == -1.0).float() # Loss
-
-        # Diagnostic: rows whose WDL target sums to zero mean value_target was not
-        # exactly +1/0/-1 (e.g. FP rounding or contempt leak upstream). These rows
-        # contribute a degenerate KLDiv term and silently corrupt the value gradient.
-        bad_wdl_rows = (value_targets_wdl.sum(dim=1) == 0).sum().item()
 
         with torch.no_grad():
             total_v = len(value_targets)
@@ -377,7 +399,7 @@ class TrainTask:
 
         fw_start = time.perf_counter()
         with torch.amp.autocast('cuda'):
-            policy_logits, value_outputs = self.model(board_tensors)
+            policy_logits, value_outputs, mlh_outputs = self.model(board_tensors)
 
         policy_logits = policy_logits.float().masked_fill(~true_legal_masks, -1e9)
         policy_log_softmax = F.log_softmax(policy_logits, dim=1)
@@ -385,9 +407,12 @@ class TrainTask:
         policy_loss = self.policy_criterion(policy_log_softmax, policy_target.float())
         value_log_probs = torch.log(value_outputs.clamp(min=1e-8))
         value_loss = self.value_criterion(value_log_probs, value_targets_wdl)
+        mlh_loss = self.mlh_criterion(mlh_outputs.float(), mlh_targets)
 
+        mlh_weight = float(self.training_config['mlh_loss_weight'])
         total_loss = (policy_loss * self.training_config['policy_loss_weight']) + \
-                     (value_loss  * self.training_config['value_loss_weight'])
+                     (value_loss  * self.training_config['value_loss_weight']) + \
+                     (mlh_loss    * mlh_weight)
 
         with torch.no_grad():
             policy_probs   = torch.exp(policy_log_softmax)
@@ -399,6 +424,9 @@ class TrainTask:
             target_entropy = -(tgt * torch.log(tgt + 1e-10)).sum(dim=1).mean()
             v_out_mean     = (value_outputs[:, 0] - value_outputs[:, 2]).mean()
             v_tar_mean     = value_targets.mean()
+            # MLH in plies (x100 undoes the normalization) for readable logs
+            mlh_pred_plies = mlh_outputs.float().mean().item() * 100.0
+            mlh_tar_plies  = mlh_targets.mean().item() * 100.0
 
             pred_w_mean = value_outputs[:, 0].mean().item() * 100.0
             pred_d_mean = value_outputs[:, 1].mean().item() * 100.0
@@ -415,26 +443,29 @@ class TrainTask:
         bw_time = (time.perf_counter() - bw_start) * 1000
 
         self.logger.info(
-            f"Step {global_step + 1} | "
-            f"Loss: T={total_loss.item():.4f} "
-            f"(P={(policy_loss.item() * self.training_config['policy_loss_weight']):.4f}, "
-            f"V={(value_loss.item() * self.training_config['value_loss_weight']):.4f}) | "
-            f"Tar (W/D/L): {pct_w:.1f}% / {pct_d:.1f}% / {pct_l:.1f}% | "
-            f"Pred: {pred_w_mean:.1f}% / {pred_d_mean:.1f}% / {pred_l_mean:.1f}% | "
-            f"P_Ent={policy_entropy.item():.4f} | "
-            f"T_Ent={target_entropy.item():.4f} | "
-            f"BadWDL={bad_wdl_rows} | "
-            f"Grad={grad_norm.item():.2f} | LR={self.optimizer.param_groups[0]['lr']:.6f} | "
-            f"Data={data_time:.0f}ms FW={fw_time:.0f}ms BW={bw_time:.0f}ms"
+            f"Step {global_step + 1:>6d} | "
+            f"Loss: T={total_loss.item():7.4f} "
+            f"(P={(policy_loss.item() * self.training_config['policy_loss_weight']):7.4f}, "
+            f"V={(value_loss.item() * self.training_config['value_loss_weight']):7.4f}, "
+            f"M={(mlh_loss.item() * mlh_weight):7.4f}) | "
+            f"MLH (pred/tar plies): {mlh_pred_plies:4.0f}/{mlh_tar_plies:4.0f} | "
+            f"Tar (W/D/L): {pct_w:5.1f}% / {pct_d:5.1f}% / {pct_l:5.1f}% | "
+            f"Pred: {pred_w_mean:5.1f}% / {pred_d_mean:5.1f}% / {pred_l_mean:5.1f}% | "
+            f"P_Ent={policy_entropy.item():6.4f} | "
+            f"T_Ent={target_entropy.item():6.4f} | "
+            f"Grad={grad_norm.item():4.2f} | LR={self.optimizer.param_groups[0]['lr']:8.6f} | "
+            f"Data={data_time:4.0f}ms FW={fw_time:4.0f}ms BW={bw_time:4.0f}ms"
         )
 
         if self.tb_writer is not None:
             self.tb_writer.add_scalar('Loss/Total', total_loss.item(), global_step)
             self.tb_writer.add_scalar('Loss/Policy', policy_loss.item() * self.training_config['policy_loss_weight'], global_step)
             self.tb_writer.add_scalar('Loss/Value', value_loss.item() * self.training_config['value_loss_weight'], global_step)
+            self.tb_writer.add_scalar('Loss/MLH', mlh_loss.item() * mlh_weight, global_step)
+            self.tb_writer.add_scalar('Predictions/MLH_Pred_Plies', mlh_pred_plies, global_step)
+            self.tb_writer.add_scalar('Predictions/MLH_Target_Plies', mlh_tar_plies, global_step)
             self.tb_writer.add_scalar('Metrics/Policy_Entropy', policy_entropy.item(), global_step)
             self.tb_writer.add_scalar('Metrics/Target_Entropy', target_entropy.item(), global_step)
-            self.tb_writer.add_scalar('Metrics/Bad_WDL_Rows', bad_wdl_rows, global_step)
             self.tb_writer.add_scalar('Metrics/Value_Output_Mean', v_out_mean.item(), global_step)
             self.tb_writer.add_scalar('Metrics/Value_Target_Mean', v_tar_mean.item(), global_step)
             self.tb_writer.add_scalar('Metrics/Grad_Norm', grad_norm.item(), global_step)

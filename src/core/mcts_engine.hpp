@@ -17,6 +17,7 @@ struct ModelConfig {
     int input_planes;
     int board_dim;
     int policy_moves;
+    double mlh_scale;
 };
 
 template <typename T>
@@ -88,7 +89,7 @@ class MCTSEngine {
 public:
     int worker_batch_size;
     int worker_id;
-    double policy_softmax_temp;
+    double deficit_eps;
     double virtual_loss;
     double contempt;
     double draw_cutoff;
@@ -98,8 +99,7 @@ public:
     double gumbel_c_visit;
     double gumbel_c_scale;
     double gumbel_noise;
-    double puct_c;   // 0 => deterministic Gumbel deficit selection (self-play).
-                     // >0 => PUCT selection at non-root nodes (inference test).
+    int mlh_scale;
     std::mt19937 rng;
 
     double time_selection = 0.0;
@@ -123,6 +123,7 @@ public:
     std::vector<torch::Tensor>& shared_input_buffer;
     std::vector<torch::Tensor>& shared_policy_buffer;
     std::vector<torch::Tensor>& shared_value_buffer;
+    std::vector<torch::Tensor>& shared_mlh_buffer;
 
     std::vector<MCTSNode*> in_flight_nodes;
     std::vector<std::pair<int, int>> batch_buffer;
@@ -132,6 +133,7 @@ public:
 
     std::atomic<int>* core_wait_count;
     int workers_per_core;
+    bool use_tablebase;
 
     MCTSEngine(
         int node_pool_capacity, 
@@ -139,23 +141,25 @@ public:
         moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue,
         ThreadSafeQueue<std::vector<int>>& result_queue, 
         int worker_id, 
-        double policy_softmax_temp,
+        double deficit_eps,
         double virtual_loss,
         double contempt,
         double draw_cutoff, 
         double gumbel_c_visit, 
         double gumbel_c_scale, 
         double gumbel_noise,
-        double puct_c,
+        double mlh_scale,
         const chess::Board& board, 
         const std::vector<chess::Board>& base_history,
         Logger& logger, 
         std::vector<torch::Tensor>& shared_input_buffer, 
         std::vector<torch::Tensor>& shared_policy_buffer, 
         std::vector<torch::Tensor>& shared_value_buffer, 
+        std::vector<torch::Tensor>& shared_mlh_buffer,
         ThreadSafeQueue<int>& buffer_free_slots,
         std::atomic<int>* core_wait_count,
-        int workers_per_core
+        int workers_per_core,
+        bool use_tablebase = false
     );
 
     void reset(const chess::Board& board, const std::vector<chess::Board>& history);
@@ -181,7 +185,7 @@ private:
     void _wait_for_inference();
     MCTSNode* _select(MCTSNode* start_node, std::vector<MCTSNode*>& simulation_path);
     void _backpropagate_minimax(MCTSNode* node);
-    void _backpropagate(MCTSNode* node, double w, double d, double l, bool is_terminal);
+    void _backpropagate(MCTSNode* node, double w, double d, double l, double mlh, bool is_terminal);
     void _virtual_loss(MCTSNode* node, bool is_applying);
     
     void _mark_selected(MCTSNode* node);
@@ -189,11 +193,22 @@ private:
     void _retrieve_inference(bool block);
     void _submit_batch();
     void _handle_terminal_node(MCTSNode* leaf);
+    // Syzygy WDL probe for the current leaf (UCI only). Returns true iff the
+    // leaf was resolved as a proven terminal here; false falls through to NN.
+    bool _try_tablebase(MCTSNode* leaf);
     void _queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCTSNode*>& simulation_path); 
-    void _run_single_async_simulation(MCTSNode* start_node);
+    // Returns true iff one simulation was actually performed (a leaf was
+    // queued for inference, or a terminal node was handled). Returns false
+    // on the no-op exit path (candidate subtree unavailable / no free buffer
+    // slots, with nothing in flight for this worker). Callers must only
+    // charge search budget when this returns true.
+    bool _run_single_async_simulation(MCTSNode* start_node);
     
-    void _log_tournament_results(const std::vector<MCTSNode*>& candidates, const std::string& phase_name);
-
+    void _log_tournament_results(const std::vector<MCTSNode*>& candidates,
+                                const std::string& phase_name,
+                                int remaining_search_depth = -1,
+                                int phase_budget = -1,
+                                int sims_completed = -1);
     // Debug: navigate from root following a UCI move path and dump the target
     // node's RAW network value plus its children. For "why is this node's Q
     // wrong" questions -- the raw value tells you if the value head is blind.

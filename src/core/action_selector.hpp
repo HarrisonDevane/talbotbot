@@ -11,7 +11,7 @@
 struct ActionSelectorConfig {
     int node_pool_size;
     double contempt;
-    double policy_softmax_temp;
+    double deficit_eps;
     double virtual_loss;
     double draw_cutoff;
     double gumbel_c_visit;
@@ -19,10 +19,11 @@ struct ActionSelectorConfig {
     double gumbel_noise;
     double gumbel_search_depth;
     double gumbel_m;
-    double puct_c;
     
     int temperature_ply_cutoff;
     double temperature_q_decay;
+
+    double mlh_tiebreak_cutoff;      // static absolute-Q cutoff: any move at/above this is eligible for the MLH (fastest-finish) tiebreak
     
     double resignation_probability;
     double resignation_cutoff;

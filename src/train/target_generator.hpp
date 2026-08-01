@@ -19,6 +19,7 @@ public:
         const chess::Board& board,
         const ActionSelectorConfig& config, 
         const ModelConfig& model_config, 
+        const double target_shrinkage_k,
         Logger& logger
     );
 };
