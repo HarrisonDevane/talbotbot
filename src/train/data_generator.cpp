@@ -60,8 +60,9 @@ DataGenerator::DataGenerator(
     selector_config.draw_cutoff = sel_cfg["draw_cutoff"].as<double>();
     selector_config.resignation_probability = sel_cfg["resignation_probability"].as<double>();
     selector_config.resignation_cutoff = sel_cfg["resignation_cutoff"].as<double>();
-    selector_config.mlh_tiebreak_cutoff = sel_cfg["mlh_tiebreak_cutoff: 0.95"].as<double>();
-
+    selector_config.mlh_gate_start = mcts_cfg["mlh_gate_start"].as<double>();
+    selector_config.mlh_gate_full = mcts_cfg["mlh_gate_full"].as<double>();
+    selector_config.mlh_lambda = mcts_cfg["mlh_lambda"].as<double>();
     main_logger.log("INFO", "DataGenerator logic loop initialized.");
 }
 
@@ -127,7 +128,8 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
         inference_queue, result_queues[logical_idx], logical_idx,
         selector_config.deficit_eps, selector_config.virtual_loss, selector_config.contempt,
         selector_config.draw_cutoff, selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
-        selector_config.gumbel_noise, model_config.mlh_scale, dummy, std::vector<chess::Board>(), logger,
+        selector_config.gumbel_noise, model_config.mlh_scale, selector_config.mlh_lambda, 
+        selector_config.mlh_gate_start, selector_config.mlh_gate_full, dummy, std::vector<chess::Board>(), logger,
         shared_input_buffer, shared_policy_buffer, shared_value_buffer, shared_mlh_buffer,
         buffer_free_slots, core_wait_count, config.workers_per_core
     );

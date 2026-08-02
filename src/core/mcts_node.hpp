@@ -42,6 +42,7 @@ struct MCTSNode {
     MCTSNode* get_child(chess::Move m) const;
     
     double expected_value(double contempt) const;
-    double calculate_gumbel_score(double contempt, double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix);
+    double calculate_gumbel_score(double contempt, double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix,
+                                  double min_sibling_mlh, double mlh_lambda, double mlh_gate_start, double mlh_gate_full);
     double calculate_v_mix(double contempt) const;
 };

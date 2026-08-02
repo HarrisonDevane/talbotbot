@@ -17,7 +17,7 @@ struct ModelConfig {
     int input_planes;
     int board_dim;
     int policy_moves;
-    double mlh_scale;
+    int mlh_scale;
 };
 
 template <typename T>
@@ -99,7 +99,10 @@ public:
     double gumbel_c_visit;
     double gumbel_c_scale;
     double gumbel_noise;
-    int mlh_scale;
+    double mlh_scale;
+    double mlh_lambda;
+    double mlh_gate_start;
+    double mlh_gate_full;
     std::mt19937 rng;
 
     double time_selection = 0.0;
@@ -149,6 +152,9 @@ public:
         double gumbel_c_scale, 
         double gumbel_noise,
         double mlh_scale,
+        double mlh_lambda,
+        double mlh_gate_start,
+        double mlh_gate_full,
         const chess::Board& board, 
         const std::vector<chess::Board>& base_history,
         Logger& logger, 

@@ -81,7 +81,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
         MCTSNode* m1 = non_forced_visited[0];
         MCTSNode* m2 = (non_forced_visited.size() > 1) ? non_forced_visited[1] : m1;
         top_node = (m1->gumbel_score > m2->gumbel_score) ? m1 : m2;
-        best_q = -top_node->calculate_v_mix(config.contempt);
+        best_q = -top_node->expected_value(config.contempt);
     }
 
     // Rule A: Win
@@ -118,7 +118,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
             double best_q_tilde = -2.0;
             for (size_t i = 0; i < n; ++i) {
                 MCTSNode* c = non_forced_visited[i];
-                double q = -c->calculate_v_mix(config.contempt);
+                double q = -c->expected_value(config.contempt);
 
                 // Search-averaged WDL (c->visits > 0 guaranteed by upstream filter)
                 double pw = c->w_sum / c->visits;
@@ -168,7 +168,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
 
                 for (size_t idx : order) {
                     MCTSNode* c = non_forced_visited[idx];
-                    double q  = -c->calculate_v_mix(config.contempt);
+                    double q  = -c->expected_value(config.contempt);
                     double pw = c->w_sum / c->visits;
                     double pl = c->l_sum / c->visits;
                     double ev = pw - pl;
@@ -199,26 +199,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
             MCTSNode* m1 = non_forced_visited[0];
             MCTSNode* m2 = (non_forced_visited.size() > 1) ? non_forced_visited[1] : m1;
             MCTSNode* gumbel_winner = (m1->gumbel_score > m2->gumbel_score) ? m1 : m2;
-
-            // MLH tiebreak (static cutoff)
-            MCTSNode* shortest = nullptr;
-            double best_mlh = 0.0;
-            for (MCTSNode* c : non_forced_visited) {
-                double cq = -c->calculate_v_mix(config.contempt);
-                if (cq < config.mlh_tiebreak_cutoff) continue;
-                double c_mlh = c->mlh_sum / c->visits;
-                if (shortest == nullptr || c_mlh < best_mlh) { best_mlh = c_mlh; shortest = c; }
-            }
-            if (shortest != nullptr) {
-                if (shortest != gumbel_winner) {
-                    logger.log("INFO", "MLH tiebreak: " + chess::uci::moveToUci(shortest->move)
-                        + " over " + chess::uci::moveToUci(gumbel_winner->move)
-                        + " (mean ML " + std::to_string(best_mlh) + " norm)");
-                }
-                result.best_move = shortest->move;
-            } else {
-                result.best_move = gumbel_winner->move;
-            }
+            result.best_move = (m1->gumbel_score > m2->gumbel_score) ? m1->move : m2->move;
         }
         
     // Rule E: Delay Mate

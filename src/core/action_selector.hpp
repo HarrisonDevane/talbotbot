@@ -23,7 +23,9 @@ struct ActionSelectorConfig {
     int temperature_ply_cutoff;
     double temperature_q_decay;
 
-    double mlh_tiebreak_cutoff;      // static absolute-Q cutoff: any move at/above this is eligible for the MLH (fastest-finish) tiebreak
+    double mlh_gate_start;
+    double mlh_gate_full;
+    double mlh_lambda;
     
     double resignation_probability;
     double resignation_cutoff;

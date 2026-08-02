@@ -20,28 +20,6 @@ TargetResult TargetGenerator::generate_targets(
         all_moves.add(all_children.back()->move);
     }
 
-    // Improved policy: pi' = softmax(raw_logit + sigma(completedQ))
-    //
-    // completedQ uses visit-weighted shrinkage toward v_mix rather than the
-    // paper's step function (Eq. 10). A node's empirical Q is blended with
-    // v_mix in proportion to its visits:
-    //
-    //   completedQ(a) = (N(a) * q_hat(a) + k * v_mix) / (N(a) + k)
-    //
-    // N=0 reduces to pure v_mix (identical to Eq. 10); as N grows the
-    // empirical Q dominates. This prevents a confidently-misevaluated
-    // 1-visit node from presenting its full raw Q to the training target.
-    //
-    // Forced outcomes are exact, not estimates -- shrinkage does not apply.
-    // A proven win enters the softmax at q = +1, a proven loss at q = -1,
-    // a proven draw at its exact draw value, regardless of visit count.
-    //
-    // Proven losses are NOT hard-zeroed: at sigma_scale >= c_visit, the
-    // q_norm floor of 0.0 suppresses them by tens of logits, so their
-    // target mass is effectively zero while the target remains a smooth
-    // softmax over exact values (paper-canonical Eq. 11 behaviour).
-
-
     double v_mix = root->calculate_v_mix(config.contempt);
 
     int max_visits = 0;
@@ -53,13 +31,35 @@ TargetResult TargetGenerator::generate_targets(
     std::vector<float> base_logits(num_children);
     float max_logit = -1e20f;
 
+    // MLH steering gate + direction. Winning (v_mix >= start): sign -1, prefer
+    // faster. Losing (v_mix <= -start): sign +1, prefer slower (drag out). Linear
+    // ramp start->full; the two branches are mutually exclusive since start > 0.
+    double mlh_gate = 0.0;
+    double mlh_sign = 0.0;
+    if (config.mlh_lambda > 0.0 && config.mlh_gate_full > config.mlh_gate_start) {
+        double denom = config.mlh_gate_full - config.mlh_gate_start;
+        if (v_mix >= config.mlh_gate_start) {
+            mlh_gate = std::min(1.0, (v_mix - config.mlh_gate_start) / denom);
+            mlh_sign = -1.0;
+        } else if (v_mix <= -config.mlh_gate_start) {
+            mlh_gate = std::min(1.0, (-v_mix - config.mlh_gate_start) / denom);
+            mlh_sign = +1.0;
+        }
+    }
+    const bool apply_mlh = (mlh_gate > 0.0);
+    double min_mean_mlh = 1e18;
+    if (apply_mlh) {
+        for (int i = 0; i < num_children; ++i) {
+            MCTSNode* c = all_children[i];
+            if (c->visits > 0) min_mean_mlh = std::min(min_mean_mlh, c->mlh_sum / c->visits);
+        }
+    }
+
     for (int i = 0; i < num_children; ++i) {
         MCTSNode* c = all_children[i];
 
         double q;
         if (c->forced_outcome.has_value()) {
-            // Proven subtree: exact value, no shrinkage, visits irrelevant.
-            // forced_outcome is from the child's perspective; negate for ours.
             int fo = c->forced_outcome.value();
             if      (fo == -1) q =  1.0;              // proven win for us
             else if (fo ==  1) q = -1.0;              // proven loss
@@ -68,6 +68,10 @@ TargetResult TargetGenerator::generate_targets(
             q = (c->visits > 0)
                 ? (c->visits * -c->expected_value(config.contempt) + target_shrinkage_k * v_mix) / (c->visits + target_shrinkage_k)
                 : v_mix;
+        }
+
+        if (apply_mlh && c->visits > 0) {
+            q += mlh_sign * config.mlh_lambda * mlh_gate * (c->mlh_sum / c->visits - min_mean_mlh);
         }
 
         double q_norm = (q + 1.0) / 2.0;

@@ -16,6 +16,7 @@ MCTSEngine::MCTSEngine(
     int node_pool_capacity, int worker_batch_size, moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue, 
     ThreadSafeQueue<std::vector<int>>& result_queue, int worker_id, double deficit_eps, double virtual_loss, double contempt,
     double draw_cutoff, double gumbel_c_visit, double gumbel_c_scale, double gumbel_noise, double mlh_scale,
+    double mlh_lambda, double mlh_gate_start, double mlh_gate_full,
     const chess::Board& board, const std::vector<chess::Board>& base_history, Logger& logger, 
     std::vector<torch::Tensor>& shared_input_buffer, std::vector<torch::Tensor>& shared_policy_buffer, std::vector<torch::Tensor>& shared_value_buffer,
     std::vector<torch::Tensor>& shared_mlh_buffer,
@@ -23,7 +24,9 @@ MCTSEngine::MCTSEngine(
     bool use_tablebase
 ) : worker_batch_size(worker_batch_size), worker_id(worker_id), virtual_loss(virtual_loss), deficit_eps(deficit_eps), contempt(contempt),
     draw_cutoff(draw_cutoff), gumbel_c_visit(gumbel_c_visit), gumbel_c_scale(gumbel_c_scale),
-    gumbel_noise(gumbel_noise), mlh_scale(mlh_scale), root_board(board), base_history(base_history), 
+    gumbel_noise(gumbel_noise), mlh_scale(mlh_scale),
+    mlh_lambda(mlh_lambda), mlh_gate_start(mlh_gate_start), mlh_gate_full(mlh_gate_full),
+    root_board(board), base_history(base_history), 
     node_pool(node_pool_capacity), logger(logger), inference_queue(inference_queue), result_queue(result_queue), 
     buffer_free_slots(buffer_free_slots), shared_input_buffer(shared_input_buffer), 
     shared_policy_buffer(shared_policy_buffer), shared_value_buffer(shared_value_buffer),
@@ -96,6 +99,7 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
         double best_deficit = -1e20;
         double max_visits = 0.0;
         double sum_visits = 0.0;
+        double min_sibling_mlh = 1e18;   // fastest-finishing sibling (mean moves-left)
         int num_children = node->num_children;
 
         for (int i = 0; i < num_children; ++i) {
@@ -103,6 +107,10 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
             if (child->forced_outcome.has_value() || child->unavailable_for_selection) continue;
             if (child->visits > max_visits) max_visits = child->visits;
             sum_visits += child->visits;
+            if (child->visits > 0) {
+                double cm = child->mlh_sum / child->visits;
+                if (cm < min_sibling_mlh) min_sibling_mlh = cm;
+            }
         }
 
         double v_mix = node->calculate_v_mix(contempt);
@@ -112,7 +120,8 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
             if (child->forced_outcome.has_value() || child->unavailable_for_selection) continue;
-            double score = child->calculate_gumbel_score(contempt, gumbel_c_visit, gumbel_c_scale, max_visits, v_mix);
+            double score = child->calculate_gumbel_score(contempt, gumbel_c_visit, gumbel_c_scale, max_visits, v_mix,
+                                                          min_sibling_mlh, mlh_lambda, mlh_gate_start, mlh_gate_full);
             if (score > max_score_logit) max_score_logit = score;
             if (child->raw_logit > max_raw_logit) max_raw_logit = child->raw_logit;
         }
@@ -289,7 +298,7 @@ void MCTSEngine::_handle_terminal_node(MCTSNode* leaf) {
     if (result.second == chess::GameResult::LOSE) {
         l = 1.0; 
         term_type = "Loss (Mate)";
-    } else if (result.second == chess::GameResult::DRAW || root_board.isRepetition(2)) {
+    } else if (result.second == chess::GameResult::DRAW || root_board.isRepetition(1)) {
         d = 1.0;
     }
 
@@ -511,7 +520,7 @@ bool MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
             }
         }
 
-        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(2)) {
+        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(1)) {
             _handle_terminal_node(leaf);
             completed = true;
             break;
@@ -754,7 +763,7 @@ int MCTSEngine::_build_candidates(int max_m, std::vector<MCTSNode*>& all_nodes,
         child->gumbel_score = child->gumbel_noise + child->raw_logit;
 
         root_board.makeMove(child->move);
-        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(2)) {
+        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(1)) {
             _handle_terminal_node(child);
         } else {
             active_candidates.push_back(child);
@@ -790,7 +799,7 @@ void MCTSEngine::_run_round0(std::vector<MCTSNode*>& active_candidates, int& rem
     for (MCTSNode* child : active_candidates) {
         remaining_search_depth -= 1;
         root_board.makeMove(child->move);
-        if (root_board.isGameOver().second == chess::GameResult::NONE && !root_board.isRepetition(2)) {
+        if (root_board.isGameOver().second == chess::GameResult::NONE && !root_board.isRepetition(1)) {
             // Syzygy probe for root children. Round 0 queues candidates directly,
             // bypassing _run_single_async_simulation -- without this check, depth-1
             // leaves are never probed and TB-provable root moves get NN draw evals.
@@ -812,12 +821,18 @@ void MCTSEngine::_run_round0(std::vector<MCTSNode*>& active_candidates, int& rem
 // Used both per-phase (active set) and for final scoring (all root children).
 void MCTSEngine::_rescore(std::vector<MCTSNode*>& nodes) {
     double max_visits = 1.0;
+    double min_sibling_mlh = 1e18;
     for (MCTSNode* child : nodes) {
         if (child->visits > max_visits) max_visits = child->visits;
+        if (child->visits > 0) {
+            double cm = child->mlh_sum / child->visits;
+            if (cm < min_sibling_mlh) min_sibling_mlh = cm;
+        }
     }
     double root_v_mix = root->calculate_v_mix(contempt);
     for (MCTSNode* child : nodes) {
-        child->calculate_gumbel_score(contempt, gumbel_c_visit, gumbel_c_scale, max_visits, root_v_mix);
+        child->calculate_gumbel_score(contempt, gumbel_c_visit, gumbel_c_scale, max_visits, root_v_mix,
+                                      min_sibling_mlh, mlh_lambda, mlh_gate_start, mlh_gate_full);
     }
 }
 
@@ -1193,13 +1208,6 @@ void MCTSEngine::_backpropagate(MCTSNode* node, double w, double d, double l, do
     double current_w = w;
     double current_d = d;
     double current_l = l;
-
-    // Moves-left grows by one ply for each level we climb above the leaf: a node
-    // is one ply further from game end than its child. mlh is normalized
-    // (plies / mlh_scale), so one ply == 1.0 / mlh_scale in these units. Without
-    // this, mlh_sum/visits at a node is the mean plies-from-leaf, not from the node
-    // itself, and deeper-searched siblings look artificially shorter in selection.
-    int mlh_ply_offset = 0;
     
     // if (logger.get_level() <= 10) {
     //     logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " raw WDL: " + std::to_string(w) + "/" + std::to_string(d) + "/" + std::to_string(l));
@@ -1210,7 +1218,7 @@ void MCTSEngine::_backpropagate(MCTSNode* node, double w, double d, double l, do
         current_node->w_sum += current_w;
         current_node->d_sum += current_d;
         current_node->l_sum += current_l;
-        current_node->mlh_sum += mlh + static_cast<double>(mlh_ply_offset) / mlh_scale;   // +1 ply per level up; no perspective flip
+        current_node->mlh_sum += mlh;   // moves-left is a magnitude: no perspective flip
 
         // if (logger.get_level() <= 10) {
         //     logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " updated WDL sums: " + std::to_string(current_node->w_sum) + "/" + std::to_string(current_node->d_sum) + "/" + std::to_string(current_node->l_sum));
@@ -1223,7 +1231,6 @@ void MCTSEngine::_backpropagate(MCTSNode* node, double w, double d, double l, do
         current_w = current_l;
         current_l = temp_w;
 
-        mlh_ply_offset += 1;
         current_node = current_node->parent;
     }
     time_backpropagation += ELAPSED(start_time, NOW());

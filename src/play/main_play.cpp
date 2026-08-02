@@ -239,7 +239,9 @@ static PlayConfig load_config(const std::string& config_file_path) {
     s.temperature_q_decay    = sel_n["temperature_q_decay"].as<double>();
     s.resignation_probability= sel_n["resignation_probability"].as<double>();
     s.resignation_cutoff     = sel_n["resignation_cutoff"].as<double>();
-    s.mlh_tiebreak_cutoff    = sel_n["mlh_tiebreak_cutoff"].as<double>();
+    s.mlh_gate_start         = mcts_n["mlh_gate_start"].as<double>();
+    s.mlh_gate_full          = mcts_n["mlh_gate_full"].as<double>();
+    s.mlh_lambda             = mcts_n["mlh_lambda"].as<double>();
 
     // time_control is only used by --uci (clock-based search). The tournament
     // config legitimately omits it (tournaments run on fixed node budgets), so
@@ -478,7 +480,8 @@ static int run_uci(const PlayConfig& cfg) {
         inference_queue, result_queues[0], 0,
         cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
         cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-        cfg.selector.gumbel_noise, cfg.mlh_scale, board, history, main_logger,
+        cfg.selector.gumbel_noise, cfg.mlh_scale, cfg.selector.mlh_lambda, cfg.selector.mlh_gate_start,
+        cfg.selector.mlh_gate_full, board, history, main_logger,
         buf.input, buf.policy, buf.value, buf.mlh,
         buffer_free_slots, &wait_count, 1, tb_ready);
 
@@ -858,7 +861,8 @@ static int run_tournament(const PlayConfig& cfg,
             iq_a, rq_a[w], w,
             cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
             cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-            cfg.selector.gumbel_noise, cfg.mlh_scale, dummy, empty_hist, wlog,
+            cfg.selector.gumbel_noise, cfg.mlh_scale, cfg.selector.mlh_lambda, cfg.selector.mlh_gate_start,
+            cfg.selector.mlh_gate_full, dummy, empty_hist, wlog,
             buf_a.input, buf_a.policy, buf_a.value, buf_a.mlh,
             free_a, &we->wait_a, 1);
 
@@ -867,7 +871,8 @@ static int run_tournament(const PlayConfig& cfg,
             iq_b, rq_b[w], w,
             cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
             cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-            cfg.selector.gumbel_noise, cfg.mlh_scale, dummy, empty_hist, wlog,
+            cfg.selector.gumbel_noise, cfg.mlh_scale, cfg.selector.mlh_lambda, cfg.selector.mlh_gate_start,
+            cfg.selector.mlh_gate_full, dummy, empty_hist, wlog,
             buf_b.input, buf_b.policy, buf_b.value, buf_b.mlh,
             free_b, &we->wait_b, 1);
 

@@ -38,6 +38,9 @@ mcts:
   gumbel_noise: 1.0                                               # Gumbel noise value
   gumbel_search_depth: 128                                        # Search depth budget
   gumbel_m: 16                                                    # m value for sequential halving (top m moves sampled)
+  mlh_gate_start: 0.90                                            # v_mix where MLH steering starts ramping (below: off)
+  mlh_gate_full: 0.98                                             # v_mix where it reaches full strength (must be > start)
+  mlh_lambda: 0.2                                                 # peak strength of moves-left steering, shared by target shaping and search (0 = off)
 
 selection:
   temperature_ply_cutoff: 30                                      # Sample proportional to visit count for first moves
@@ -45,7 +48,6 @@ selection:
   draw_cutoff: 0.0                                                # Value threshold to consider a game a draw
   resignation_probability: 0.9                                    # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.80                                       # Value head cutoff for resignation
-  mlh_tiebreak_cutoff: 0.90                                       # abs Q; moves at/above this are eligible for the fastest-finish (min MLH) tiebreak
 
 training:
   training_cores: [10]                                            # Dedicated CPU cores for python tasks (main_train.py and trainer.py)
@@ -56,7 +58,7 @@ training:
   sampling_ratio: 1.0                                             # Train on x the amount of data generated
   policy_loss_weight: 1.0                                         # Weight for Move Prediction loss
   value_loss_weight: 1.0                                          # Weight for Win/Loss Prediction loss
-  mlh_loss_weight: 1.0
+  mlh_loss_weight: 5.0
   mlh_delta_ply: 10
   weight_decay: 1e-4                                              # L2 Regularization
   lr_warmup: 2e-3                                                 # LR at step 0 (ramps to learning_rate over warmup_steps)
