@@ -16,28 +16,10 @@ double MCTSNode::expected_value(double contempt) const {
     return (w_sum - l_sum + (contempt * d_sum)) / visits;
 }
 
-double MCTSNode::calculate_gumbel_score(double contempt, double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix,
-                                        double min_sibling_mlh, double mlh_lambda, double mlh_gate_start, double mlh_gate_full) {
+double MCTSNode::calculate_gumbel_score(double contempt, double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix) {
     double q_val = (visits > 0) ? -expected_value(contempt) : v_mix;
-
-    // Moves-left steering, both directions, relative to the fastest sibling
-    // (rel >= 0 = how much slower this move is). Winning (v_mix >= start): lower Q
-    // of slower moves -> converge faster. Losing (v_mix <= -start): raise Q of
-    // slower moves -> drag the game out. Linear ramp start->full on |v_mix|; the
-    // two branches are mutually exclusive since start > 0.
-    if (mlh_lambda > 0.0 && mlh_gate_full > mlh_gate_start && visits > 0) {
-        double denom = mlh_gate_full - mlh_gate_start;
-        double rel = mlh_sum / visits - min_sibling_mlh;
-        if (v_mix >= mlh_gate_start) {
-            double gate = std::min(1.0, (v_mix - mlh_gate_start) / denom);
-            q_val -= mlh_lambda * gate * rel;   // winning: prefer faster finish
-        } else if (v_mix <= -mlh_gate_start) {
-            double gate = std::min(1.0, (-v_mix - mlh_gate_start) / denom);
-            q_val += mlh_lambda * gate * rel;   // losing: prefer to prolong
-        }
-    }
-
     double q_norm = (q_val + 1.0) / 2.0;
+    
     double sigma = (gumbel_c_visit + max_visits) * gumbel_c_scale;
     gumbel_score = raw_logit + gumbel_noise + (sigma * q_norm);
     

@@ -6,8 +6,5 @@ model:
   value_fc_hidden: 128
   policy_channels: 73
   total_policy_moves: 4672
-  mlh_channels: 8
-  mlh_fc_hidden: 32
-  mlh_scale: 100
   input_planes: 111
   board_dim: 8

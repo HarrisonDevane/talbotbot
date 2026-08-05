@@ -388,8 +388,8 @@ class RLOrchestrator:
                 opset_version=17,
                 do_constant_folding=True,
                 input_names=['input'],
-                output_names=['policy', 'value', 'mlh'],
-                dynamic_axes={'input': {0: 'batch_size'}, 'policy': {0: 'batch_size'}, 'value': {0: 'batch_size'}, 'mlh': {0: 'batch_size'}},
+                output_names=['policy', 'value'],
+                dynamic_axes={'input': {0: 'batch_size'}, 'policy': {0: 'batch_size'}, 'value': {0: 'batch_size'}},
                 dynamo=False
             )
         

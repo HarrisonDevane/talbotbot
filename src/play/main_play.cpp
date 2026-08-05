@@ -60,7 +60,7 @@
 #include "trt_builder.hpp"
 #include "time_control.hpp"
 
-#include "tbprobe.h"
+#include "tbprobe.h"   // Fathom Syzygy probing (tb_init / tb_free / TB_LARGEST)
 
 namespace fs = std::filesystem;
 
@@ -112,7 +112,6 @@ struct PlayConfig {
     int input_planes;
     int board_dim;
     int policy_moves;
-    double mlh_scale;
 
     // tournament
     std::string opening_file;
@@ -179,7 +178,6 @@ static PlayConfig load_config(const std::string& config_file_path) {
     cfg.input_planes = model["model"]["input_planes"].as<int>();
     cfg.board_dim    = model["model"]["board_dim"].as<int>();
     cfg.policy_moves = model["model"]["total_policy_moves"].as<int>();
-    cfg.mlh_scale    = model["model"]["mlh_scale"].as<double>();
 
     // Tablebase config lives only in play_uci.yaml. Tournament/train configs
     // omit the block -> stays disabled. Path is required iff enabled.
@@ -239,9 +237,6 @@ static PlayConfig load_config(const std::string& config_file_path) {
     s.temperature_q_decay    = sel_n["temperature_q_decay"].as<double>();
     s.resignation_probability= sel_n["resignation_probability"].as<double>();
     s.resignation_cutoff     = sel_n["resignation_cutoff"].as<double>();
-    s.mlh_gate_start         = mcts_n["mlh_gate_start"].as<double>();
-    s.mlh_gate_full          = mcts_n["mlh_gate_full"].as<double>();
-    s.mlh_lambda             = mcts_n["mlh_lambda"].as<double>();
 
     // time_control is only used by --uci (clock-based search). The tournament
     // config legitimately omits it (tournaments run on fixed node budgets), so
@@ -292,7 +287,6 @@ struct SharedBuffers {
     std::vector<torch::Tensor> input;
     std::vector<torch::Tensor> policy;
     std::vector<torch::Tensor> value;
-    std::vector<torch::Tensor> mlh;
 };
 
 static SharedBuffers make_shared_buffers(const PlayConfig& cfg) {
@@ -302,7 +296,7 @@ static SharedBuffers make_shared_buffers(const PlayConfig& cfg) {
         b.input.push_back(torch::zeros({cfg.input_planes, cfg.board_dim, cfg.board_dim}, opts));
         b.policy.push_back(torch::zeros({cfg.policy_moves}, opts));
         b.value.push_back(torch::zeros({3}, opts));
-        b.mlh.push_back(torch::zeros({1}, opts));
+        b.value.push_back(torch::zeros({1}, opts));
     }
     return b;
 }
@@ -459,13 +453,13 @@ static int run_uci(const PlayConfig& cfg) {
     std::atomic<uint64_t> dummy_step{0};
 
     InferenceBatcher batcher(
-        cfg.engine_path, cfg.inference_batch_size, cfg.batch_timeout_ms, 1, cfg.input_planes,
+        cfg.engine_path, cfg.inference_batch_size, cfg.batch_timeout_ms, 1,
         run_log_dir, cfg.batcher_logging_level, cfg.inference_worker_cores,
         0, dummy_step, cfg.logging_interval_sec);
 
     std::thread batcher_thread([&]() {
         batcher.run(inference_queue, result_queues,
-                    buf.input, buf.policy, buf.value, buf.mlh,
+                    buf.input, buf.policy, buf.value,
                     global_stop_event, &buffer_free_slots);
     });
 
@@ -480,9 +474,8 @@ static int run_uci(const PlayConfig& cfg) {
         inference_queue, result_queues[0], 0,
         cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
         cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-        cfg.selector.gumbel_noise, cfg.mlh_scale, cfg.selector.mlh_lambda, cfg.selector.mlh_gate_start,
-        cfg.selector.mlh_gate_full, board, history, main_logger,
-        buf.input, buf.policy, buf.value, buf.mlh,
+        cfg.selector.gumbel_noise, board, history, main_logger,
+        buf.input, buf.policy, buf.value,
         buffer_free_slots, &wait_count, 1, tb_ready);
 
     mcts_engine->set_nps_alpha(cfg.time_control.nps_ewma_alpha);
@@ -820,20 +813,20 @@ static int run_tournament(const PlayConfig& cfg,
     std::string batcher_b_name = "batcher_" + fs::path(model_b_path).stem().string();
 
     InferenceBatcher batcher_a(
-        model_a_engine, cfg.inference_batch_size, cfg.batch_timeout_ms, K, cfg.input_planes,
+        model_a_engine, cfg.inference_batch_size, cfg.batch_timeout_ms, K,
         run_log_dir, cfg.batcher_logging_level, cfg.batcher_a_cores,
         0, step_a, cfg.logging_interval_sec, batcher_a_name);
     InferenceBatcher batcher_b(
-        model_b_engine, cfg.inference_batch_size, cfg.batch_timeout_ms, K, cfg.input_planes,
+        model_b_engine, cfg.inference_batch_size, cfg.batch_timeout_ms, K,
         run_log_dir, cfg.batcher_logging_level, cfg.batcher_b_cores,
         0, step_b, cfg.logging_interval_sec, batcher_b_name);
 
     std::thread bt_a([&]() {
-        batcher_a.run(iq_a, rq_a, buf_a.input, buf_a.policy, buf_a.value, buf_a.mlh,
+        batcher_a.run(iq_a, rq_a, buf_a.input, buf_a.policy, buf_a.value,
                       global_stop_event, &free_a);
     });
     std::thread bt_b([&]() {
-        batcher_b.run(iq_b, rq_b, buf_b.input, buf_b.policy, buf_b.value, buf_b.mlh,
+        batcher_b.run(iq_b, rq_b, buf_b.input, buf_b.policy, buf_b.value,
                       global_stop_event, &free_b);
     });
 
@@ -861,9 +854,8 @@ static int run_tournament(const PlayConfig& cfg,
             iq_a, rq_a[w], w,
             cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
             cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-            cfg.selector.gumbel_noise, cfg.mlh_scale, cfg.selector.mlh_lambda, cfg.selector.mlh_gate_start,
-            cfg.selector.mlh_gate_full, dummy, empty_hist, wlog,
-            buf_a.input, buf_a.policy, buf_a.value, buf_a.mlh,
+            cfg.selector.gumbel_noise, dummy, empty_hist, wlog,
+            buf_a.input, buf_a.policy, buf_a.value,
             free_a, &we->wait_a, 1);
 
         we->engine_b = std::make_unique<MCTSEngine>(
@@ -871,9 +863,8 @@ static int run_tournament(const PlayConfig& cfg,
             iq_b, rq_b[w], w,
             cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
             cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-            cfg.selector.gumbel_noise, cfg.mlh_scale, cfg.selector.mlh_lambda, cfg.selector.mlh_gate_start,
-            cfg.selector.mlh_gate_full, dummy, empty_hist, wlog,
-            buf_b.input, buf_b.policy, buf_b.value, buf_b.mlh,
+            cfg.selector.gumbel_noise, dummy, empty_hist, wlog,
+            buf_b.input, buf_b.policy, buf_b.value,
             free_b, &we->wait_b, 1);
 
         we->selector_a = std::make_unique<ActionSelector>(

@@ -16,11 +16,11 @@ DataGenerator::DataGenerator(
     Logger& logger,
     moodycamel::ConcurrentQueue<std::pair<int, int>>& i_queue,
     std::vector<ThreadSafeQueue<std::vector<int>>>& r_queues,
-    std::vector<torch::Tensor>& in_buffer, std::vector<torch::Tensor>& p_buffer, std::vector<torch::Tensor>& v_buffer, std::vector<torch::Tensor>& m_buffer,
+    std::vector<torch::Tensor>& in_buffer, std::vector<torch::Tensor>& p_buffer, std::vector<torch::Tensor>& v_buffer,
     ThreadSafeQueue<int>& free_slots, ThreadSafeQueue<CompletedGame>& completed_games_queue,
     int start_game_id, std::atomic<uint64_t>& step_ref
 ) : main_logger(logger), inference_queue(i_queue), result_queues(r_queues),
-    shared_input_buffer(in_buffer), shared_policy_buffer(p_buffer), shared_value_buffer(v_buffer), shared_mlh_buffer(m_buffer),
+    shared_input_buffer(in_buffer), shared_policy_buffer(p_buffer), shared_value_buffer(v_buffer),
     buffer_free_slots(free_slots), completed_games_queue(completed_games_queue),
     stop_event(false), game_counter(start_game_id), interval_games(0), interval_samples(0), current_step(step_ref)
 {
@@ -43,7 +43,6 @@ DataGenerator::DataGenerator(
     model_config.input_planes = model_cfg["model"]["input_planes"].as<int>();
     model_config.board_dim = model_cfg["model"]["board_dim"].as<int>();
     model_config.policy_moves = model_cfg["model"]["total_policy_moves"].as<int>();
-    model_config.mlh_scale = model_cfg["model"]["mlh_scale"].as<double>();
 
     selector_config.node_pool_size = mcts_cfg["node_pool_size"].as<int>();
     selector_config.batch_size_per_worker = mcts_cfg["worker_minibatch_size"].as<int>();
@@ -60,9 +59,7 @@ DataGenerator::DataGenerator(
     selector_config.draw_cutoff = sel_cfg["draw_cutoff"].as<double>();
     selector_config.resignation_probability = sel_cfg["resignation_probability"].as<double>();
     selector_config.resignation_cutoff = sel_cfg["resignation_cutoff"].as<double>();
-    selector_config.mlh_gate_start = mcts_cfg["mlh_gate_start"].as<double>();
-    selector_config.mlh_gate_full = mcts_cfg["mlh_gate_full"].as<double>();
-    selector_config.mlh_lambda = mcts_cfg["mlh_lambda"].as<double>();
+
     main_logger.log("INFO", "DataGenerator logic loop initialized.");
 }
 
@@ -128,9 +125,8 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
         inference_queue, result_queues[logical_idx], logical_idx,
         selector_config.deficit_eps, selector_config.virtual_loss, selector_config.contempt,
         selector_config.draw_cutoff, selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
-        selector_config.gumbel_noise, model_config.mlh_scale, selector_config.mlh_lambda, 
-        selector_config.mlh_gate_start, selector_config.mlh_gate_full, dummy, std::vector<chess::Board>(), logger,
-        shared_input_buffer, shared_policy_buffer, shared_value_buffer, shared_mlh_buffer,
+        selector_config.gumbel_noise, dummy, std::vector<chess::Board>(), logger,
+        shared_input_buffer, shared_policy_buffer, shared_value_buffer,
         buffer_free_slots, core_wait_count, config.workers_per_core
     );
 

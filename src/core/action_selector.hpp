@@ -22,10 +22,6 @@ struct ActionSelectorConfig {
     
     int temperature_ply_cutoff;
     double temperature_q_decay;
-
-    double mlh_gate_start;
-    double mlh_gate_full;
-    double mlh_lambda;
     
     double resignation_probability;
     double resignation_cutoff;

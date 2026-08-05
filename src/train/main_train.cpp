@@ -108,7 +108,6 @@ int main(int argc, char* argv[]) {
     const int input_planes = model["model"]["input_planes"].as<int>();
     const int board_dim = model["model"]["board_dim"].as<int>(); 
     const int policy_moves = model["model"]["total_policy_moves"].as<int>();
-    const int mlh_scale = model["model"]["mlh_scale"].as<int>();
             
     mdb_env_create(&lmdb_env);
     mdb_env_set_mapsize(lmdb_env, (size_t)1024 * 1024 * 1024 * config["global"]["buffer_size_gb"].as<int>()); 
@@ -170,13 +169,11 @@ int main(int argc, char* argv[]) {
     std::vector<torch::Tensor> shared_input_buffer;
     std::vector<torch::Tensor> shared_policy_buffer;
     std::vector<torch::Tensor> shared_value_buffer;
-    std::vector<torch::Tensor> shared_mlh_buffer;
 
     for (int i = 0; i < total_slots; ++i) {
         shared_input_buffer.push_back(torch::zeros({input_planes, board_dim, board_dim}, options_half));
         shared_policy_buffer.push_back(torch::zeros({policy_moves}, options_half));
         shared_value_buffer.push_back(torch::zeros({3}, options_half));
-        shared_mlh_buffer.push_back(torch::zeros({1}, options_half));
     }
 
     std::vector<ThreadSafeQueue<std::vector<int>>> result_queues(num_workers);
@@ -232,19 +229,19 @@ int main(int argc, char* argv[]) {
 
     main_logger.log("INFO", "[MAIN] Initializing Batcher...");
     InferenceBatcher batcher(
-        model_path, inference_batch_size, batch_timeout, num_workers, input_planes,
+        model_path, inference_batch_size, batch_timeout, num_workers,
         train_dir, batcher_log_level, batcher_cores, rot_interval, current_step, log_interval_sec
     );
 
     std::thread batcher_thread([&]() {
-        batcher.run(inference_queue, result_queues, shared_input_buffer, shared_policy_buffer, shared_value_buffer, shared_mlh_buffer, global_stop_event, &buffer_free_slots);
+        batcher.run(inference_queue, result_queues, shared_input_buffer, shared_policy_buffer, shared_value_buffer, global_stop_event, &buffer_free_slots);
     });
 
     main_logger.log("INFO", "[MAIN] Initializing Data Generator Workers...");
     DataGenerator generator(
         config["global"], config["data_generation"], config["mcts"], config["selection"],
         model, train_dir, rot_interval, main_logger,
-        inference_queue, result_queues, shared_input_buffer, shared_policy_buffer, shared_value_buffer, shared_mlh_buffer,
+        inference_queue, result_queues, shared_input_buffer, shared_policy_buffer, shared_value_buffer,
         buffer_free_slots, completed_games_queue, init_games + 1, current_step
     );
 
@@ -258,7 +255,7 @@ int main(int argc, char* argv[]) {
         lmdb_env, config["global"]["min_buffer_size"].as<size_t>(), config["global"]["max_buffer_size"].as<size_t>(),
         config["global"]["buffer_ramp_steps"].as<int>(), io_write_cores, train_dir, flush_threshold,
         config["data_generation"]["io_logging_level"].as<int>(), rot_interval, 
-        ModelConfig{input_planes, board_dim, policy_moves, mlh_scale}, completed_games_queue,
+        ModelConfig{input_planes, board_dim, policy_moves}, completed_games_queue,
         current_step, atomic_write_head, atomic_buffer_count, atomic_buffer_wraps,
         init_games, init_samples, init_entropy
     );

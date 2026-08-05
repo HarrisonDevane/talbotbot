@@ -124,27 +124,9 @@ void IOWriter::run() {
                     size_t chunk_size = std::min(samples_to_write, available_in_game);
 
                     for (size_t i = 0; i < chunk_size; ++i) {
-                        // Absolute index of this transition within its game (0-based).
-                        // Reused both to fetch the transition and to derive the
-                        // moves-left target below. g.transitions.size() is the full,
-                        // final game length -- games are never mutated while at the
-                        // front of game_buffer, so this is stable across flushes.
-                        size_t global_idx = current_game_transition_idx + i;
-                        const auto& transition = g.transitions[global_idx];
+                        const auto& transition = g.transitions[current_game_transition_idx + i];
                         double value_target = (transition.turn == chess::Color::WHITE) ? g.final_game_value : -g.final_game_value;
-
-                        // Moves-Left Head (MLH) target, Leela-style.
-                        // Raw plies remaining, L - p convention: first move of the
-                        // game carries the full length, last move carries 1.
-                        // Normalized by model_config.mlh_scale and stored as fp16 to
-                        // match (a) the value target's fp16 encoding and (b) the Python
-                        // prefetcher, which reads these 2 trailing bytes directly as
-                        // float16 and feeds them to the MLH loss with NO further scaling.
-                        // mlh_scale MUST equal the scale trainer.py logging and the C++
-                        // inference consumer use.
-                        float plies_left = static_cast<float>(g.transitions.size() - global_idx);
-                        uint16_t mlh_target_fp16 = c10::Half(plies_left / static_cast<float>(model_config.mlh_scale)).x;
-
+                        
                         // Clear dynamic arrays (preserves capacity)
                         indices.clear();
                         values_fp16.clear();
@@ -174,11 +156,6 @@ void IOWriter::run() {
                         append_bytes(indices.data(), indices.size() * sizeof(uint16_t));
                         append_bytes(values_fp16.data(), values_fp16.size() * sizeof(uint16_t));
                         append_bytes(&target_fp16, sizeof(target_fp16));
-                        // MLH target, always the final field. Trailing placement keeps
-                        // every existing field's offset unchanged; the prefetcher's
-                        // guarded read (length check) already handles this 2-byte fp16
-                        // tail, so no Python decoder change is required.
-                        append_bytes(&mlh_target_fp16, sizeof(mlh_target_fp16));
 
                         size_t max_dst_size = ZSTD_compressBound(raw_payload.size());
                         if (compressed_buf.size() < max_dst_size) {

@@ -25,9 +25,6 @@ struct MCTSNode {
     double raw_d = 0.0;
     double raw_l = 0.0;
 
-    double raw_mlh = 0.0;
-    double mlh_sum = 0.0;
-
     double gumbel_noise = 0.0;
     double gumbel_score = 0.0;
     
@@ -42,7 +39,6 @@ struct MCTSNode {
     MCTSNode* get_child(chess::Move m) const;
     
     double expected_value(double contempt) const;
-    double calculate_gumbel_score(double contempt, double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix,
-                                  double min_sibling_mlh, double mlh_lambda, double mlh_gate_start, double mlh_gate_full);
+    double calculate_gumbel_score(double contempt, double gumbel_c_visit, double gumbel_c_scale, double max_visits, double v_mix);
     double calculate_v_mix(double contempt) const;
 };

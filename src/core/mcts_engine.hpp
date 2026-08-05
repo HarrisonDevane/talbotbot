@@ -17,7 +17,6 @@ struct ModelConfig {
     int input_planes;
     int board_dim;
     int policy_moves;
-    int mlh_scale;
 };
 
 template <typename T>
@@ -99,10 +98,6 @@ public:
     double gumbel_c_visit;
     double gumbel_c_scale;
     double gumbel_noise;
-    double mlh_scale;
-    double mlh_lambda;
-    double mlh_gate_start;
-    double mlh_gate_full;
     std::mt19937 rng;
 
     double time_selection = 0.0;
@@ -126,7 +121,6 @@ public:
     std::vector<torch::Tensor>& shared_input_buffer;
     std::vector<torch::Tensor>& shared_policy_buffer;
     std::vector<torch::Tensor>& shared_value_buffer;
-    std::vector<torch::Tensor>& shared_mlh_buffer;
 
     std::vector<MCTSNode*> in_flight_nodes;
     std::vector<std::pair<int, int>> batch_buffer;
@@ -151,17 +145,12 @@ public:
         double gumbel_c_visit, 
         double gumbel_c_scale, 
         double gumbel_noise,
-        double mlh_scale,
-        double mlh_lambda,
-        double mlh_gate_start,
-        double mlh_gate_full,
         const chess::Board& board, 
         const std::vector<chess::Board>& base_history,
         Logger& logger, 
         std::vector<torch::Tensor>& shared_input_buffer, 
         std::vector<torch::Tensor>& shared_policy_buffer, 
         std::vector<torch::Tensor>& shared_value_buffer, 
-        std::vector<torch::Tensor>& shared_mlh_buffer,
         ThreadSafeQueue<int>& buffer_free_slots,
         std::atomic<int>* core_wait_count,
         int workers_per_core,
@@ -191,7 +180,7 @@ private:
     void _wait_for_inference();
     MCTSNode* _select(MCTSNode* start_node, std::vector<MCTSNode*>& simulation_path);
     void _backpropagate_minimax(MCTSNode* node);
-    void _backpropagate(MCTSNode* node, double w, double d, double l, double mlh, bool is_terminal);
+    void _backpropagate(MCTSNode* node, double w, double d, double l, bool is_terminal);
     void _virtual_loss(MCTSNode* node, bool is_applying);
     
     void _mark_selected(MCTSNode* node);

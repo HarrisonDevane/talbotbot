@@ -15,22 +15,17 @@
 MCTSEngine::MCTSEngine(
     int node_pool_capacity, int worker_batch_size, moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue, 
     ThreadSafeQueue<std::vector<int>>& result_queue, int worker_id, double deficit_eps, double virtual_loss, double contempt,
-    double draw_cutoff, double gumbel_c_visit, double gumbel_c_scale, double gumbel_noise, double mlh_scale,
-    double mlh_lambda, double mlh_gate_start, double mlh_gate_full,
+    double draw_cutoff, double gumbel_c_visit, double gumbel_c_scale, double gumbel_noise,
     const chess::Board& board, const std::vector<chess::Board>& base_history, Logger& logger, 
     std::vector<torch::Tensor>& shared_input_buffer, std::vector<torch::Tensor>& shared_policy_buffer, std::vector<torch::Tensor>& shared_value_buffer,
-    std::vector<torch::Tensor>& shared_mlh_buffer,
     ThreadSafeQueue<int>& buffer_free_slots, std::atomic<int>* core_wait_count, int workers_per_core,
     bool use_tablebase
 ) : worker_batch_size(worker_batch_size), worker_id(worker_id), virtual_loss(virtual_loss), deficit_eps(deficit_eps), contempt(contempt),
-    draw_cutoff(draw_cutoff), gumbel_c_visit(gumbel_c_visit), gumbel_c_scale(gumbel_c_scale),
-    gumbel_noise(gumbel_noise), mlh_scale(mlh_scale),
-    mlh_lambda(mlh_lambda), mlh_gate_start(mlh_gate_start), mlh_gate_full(mlh_gate_full),
-    root_board(board), base_history(base_history), 
+    draw_cutoff(draw_cutoff), gumbel_c_visit(gumbel_c_visit), gumbel_c_scale(gumbel_c_scale), 
+    gumbel_noise(gumbel_noise), root_board(board), base_history(base_history), 
     node_pool(node_pool_capacity), logger(logger), inference_queue(inference_queue), result_queue(result_queue), 
     buffer_free_slots(buffer_free_slots), shared_input_buffer(shared_input_buffer), 
     shared_policy_buffer(shared_policy_buffer), shared_value_buffer(shared_value_buffer),
-    shared_mlh_buffer(shared_mlh_buffer),
     core_wait_count(core_wait_count), workers_per_core(workers_per_core), use_tablebase(use_tablebase)
 {
     torch::set_num_threads(1);
@@ -99,7 +94,6 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
         double best_deficit = -1e20;
         double max_visits = 0.0;
         double sum_visits = 0.0;
-        double min_sibling_mlh = 1e18;   // fastest-finishing sibling (mean moves-left)
         int num_children = node->num_children;
 
         for (int i = 0; i < num_children; ++i) {
@@ -107,10 +101,6 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
             if (child->forced_outcome.has_value() || child->unavailable_for_selection) continue;
             if (child->visits > max_visits) max_visits = child->visits;
             sum_visits += child->visits;
-            if (child->visits > 0) {
-                double cm = child->mlh_sum / child->visits;
-                if (cm < min_sibling_mlh) min_sibling_mlh = cm;
-            }
         }
 
         double v_mix = node->calculate_v_mix(contempt);
@@ -120,8 +110,7 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
             if (child->forced_outcome.has_value() || child->unavailable_for_selection) continue;
-            double score = child->calculate_gumbel_score(contempt, gumbel_c_visit, gumbel_c_scale, max_visits, v_mix,
-                                                          min_sibling_mlh, mlh_lambda, mlh_gate_start, mlh_gate_full);
+            double score = child->calculate_gumbel_score(contempt, gumbel_c_visit, gumbel_c_scale, max_visits, v_mix);
             if (score > max_score_logit) max_score_logit = score;
             if (child->raw_logit > max_raw_logit) max_raw_logit = child->raw_logit;
         }
@@ -249,9 +238,6 @@ void MCTSEngine::_retrieve_inference(bool block) {
             float p_draw = (float)wdl_ptr[1];
             float p_loss = (float)wdl_ptr[2];
 
-            c10::Half* mlh_ptr = shared_mlh_buffer[buffer_index].data_ptr<c10::Half>();
-            float mlh_val = (float)mlh_ptr[0];   // normalized plies (plies / mlh_scale)
-
             buffer_free_slots.push(buffer_index);
 
             if (node != nullptr) {
@@ -264,7 +250,7 @@ void MCTSEngine::_retrieve_inference(bool block) {
                     node->expanded = true;
                     time_expansion += ELAPSED(exp_start, NOW());
                 }
-                _backpropagate(node, p_win, p_draw, p_loss, mlh_val, false);
+                _backpropagate(node, p_win, p_draw, p_loss, false);
             }
         }
     }
@@ -309,7 +295,7 @@ void MCTSEngine::_handle_terminal_node(MCTSNode* leaf) {
     _mark_selected(leaf);
     time_expansion += ELAPSED(start_time, NOW());
     
-    _backpropagate(leaf, w, d, l, 0.0, true);
+    _backpropagate(leaf, w, d, l, true);
     simulation_count++;
 }
 
@@ -390,7 +376,7 @@ bool MCTSEngine::_try_tablebase(MCTSNode* leaf) {
     }
 
     _mark_selected(leaf);
-    _backpropagate(leaf, w, d, l, 0.0, true);
+    _backpropagate(leaf, w, d, l, true);
     simulation_count++;
     return true;
 }
@@ -526,6 +512,10 @@ bool MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
             break;
         }
 
+        // Exact endgame via Syzygy WDL (UCI only; use_tablebase is false in
+        // self-play/tournament). Runs only on non-terminal positions, so the
+        // probe never sees mate/stalemate/50-move/repetition. On a hit the leaf
+        // is resolved as a proven terminal -- no NN inference is queued.
         if (use_tablebase && _try_tablebase(leaf)) {
             completed = true;
             break;
@@ -573,14 +563,12 @@ void MCTSEngine::_log_tournament_results(const std::vector<MCTSNode*>& candidate
     if (logger.get_level() > 20) return;
 
     double root_v_mix = root->calculate_v_mix(contempt);
-    double root_mean_ml = (root->visits > 0) ? (root->mlh_sum / root->visits) * mlh_scale : 0.0;
 
     logger.log("INFO", "");
     logger.log("INFO", "--- " + phase_name + " ---");
 
     std::stringstream rss;
-    rss << "Tree Stats: Root v_mix=" << std::fixed << std::setprecision(4) << root_v_mix
-        << " | Root avg ML=" << std::setprecision(1) << root_mean_ml << " plies";
+    rss << "Tree Stats: Root v_mix=" << std::fixed << std::setprecision(4) << root_v_mix;
     logger.log("INFO", rss.str());
 
     // Budget accounting: only print when the caller supplied it (defaults = -1).
@@ -601,10 +589,10 @@ void MCTSEngine::_log_tournament_results(const std::vector<MCTSNode*>& candidate
 
     char table_header[256];
     snprintf(table_header, sizeof(table_header),
-        "%-8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s",
-        "Move", "Logit", "Visits", "Win%", "Draw%", "Loss%", "Norm Q", "Score", "Outcome", "DTM", "ML");
+        "%-8s %8s %8s %8s %8s %8s %8s %8s %8s %8s",
+        "Move", "Logit", "Visits", "Win%", "Draw%", "Loss%", "Norm Q", "Score", "Outcome", "DTM");
     logger.log("INFO", table_header);
-    logger.log("INFO", std::string(104, '-'));
+    logger.log("INFO", std::string(95, '-'));
 
     std::vector<MCTSNode*> sorted_cands = candidates;
     std::sort(sorted_cands.begin(), sorted_cands.end(), [](MCTSNode* a, MCTSNode* b) {
@@ -624,16 +612,14 @@ void MCTSEngine::_log_tournament_results(const std::vector<MCTSNode*>& candidate
         double q_val = (node->visits > 0) ? -node->expected_value(contempt) : root_v_mix;
         double q_norm = (q_val + 1.0) / 2.0;
 
-        double node_ml = ((node->visits > 0) ? (node->mlh_sum / node->visits) : node->raw_mlh) * mlh_scale;
-
         snprintf(line, sizeof(line),
-            "%-8s %8.4f %8d %8.1f %8.1f %8.1f %8.4f %8.4f %8s %8s %8.1f",
+            "%-8s %8.4f %8d %8.1f %8.1f %8.1f %8.4f %8.4f %8s %8s",
             chess::uci::moveToUci(node->move).c_str(), node->raw_logit, node->visits,
-            w_pct, d_pct, l_pct, q_norm, node->gumbel_score, outcome_str.c_str(), dtm_str.c_str(), node_ml);
+            w_pct, d_pct, l_pct, q_norm, node->gumbel_score, outcome_str.c_str(), dtm_str.c_str());
         logger.log("INFO", line);
     }
 
-    logger.log("INFO", std::string(104, '-'));
+    logger.log("INFO", std::string(95, '-'));
     logger.log("INFO", "");
 }
 
@@ -821,18 +807,12 @@ void MCTSEngine::_run_round0(std::vector<MCTSNode*>& active_candidates, int& rem
 // Used both per-phase (active set) and for final scoring (all root children).
 void MCTSEngine::_rescore(std::vector<MCTSNode*>& nodes) {
     double max_visits = 1.0;
-    double min_sibling_mlh = 1e18;
     for (MCTSNode* child : nodes) {
         if (child->visits > max_visits) max_visits = child->visits;
-        if (child->visits > 0) {
-            double cm = child->mlh_sum / child->visits;
-            if (cm < min_sibling_mlh) min_sibling_mlh = cm;
-        }
     }
     double root_v_mix = root->calculate_v_mix(contempt);
     for (MCTSNode* child : nodes) {
-        child->calculate_gumbel_score(contempt, gumbel_c_visit, gumbel_c_scale, max_visits, root_v_mix,
-                                      min_sibling_mlh, mlh_lambda, mlh_gate_start, mlh_gate_full);
+        child->calculate_gumbel_score(contempt, gumbel_c_visit, gumbel_c_scale, max_visits, root_v_mix);
     }
 }
 
@@ -1188,7 +1168,7 @@ void MCTSEngine::_backpropagate_minimax(MCTSNode* node) {
     }
 }
 
-void MCTSEngine::_backpropagate(MCTSNode* node, double w, double d, double l, double mlh, bool is_terminal) {
+void MCTSEngine::_backpropagate(MCTSNode* node, double w, double d, double l, bool is_terminal) {
     auto start_time = NOW();
     
     if (is_terminal) {
@@ -1203,7 +1183,6 @@ void MCTSEngine::_backpropagate(MCTSNode* node, double w, double d, double l, do
     current_node->raw_w = w;
     current_node->raw_d = d;
     current_node->raw_l = l;
-    current_node->raw_mlh = mlh;
 
     double current_w = w;
     double current_d = d;
@@ -1218,7 +1197,6 @@ void MCTSEngine::_backpropagate(MCTSNode* node, double w, double d, double l, do
         current_node->w_sum += current_w;
         current_node->d_sum += current_d;
         current_node->l_sum += current_l;
-        current_node->mlh_sum += mlh;   // moves-left is a magnitude: no perspective flip
 
         // if (logger.get_level() <= 10) {
         //     logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " updated WDL sums: " + std::to_string(current_node->w_sum) + "/" + std::to_string(current_node->d_sum) + "/" + std::to_string(current_node->l_sum));
