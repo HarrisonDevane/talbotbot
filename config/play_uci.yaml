@@ -17,11 +17,11 @@ inference:
   logging_level: 20                                               # Logging level for the Batcher Diagnostics
 
 mcts:
-  node_pool_size: 10000000                                        # Capacity of the persistent MCTS node pool
+  node_pool_size: 100000000                                        # Capacity of the persistent MCTS node pool
   worker_minibatch_size: 64                                       # Max positions sent to batcher at once
   virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored
   contempt: 0.0                                                  # Contempt for playing drawing positions
-  deficit_eps: 0.1
+  deficit_eps: 0.2
   gumbel_c_visit: 50.0                                            # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                             # Scale for sigma with visit count
   gumbel_noise: 0.0                                               # 0.0 for deterministic tournament play

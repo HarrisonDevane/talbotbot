@@ -284,7 +284,7 @@ void MCTSEngine::_handle_terminal_node(MCTSNode* leaf) {
     if (result.second == chess::GameResult::LOSE) {
         l = 1.0; 
         term_type = "Loss (Mate)";
-    } else if (result.second == chess::GameResult::DRAW || root_board.isRepetition(1)) {
+    } else if (result.second == chess::GameResult::DRAW || root_board.isRepetition(2)) {
         d = 1.0;
     }
 
@@ -506,7 +506,7 @@ bool MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
             }
         }
 
-        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(1)) {
+        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(2)) {
             _handle_terminal_node(leaf);
             completed = true;
             break;
@@ -749,7 +749,7 @@ int MCTSEngine::_build_candidates(int max_m, std::vector<MCTSNode*>& all_nodes,
         child->gumbel_score = child->gumbel_noise + child->raw_logit;
 
         root_board.makeMove(child->move);
-        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(1)) {
+        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(2)) {
             _handle_terminal_node(child);
         } else {
             active_candidates.push_back(child);
@@ -785,7 +785,7 @@ void MCTSEngine::_run_round0(std::vector<MCTSNode*>& active_candidates, int& rem
     for (MCTSNode* child : active_candidates) {
         remaining_search_depth -= 1;
         root_board.makeMove(child->move);
-        if (root_board.isGameOver().second == chess::GameResult::NONE && !root_board.isRepetition(1)) {
+        if (root_board.isGameOver().second == chess::GameResult::NONE && !root_board.isRepetition(2)) {
             // Syzygy probe for root children. Round 0 queues candidates directly,
             // bypassing _run_single_async_simulation -- without this check, depth-1
             // leaves are never probed and TB-provable root moves get NN draw evals.
