@@ -32,7 +32,8 @@ mcts:
   worker_minibatch_size: 16                                       # Max positions a single worker sends at once
   virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored (prevents threads flocking)
   contempt: 0.0                                                   # Contempt for playing drawing positions
-  deficit_eps: 0.0
+  cpuct: 0.0
+  two_fold_repetition: False
   gumbel_c_visit: 50.0                                            # Sigma used for gumbel score calculation
   gumbel_c_scale: 1.0                                             # Scale for sigma with visit count
   gumbel_noise: 1.0                                               # Gumbel noise value

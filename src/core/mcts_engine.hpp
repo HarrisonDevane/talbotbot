@@ -88,7 +88,8 @@ class MCTSEngine {
 public:
     int worker_batch_size;
     int worker_id;
-    double deficit_eps;
+    bool two_fold_repetition;
+    double cpuct;
     double virtual_loss;
     double contempt;
     double draw_cutoff;
@@ -138,7 +139,7 @@ public:
         moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue,
         ThreadSafeQueue<std::vector<int>>& result_queue, 
         int worker_id, 
-        double deficit_eps,
+        double cpuct,
         double virtual_loss,
         double contempt,
         double draw_cutoff, 
@@ -154,6 +155,7 @@ public:
         ThreadSafeQueue<int>& buffer_free_slots,
         std::atomic<int>* core_wait_count,
         int workers_per_core,
+        bool two_fold_repetition,
         bool use_tablebase = false
     );
 

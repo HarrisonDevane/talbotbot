@@ -11,7 +11,7 @@
 struct ActionSelectorConfig {
     int node_pool_size;
     double contempt;
-    double deficit_eps;
+    double cpuct;
     double virtual_loss;
     double draw_cutoff;
     double gumbel_c_visit;
@@ -26,6 +26,7 @@ struct ActionSelectorConfig {
     double resignation_probability;
     double resignation_cutoff;
     int batch_size_per_worker;
+    bool two_fold_repetition;
 };
 
 struct SelectionResult {

@@ -33,28 +33,28 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
 
     std::vector<MCTSNode*> winning_nodes, losing_nodes, draw_nodes, non_forced_visited;
     for (MCTSNode* child : all_children) {
-        if (child->forced_outcome.has_value()) {
-            if (child->forced_outcome.value() == -1) winning_nodes.push_back(child);
-            else if (child->forced_outcome.value() == 1) losing_nodes.push_back(child);
+        if (child->has_forced_outcome()) {
+            if (child->forced_outcome == -1) winning_nodes.push_back(child);
+            else if (child->forced_outcome == 1) losing_nodes.push_back(child);
             else draw_nodes.push_back(child);
         } else {
             // Check if the opponent's best response to this move is a forced draw.
             // If so, this move's true value is a draw regardless of its Q.
             bool is_practical_draw = false;
-            if (child->expanded && child->num_children > 0) {
+            if (child->is_expanded() && child->num_children > 0) {
                 MCTSNode* best_grandchild = nullptr;
                 double best_gq = -2.0;
                 for (int i = 0; i < child->num_children; ++i) {
                     MCTSNode* gc = child->first_child + i;
                     // Skip grandchildren that are proven wins for us (opponent avoids them)
-                    if (gc->forced_outcome.has_value() && gc->forced_outcome.value() == -1) continue;
+                    if (gc->has_forced_outcome() && gc->forced_outcome == -1) continue;
                     if (gc->visits == 0) continue;
                     double gq = -gc->expected_value(config.contempt);  // opponent's perspective
                     if (gq > best_gq) { best_gq = gq; best_grandchild = gc; }
                 }
                 if (best_grandchild != nullptr &&
-                    best_grandchild->forced_outcome.has_value() &&
-                    best_grandchild->forced_outcome.value() == 0) {
+                    best_grandchild->has_forced_outcome() &&
+                    best_grandchild->forced_outcome == 0) {
                     is_practical_draw = true;
                 }
             }
@@ -87,9 +87,9 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
     // Rule A: Win
     if (!winning_nodes.empty()) {
         int min_dtm = 999999;
-        for (MCTSNode* c : winning_nodes) if (c->distance_to_mate.value() < min_dtm) min_dtm = c->distance_to_mate.value();
+        for (MCTSNode* c : winning_nodes) if (c->distance_to_mate < min_dtm) min_dtm = c->distance_to_mate;
         std::vector<chess::Move> best_moves;
-        for (MCTSNode* c : winning_nodes) if (c->distance_to_mate.value() == min_dtm) best_moves.push_back(c->move);
+        for (MCTSNode* c : winning_nodes) if (c->distance_to_mate == min_dtm) best_moves.push_back(c->move);
         
         std::uniform_int_distribution<> dist(0, best_moves.size() - 1);
         result.best_move = best_moves[dist(rng)];
@@ -208,7 +208,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
         if (!losing_nodes.empty()) {
             MCTSNode* best_delay = losing_nodes[0];
             for (MCTSNode* c : losing_nodes) {
-                if (c->distance_to_mate.value() > best_delay->distance_to_mate.value()) best_delay = c;
+                if (c->distance_to_mate > best_delay->distance_to_mate) best_delay = c;
             }
             result.best_move = best_delay->move;
         // Should never be reached
@@ -218,5 +218,6 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
         }
     }
 
+    logger.log("INFO", "Move selected: " + chess::uci::moveToUci(result.best_move));
     return result;
 }

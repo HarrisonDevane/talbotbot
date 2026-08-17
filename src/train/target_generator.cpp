@@ -57,10 +57,10 @@ TargetResult TargetGenerator::generate_targets(
         MCTSNode* c = all_children[i];
 
         double q;
-        if (c->forced_outcome.has_value()) {
+        if (c->has_forced_outcome()) {
             // Proven subtree: exact value, no shrinkage, visits irrelevant.
             // forced_outcome is from the child's perspective; negate for ours.
-            int fo = c->forced_outcome.value();
+            int fo = c->forced_outcome;
             if      (fo == -1) q =  1.0;              // proven win for us
             else if (fo ==  1) q = -1.0;              // proven loss
             else               q =  config.contempt;  // proven draw

@@ -48,7 +48,8 @@ DataGenerator::DataGenerator(
     selector_config.batch_size_per_worker = mcts_cfg["worker_minibatch_size"].as<int>();
     selector_config.virtual_loss = mcts_cfg["virtual_loss"].as<double>();
     selector_config.contempt = mcts_cfg["contempt"].as<double>();
-    selector_config.deficit_eps = mcts_cfg["deficit_eps"].as<double>();
+    selector_config.cpuct = mcts_cfg["cpuct"].as<double>();
+    selector_config.two_fold_repetition = mcts_cfg["two_fold_repetition"].as<bool>();
     selector_config.gumbel_c_visit = mcts_cfg["gumbel_c_visit"].as<double>();
     selector_config.gumbel_c_scale = mcts_cfg["gumbel_c_scale"].as<double>();
     selector_config.gumbel_noise = mcts_cfg["gumbel_noise"].as<double>();
@@ -123,11 +124,12 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
     MCTSEngine mcts(
         selector_config.node_pool_size, selector_config.batch_size_per_worker, 
         inference_queue, result_queues[logical_idx], logical_idx,
-        selector_config.deficit_eps, selector_config.virtual_loss, selector_config.contempt,
+        selector_config.cpuct, selector_config.virtual_loss, selector_config.contempt,
         selector_config.draw_cutoff, selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
         selector_config.gumbel_noise, dummy, std::vector<chess::Board>(), logger,
         shared_input_buffer, shared_policy_buffer, shared_value_buffer,
-        buffer_free_slots, core_wait_count, config.workers_per_core
+        buffer_free_slots, core_wait_count, config.workers_per_core,
+        selector_config.two_fold_repetition, false
     );
 
     ActionSelector agent("worker_" + std::to_string(worker_id), logical_idx, selector_config, logger);

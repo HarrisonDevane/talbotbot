@@ -14,19 +14,20 @@
 
 MCTSEngine::MCTSEngine(
     int node_pool_capacity, int worker_batch_size, moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue, 
-    ThreadSafeQueue<std::vector<int>>& result_queue, int worker_id, double deficit_eps, double virtual_loss, double contempt,
+    ThreadSafeQueue<std::vector<int>>& result_queue, int worker_id, double cpuct, double virtual_loss, double contempt,
     double draw_cutoff, double gumbel_c_visit, double gumbel_c_scale, double gumbel_noise,
     const chess::Board& board, const std::vector<chess::Board>& base_history, Logger& logger, 
     std::vector<torch::Tensor>& shared_input_buffer, std::vector<torch::Tensor>& shared_policy_buffer, std::vector<torch::Tensor>& shared_value_buffer,
     ThreadSafeQueue<int>& buffer_free_slots, std::atomic<int>* core_wait_count, int workers_per_core,
-    bool use_tablebase
-) : worker_batch_size(worker_batch_size), worker_id(worker_id), virtual_loss(virtual_loss), deficit_eps(deficit_eps), contempt(contempt),
+    bool two_fold_repetition, bool use_tablebase
+
+) : worker_batch_size(worker_batch_size), worker_id(worker_id), virtual_loss(virtual_loss), cpuct(cpuct), contempt(contempt),
     draw_cutoff(draw_cutoff), gumbel_c_visit(gumbel_c_visit), gumbel_c_scale(gumbel_c_scale), 
     gumbel_noise(gumbel_noise), root_board(board), base_history(base_history), 
     node_pool(node_pool_capacity), logger(logger), inference_queue(inference_queue), result_queue(result_queue), 
     buffer_free_slots(buffer_free_slots), shared_input_buffer(shared_input_buffer), 
     shared_policy_buffer(shared_policy_buffer), shared_value_buffer(shared_value_buffer),
-    core_wait_count(core_wait_count), workers_per_core(workers_per_core), use_tablebase(use_tablebase)
+    core_wait_count(core_wait_count), workers_per_core(workers_per_core), two_fold_repetition(two_fold_repetition), use_tablebase(use_tablebase)
 {
     torch::set_num_threads(1);
 
@@ -85,69 +86,114 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
     auto start_time = NOW();
     MCTSNode* node = start_node;
     double exp_cache[256];
-    double prior_cache[256];
+
+    // cpuct == 0.0 -> deficit-Gumbel path (training / legacy)
+    // cpuct >  0.0 -> PUCT path (inference)
 
     while (true) {
-        if (node->num_children == 0 || !node->expanded || node->unavailable_for_selection || node->forced_outcome.has_value()) break;
+        if (node->num_children == 0 || !node->is_expanded() ||
+            node->is_unavailable() || node->has_forced_outcome()) break;
 
-        MCTSNode* best_child = nullptr;
-        double best_deficit = -1e20;
-        double max_visits = 0.0;
-        double sum_visits = 0.0;
-        int num_children = node->num_children;
+        // ---- PUCT branch ------------------------------------------------------
+        if (cpuct > 0.0) {
+            int num_children = node->num_children;
+            double sum_visits_p = 0.0;
+            double max_logit    = -1e20;
+            for (int i = 0; i < num_children; ++i) {
+                MCTSNode* child = node->first_child + i;
+                if (child->has_forced_outcome() || child->is_unavailable()) continue;
+                sum_visits_p += child->visits;
+                if (child->raw_logit > max_logit) max_logit = child->raw_logit;
+            }
+
+            // Softmax priors over available children.
+            double sum_exp = 0.0;
+            for (int i = 0; i < num_children; ++i) {
+                MCTSNode* child = node->first_child + i;
+                if (child->has_forced_outcome() || child->is_unavailable()) {
+                    exp_cache[i] = 0.0;
+                    continue;
+                }
+                exp_cache[i] = std::exp(child->raw_logit - max_logit);
+                sum_exp += exp_cache[i];
+            }
+
+            double v_mix_p     = node->calculate_v_mix(contempt);
+            double sqrt_sum    = std::sqrt(std::max(0.0, sum_visits_p));
+            double inv_sum_exp = 1.0 / sum_exp;
+
+            MCTSNode* best_child_p = nullptr;
+            double best_ucb = -1e20;
+            for (int i = 0; i < num_children; ++i) {
+                MCTSNode* child = node->first_child + i;
+                if (exp_cache[i] == 0.0) continue;
+                double prior = exp_cache[i] * inv_sum_exp;
+                double q     = (child->visits > 0) ? -child->expected_value(contempt) : v_mix_p;
+                double u     = cpuct * prior * sqrt_sum / (1.0 + child->visits);
+                double ucb   = q + u;
+                if (ucb > best_ucb) {
+                    best_ucb     = ucb;
+                    best_child_p = child;
+                }
+            }
+
+            if (best_child_p == nullptr) break;
+            root_board.makeMove(best_child_p->move);
+            simulation_path.push_back(best_child_p);
+            node = best_child_p;
+            continue;
+        }
+        // ---- end PUCT branch --------------------------------------------------
+
+        // ---- Deficit-Gumbel branch (cpuct == 0) -----------------------------
+        MCTSNode* best_child   = nullptr;
+        double    best_deficit = -1e20;
+        double    max_visits   = 0.0;
+        double    sum_visits   = 0.0;
+        int       num_children = node->num_children;
 
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
-            if (child->forced_outcome.has_value() || child->unavailable_for_selection) continue;
+            if (child->has_forced_outcome() || child->is_unavailable()) continue;
             if (child->visits > max_visits) max_visits = child->visits;
             sum_visits += child->visits;
         }
 
-        double v_mix = node->calculate_v_mix(contempt);
+        double v_mix           = node->calculate_v_mix(contempt);
         double max_score_logit = -1e20;
-        double max_raw_logit   = -1e20;
 
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
-            if (child->forced_outcome.has_value() || child->unavailable_for_selection) continue;
-            double score = child->calculate_gumbel_score(contempt, gumbel_c_visit, gumbel_c_scale, max_visits, v_mix);
+            if (child->has_forced_outcome() || child->is_unavailable()) continue;
+            double score = child->calculate_gumbel_score(contempt, gumbel_c_visit,
+                                                         gumbel_c_scale, max_visits, v_mix);
             if (score > max_score_logit) max_score_logit = score;
-            if (child->raw_logit > max_raw_logit) max_raw_logit = child->raw_logit;
         }
 
         double sum_score_exp = 0.0;
-        double sum_prior_exp = 0.0;
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
-            if (child->forced_outcome.has_value() || child->unavailable_for_selection) {
+            if (child->has_forced_outcome() || child->is_unavailable()) {
                 exp_cache[i] = 0.0;
-                prior_cache[i] = 0.0;
                 continue;
             }
             exp_cache[i] = std::exp(child->gumbel_score - max_score_logit);
             sum_score_exp += exp_cache[i];
-
-            prior_cache[i] = std::exp(child->raw_logit - max_raw_logit);
-            sum_prior_exp += prior_cache[i];
         }
 
         double inv_sum_visits = 1.0 / (1.0 + sum_visits);
+        double inv_sum_score  = 1.0 / sum_score_exp;
         for (int i = 0; i < num_children; ++i) {
             MCTSNode* child = node->first_child + i;
             if (exp_cache[i] == 0.0) continue;
 
-            // Deficit target: gumbel-score policy, floored with an eps share of
-            // the raw prior so a low-prior move can never be permanently locked
-            // out when sigma drives the gumbel softmax to one-hot.
-            double pi_prime = (1.0 - deficit_eps) * (exp_cache[i] / sum_score_exp)
-                            +        deficit_eps  * (prior_cache[i] / sum_prior_exp);
-
+            double pi_prime     = exp_cache[i] * inv_sum_score;
             double child_n_norm = child->visits * inv_sum_visits;
-            double deficit = pi_prime - child_n_norm;
+            double deficit      = pi_prime - child_n_norm;
 
             if (deficit > best_deficit) {
                 best_deficit = deficit;
-                best_child = child;
+                best_child   = child;
             }
         }
 
@@ -163,13 +209,13 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSNode*>& simu
 
 void MCTSEngine::_mark_selected(MCTSNode* node) {
     MCTSNode* current_node = node;
-    current_node->unavailable_for_selection = true;
+    current_node->set_unavailable(true);
     MCTSNode* parent = current_node->parent;
 
     while (parent != nullptr) {
         parent->num_available_children -= 1;
         if (parent->num_available_children > 0) break;
-        parent->unavailable_for_selection = true;
+        parent->set_unavailable(true);
         current_node = parent;
         parent = current_node->parent;
     }
@@ -177,13 +223,13 @@ void MCTSEngine::_mark_selected(MCTSNode* node) {
 
 void MCTSEngine::_unmark_selected(MCTSNode* node) {
     MCTSNode* current_node = node;
-    current_node->unavailable_for_selection = false;
+    current_node->set_unavailable(false);
     MCTSNode* parent = current_node->parent;
 
     while (parent != nullptr) {
         parent->num_available_children += 1;
         if (parent->num_available_children == 1) {
-            parent->unavailable_for_selection = false;
+            parent->set_unavailable(false);
             current_node = parent;
             parent = current_node->parent;
         } else break;
@@ -223,9 +269,9 @@ void MCTSEngine::_retrieve_inference(bool block) {
             if (!result_queue.try_pop(completed_indices)) break;
         }
 
-        // if (logger.get_level() <= 10) {
-        //     logger.log("DEBUG", "Received " + std::to_string(completed_indices.size()) + " inferences from batcher.");
-        // }
+        if (logger.get_level() <= 10) {
+            logger.log("DEBUG", "Received " + std::to_string(completed_indices.size()) + " inferences from batcher.");
+        }
 
         for (int buffer_index : completed_indices) {
             MCTSNode* node = in_flight_nodes[buffer_index];
@@ -241,13 +287,13 @@ void MCTSEngine::_retrieve_inference(bool block) {
             buffer_free_slots.push(buffer_index);
 
             if (node != nullptr) {
-                if (!node->expanded) {
+                if (!node->is_expanded()) {
                     auto exp_start = NOW();
                     for (int i = 0; i < node->num_children; ++i) {
                         MCTSNode* child = node->first_child + i;
                         child->raw_logit = policy_ptr[child->policy_flat_index];
                     }
-                    node->expanded = true;
+                    node->set_expanded(true);
                     time_expansion += ELAPSED(exp_start, NOW());
                 }
                 _backpropagate(node, p_win, p_draw, p_loss, false);
@@ -262,9 +308,9 @@ void MCTSEngine::_submit_batch() {
     int b_size = batch_buffer.size();
     if (b_size == 0) return;
 
-    // if (logger.get_level() <= 10) {
-    //     logger.log("DEBUG", "Submitting batch of " + std::to_string(b_size) + " states to inference queue.");
-    // }
+    if (logger.get_level() <= 10) {
+        logger.log("DEBUG", "Submitting batch of " + std::to_string(b_size) + " states to inference queue.");
+    }
     
     inference_queue.enqueue_bulk(batch_buffer.data(), b_size);
     
@@ -284,13 +330,13 @@ void MCTSEngine::_handle_terminal_node(MCTSNode* leaf) {
     if (result.second == chess::GameResult::LOSE) {
         l = 1.0; 
         term_type = "Loss (Mate)";
-    } else if (result.second == chess::GameResult::DRAW || root_board.isRepetition(2)) {
+    } else if (result.second == chess::GameResult::DRAW || root_board.isRepetition(two_fold_repetition ? 1 : 2)) {
         d = 1.0;
     }
 
-    // if (logger.get_level() <= 10) {
-    //     logger.log("DEBUG", "Terminal node reached during search. Result: " + term_type);
-    // }
+    if (logger.get_level() <= 10) {
+        logger.log("DEBUG", "Terminal node reached during search. Result: " + term_type);
+    }
 
     _mark_selected(leaf);
     time_expansion += ELAPSED(start_time, NOW());
@@ -471,15 +517,15 @@ bool MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
             _submit_batch();
         }
 
-        if (start_node->unavailable_for_selection || buffer_free_slots.empty()) {
-            if (start_node->unavailable_for_selection) unavailable_continues++;
+        if (start_node->is_unavailable() || buffer_free_slots.empty()) {
+            if (start_node->is_unavailable()) unavailable_continues++;
             if (!batch_buffer.empty()) _submit_batch();
             if (inference_received >= inference_sent) {
                 // No-op exit: nothing was simulated and nothing is in flight for
                 // this worker. completed stays false; the caller must NOT charge
                 // budget for this call.
                 logger.log("WARNING", "No-op sim exit: unavailable=" +
-                           std::to_string(start_node->unavailable_for_selection) +
+                           std::to_string(start_node->is_unavailable()) +
                            " slots_empty=" + std::to_string(buffer_free_slots.empty()) +
                            " unavailable_continues=" + std::to_string(unavailable_continues) +
                            " select_unavailable_continues=" + std::to_string(select_unavailable_continues));
@@ -506,7 +552,7 @@ bool MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
             }
         }
 
-        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(2)) {
+        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(two_fold_repetition ? 1 : 2)) {
             _handle_terminal_node(leaf);
             completed = true;
             break;
@@ -521,7 +567,7 @@ bool MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
             break;
         }
 
-        if (leaf->expanded) {
+        if (leaf->is_expanded()) {
             logger.log("WARNING", "_select returned an already-expanded interior node (" +
                        chess::uci::moveToUci(leaf->move) + "); skipping re-queue.");
             while (simulation_path.size() > 1) {
@@ -534,7 +580,7 @@ bool MCTSEngine::_run_single_async_simulation(MCTSNode* start_node) {
             continue;
         }
 
-        if (start_node->unavailable_for_selection) {
+        if (start_node->is_unavailable()) {
             select_unavailable_continues++;
             while (simulation_path.size() > 1) {
                 root_board.unmakeMove(simulation_path.back()->move);
@@ -575,7 +621,7 @@ void MCTSEngine::_log_tournament_results(const std::vector<MCTSNode*>& candidate
     {
         int active = 0, forced = 0, total_visits = 0;
         for (MCTSNode* n : candidates) {
-            if (n->forced_outcome.has_value()) forced++; else active++;
+            if (n->has_forced_outcome()) forced++; else active++;
             total_visits += n->visits;
         }
         char bud[256];
@@ -602,8 +648,8 @@ void MCTSEngine::_log_tournament_results(const std::vector<MCTSNode*>& candidate
 
     for (MCTSNode* node : sorted_cands) {
         char line[512];
-        std::string outcome_str = node->forced_outcome.has_value() ? std::to_string(node->forced_outcome.value()) : "None";
-        std::string dtm_str = node->distance_to_mate.has_value() ? std::to_string(node->distance_to_mate.value()) : "None";
+        std::string outcome_str = node->has_forced_outcome() ? std::to_string(node->forced_outcome) : "None";
+        std::string dtm_str = node->has_forced_outcome() ? std::to_string(node->distance_to_mate) : "None";
 
         double w_pct = (node->visits > 0) ? (node->l_sum / node->visits) * 100.0 : node->raw_l * 100.0;
         double d_pct = (node->visits > 0) ? (node->d_sum / node->visits) * 100.0 : node->raw_d * 100.0;
@@ -662,18 +708,18 @@ void MCTSEngine::_log_node_by_path(const std::vector<std::string>& uci_path, int
     // THE diagnostic line: what the value head returned for THIS position.
     char head[512];
     double tgt_q_own = (node->visits > 0) ? node->expected_value(contempt) : ((node->raw_w - node->raw_l) + contempt * node->raw_d);
-    double tgt_vmix  = node->expanded ? node->calculate_v_mix(contempt) : 0.0;
+    double tgt_vmix  = node->is_expanded() ? node->calculate_v_mix(contempt) : 0.0;
     snprintf(head, sizeof(head),
         "TARGET raw network WDL (own mover persp): W=%.4f D=%.4f L=%.4f  -> raw_value(own)=%+.4f",
         node->raw_w, node->raw_d, node->raw_l, (node->raw_w - node->raw_l));
     logger.log("INFO", head);
     snprintf(head, sizeof(head),
         "TARGET visits=%d  expected_value(own)=%+.4f  v_mix(own)=%+.4f  logit=%.3f  expanded=%d  outcome=%s",
-        node->visits, tgt_q_own, tgt_vmix, node->raw_logit, node->expanded ? 1 : 0,
-        node->forced_outcome.has_value() ? std::to_string(node->forced_outcome.value()).c_str() : "None");
+        node->visits, tgt_q_own, tgt_vmix, node->raw_logit, node->is_expanded() ? 1 : 0,
+        node->has_forced_outcome() ? std::to_string(node->forced_outcome).c_str() : "None");
     logger.log("INFO", head);
 
-    if (!node->expanded || node->num_children == 0) {
+    if (!node->is_expanded() || node->num_children == 0) {
         logger.log("INFO", "  (target is a leaf / unexpanded -- no children)");
         logger.log("INFO", "=== end node-by-path dump ===");
         logger.log("INFO", "");
@@ -700,7 +746,7 @@ void MCTSEngine::_log_node_by_path(const std::vector<std::string>& uci_path, int
                                           : -((c->raw_w - c->raw_l) + contempt * c->raw_d);
         // child's own raw network value, in ITS mover perspective (opponent).
         double child_rawV = (c->raw_w - c->raw_l);
-        std::string oc = c->forced_outcome.has_value() ? std::to_string(c->forced_outcome.value()) : "None";
+        std::string oc = c->has_forced_outcome() ? std::to_string(c->forced_outcome) : "None";
         char line[512];
         snprintf(line, sizeof(line),
             "  %-8s %8.3f %8d %+10.4f %+10.4f %8s",
@@ -749,7 +795,7 @@ int MCTSEngine::_build_candidates(int max_m, std::vector<MCTSNode*>& all_nodes,
         child->gumbel_score = child->gumbel_noise + child->raw_logit;
 
         root_board.makeMove(child->move);
-        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(2)) {
+        if (root_board.isGameOver().second != chess::GameResult::NONE || root_board.isRepetition(two_fold_repetition ? 1 : 2)) {
             _handle_terminal_node(child);
         } else {
             active_candidates.push_back(child);
@@ -785,7 +831,7 @@ void MCTSEngine::_run_round0(std::vector<MCTSNode*>& active_candidates, int& rem
     for (MCTSNode* child : active_candidates) {
         remaining_search_depth -= 1;
         root_board.makeMove(child->move);
-        if (root_board.isGameOver().second == chess::GameResult::NONE && !root_board.isRepetition(2)) {
+        if (root_board.isGameOver().second == chess::GameResult::NONE && !root_board.isRepetition(two_fold_repetition ? 1 : 2)) {
             // Syzygy probe for root children. Round 0 queues candidates directly,
             // bypassing _run_single_async_simulation -- without this check, depth-1
             // leaves are never probed and TB-provable root moves get NN draw evals.
@@ -821,7 +867,7 @@ void MCTSEngine::_rescore(std::vector<MCTSNode*>& nodes) {
 void MCTSEngine::_halve(std::vector<MCTSNode*>& active_candidates) {
     active_candidates.erase(
         std::remove_if(active_candidates.begin(), active_candidates.end(),
-        [](MCTSNode* c) { return c->forced_outcome.has_value(); }),
+        [](MCTSNode* c) { return c->has_forced_outcome(); }),
         active_candidates.end()
     );
     if (active_candidates.size() > 1) {
@@ -879,7 +925,7 @@ int MCTSEngine::run_simulations_fixed(int search_depth, int max_m) {
             did_round0 = true;
             active_candidates.erase(
                 std::remove_if(active_candidates.begin(), active_candidates.end(),
-                    [](MCTSNode* c){ return c->forced_outcome.has_value(); }),
+                    [](MCTSNode* c){ return c->has_forced_outcome(); }),
                 active_candidates.end());
             num_cands = active_candidates.size();
             if (num_cands <= 1) break;
@@ -901,7 +947,7 @@ int MCTSEngine::run_simulations_fixed(int search_depth, int max_m) {
         while (current_phase_budget > 0 && num_cands > 0) {
             MCTSNode* child = active_candidates[active_idx];
 
-            if (child->forced_outcome.has_value()) {
+            if (child->has_forced_outcome()) {
                 active_candidates.erase(active_candidates.begin() + active_idx);
                 num_cands = active_candidates.size();
                 if (num_cands == 0) break;
@@ -1017,7 +1063,7 @@ int MCTSEngine::run_simulations_timed(int max_m,
             did_round0 = true;
             active_candidates.erase(
                 std::remove_if(active_candidates.begin(), active_candidates.end(),
-                    [](MCTSNode* c){ return c->forced_outcome.has_value(); }),
+                    [](MCTSNode* c){ return c->has_forced_outcome(); }),
                 active_candidates.end());
             num_cands = active_candidates.size();
             if (num_cands <= 1) break;
@@ -1040,7 +1086,7 @@ int MCTSEngine::run_simulations_timed(int max_m,
         while (current_phase_budget > 0 && num_cands > 0) {
             MCTSNode* child = active_candidates[active_idx];
 
-            if (child->forced_outcome.has_value()) {
+            if (child->has_forced_outcome()) {
                 active_candidates.erase(active_candidates.begin() + active_idx);
                 num_cands = active_candidates.size();
                 if (num_cands == 0) break;
@@ -1091,7 +1137,7 @@ int MCTSEngine::run_simulations_timed(int max_m,
 
     _rescore(all_nodes);
     _log_tournament_results(all_nodes, "Final scores");
-    _log_node_by_path({"e6g5"}, 20);
+    _log_node_by_path({"b3c2"}, 20);
 
     _flush_inflight();
     _record_nps(simulation_count, std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count());
@@ -1108,18 +1154,18 @@ void MCTSEngine::_backpropagate_minimax(MCTSNode* node) {
     bool all_children_proven = true;
     bool all_children_are_losses = true;
     
-    bool had_outcome = node->forced_outcome.has_value();
+    bool had_outcome = node->has_forced_outcome();
 
     for (int i = 0; i < node->num_children; ++i) {
         MCTSNode* child = node->first_child + i;
         
-        if (child->forced_outcome.has_value()) {
-            int outcome = child->forced_outcome.value();
+        if (child->has_forced_outcome()) {
+            int outcome = child->forced_outcome;
             
             // child outcome -1 means the child loses, so the current node wins
             if (outcome == -1) { 
                 has_winning_child = true;
-                if (child->distance_to_mate.value() < best_win_dtm) best_win_dtm = child->distance_to_mate.value();
+                if (child->distance_to_mate < best_win_dtm) best_win_dtm = child->distance_to_mate;
             } 
             // child outcome 0 is a draw
             else if (outcome == 0) {
@@ -1128,7 +1174,7 @@ void MCTSEngine::_backpropagate_minimax(MCTSNode* node) {
             } 
             // child outcome 1 means the child wins, so the current node loses
             else if (outcome == 1) { 
-                if (child->distance_to_mate.value() > worst_loss_dtm) worst_loss_dtm = child->distance_to_mate.value();
+                if (child->distance_to_mate > worst_loss_dtm) worst_loss_dtm = child->distance_to_mate;
             }
         } else {
             all_children_proven = false;
@@ -1139,7 +1185,7 @@ void MCTSEngine::_backpropagate_minimax(MCTSNode* node) {
     // Rule 1: We can win (a child loses) — take shortest mate
     if (has_winning_child) {
         node->forced_outcome = 1;
-        node->distance_to_mate = best_win_dtm + 1;
+        node->distance_to_mate = static_cast<int16_t>(best_win_dtm + 1);
     } 
     // Rule 2: All children fully proven
     else if (all_children_proven) {
@@ -1148,21 +1194,16 @@ void MCTSEngine::_backpropagate_minimax(MCTSNode* node) {
             node->distance_to_mate = 0; 
         } else if (all_children_are_losses) {
             node->forced_outcome = -1;
-            node->distance_to_mate = worst_loss_dtm + 1;
+            node->distance_to_mate = static_cast<int16_t>(worst_loss_dtm + 1);
         }
-    }
-    // Rule 3: Nothing conclusive
-    else {
-        node->forced_outcome = std::nullopt;
-        node->distance_to_mate = std::nullopt;
     }
 
     // If this node just became proven, remove from parent's available children
-    if ((!had_outcome && node->forced_outcome.has_value()) && node->parent != nullptr) {
-        if (!node->unavailable_for_selection) {
+    if ((!had_outcome && node->has_forced_outcome()) && node->parent != nullptr) {
+        if (!node->is_unavailable()) {
             node->parent->num_available_children -= 1;
             if (node->parent->num_available_children <= 0) {
-                node->parent->unavailable_for_selection = true;
+                node->parent->set_unavailable(true);
             }
         }
     }
@@ -1172,7 +1213,7 @@ void MCTSEngine::_backpropagate(MCTSNode* node, double w, double d, double l, bo
     auto start_time = NOW();
     
     if (is_terminal) {
-        node->forced_outcome = (w > 0.0) ? 1 : ((l > 0.0) ? -1 : 0);
+        node->forced_outcome = static_cast<int8_t>((w > 0.0) ? 1 : ((l > 0.0) ? -1 : 0));
         node->distance_to_mate = 0;
     } else {
         _virtual_loss(node, false);
@@ -1188,19 +1229,21 @@ void MCTSEngine::_backpropagate(MCTSNode* node, double w, double d, double l, bo
     double current_d = d;
     double current_l = l;
     
-    // if (logger.get_level() <= 10) {
-    //     logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " raw WDL: " + std::to_string(w) + "/" + std::to_string(d) + "/" + std::to_string(l));
-    // }
+    if (logger.get_level() <= 10) {
+        logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " raw WDL: " + std::to_string(w) + "/" + std::to_string(d) + "/" + std::to_string(l));
+    }
 
     while (current_node != nullptr) {
         current_node->visits += 1;
-        current_node->w_sum += current_w;
-        current_node->d_sum += current_d;
-        current_node->l_sum += current_l;
+        // w_sum / d_sum / l_sum are float (compacted-node layout); cast the
+        // double intermediates explicitly to silence -Wconversion.
+        current_node->w_sum += static_cast<float>(current_w);
+        current_node->d_sum += static_cast<float>(current_d);
+        current_node->l_sum += static_cast<float>(current_l);
 
-        // if (logger.get_level() <= 10) {
-        //     logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " updated WDL sums: " + std::to_string(current_node->w_sum) + "/" + std::to_string(current_node->d_sum) + "/" + std::to_string(current_node->l_sum));
-        // }
+        if (logger.get_level() <= 10) {
+            logger.log("DEBUG", chess::uci::moveToUci(current_node->move) + " updated WDL sums: " + std::to_string(current_node->w_sum) + "/" + std::to_string(current_node->d_sum) + "/" + std::to_string(current_node->l_sum));
+        }
         
         _backpropagate_minimax(current_node);
 
@@ -1220,7 +1263,7 @@ void MCTSEngine::_virtual_loss(MCTSNode* node, bool is_applying) {
 
     while (current_node != nullptr) {
         current_node->visits += (1 * multiplier);
-        current_node->l_sum += (virtual_loss * multiplier);
+        current_node->l_sum += static_cast<float>(virtual_loss * multiplier);
         current_node = current_node->parent;
     }
 }

@@ -225,7 +225,8 @@ static PlayConfig load_config(const std::string& config_file_path) {
     s.node_pool_size         = mcts_n["node_pool_size"].as<int>();
     s.virtual_loss           = mcts_n["virtual_loss"].as<double>();
     s.contempt               = mcts_n["contempt"].as<double>();
-    s.deficit_eps            = mcts_n["deficit_eps"].as<double>();
+    s.cpuct                  = mcts_n["cpuct"].as<double>();
+    s.two_fold_repetition    = mcts_n["two_fold_repetition"].as<bool>();
     s.draw_cutoff            = sel_n["draw_cutoff"].as<double>();
     s.gumbel_c_visit         = mcts_n["gumbel_c_visit"].as<double>();
     s.gumbel_c_scale         = mcts_n["gumbel_c_scale"].as<double>();
@@ -472,11 +473,11 @@ static int run_uci(const PlayConfig& cfg) {
     auto mcts_engine = std::make_unique<MCTSEngine>(
         cfg.selector.node_pool_size, cfg.selector.batch_size_per_worker,
         inference_queue, result_queues[0], 0,
-        cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
+        cfg.selector.cpuct, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
         cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
         cfg.selector.gumbel_noise, board, history, main_logger,
         buf.input, buf.policy, buf.value,
-        buffer_free_slots, &wait_count, 1, tb_ready);
+        buffer_free_slots, &wait_count, 1, cfg.selector.two_fold_repetition, tb_ready);
 
     mcts_engine->set_nps_alpha(cfg.time_control.nps_ewma_alpha);
     TimeControl time_control(cfg.time_control);
@@ -841,6 +842,22 @@ static int run_tournament(const PlayConfig& cfg,
     worker_engines.reserve(K);
     worker_loggers.reserve(K);
 
+    bool tb_ready = false;
+    if (cfg.tablebase_enabled) {
+        if (tb_init(cfg.tablebase_path.c_str())) {
+            tb_ready = (TB_LARGEST > 0);
+            main_logger.log("INFO", "Syzygy initialised from " + cfg.tablebase_path +
+                            " (TB_LARGEST=" + std::to_string(TB_LARGEST) + ")");
+            if (!tb_ready) {
+                main_logger.log("WARNING",
+                    "tb_init ok but TB_LARGEST=0 -- no tables at path. Probing disabled.");
+            }
+        } else {
+            main_logger.log("ERROR",
+                "tb_init failed for " + cfg.tablebase_path + " -- probing disabled.");
+        }
+    }
+
     for (int w = 0; w < K; ++w) {
         worker_loggers.push_back(std::make_unique<Logger>(
             "tournament_worker_" + std::to_string(w), run_log_dir, cfg.worker_logging_level));
@@ -852,20 +869,20 @@ static int run_tournament(const PlayConfig& cfg,
         we->engine_a = std::make_unique<MCTSEngine>(
             cfg.selector.node_pool_size, cfg.selector.batch_size_per_worker,
             iq_a, rq_a[w], w,
-            cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
+            cfg.selector.cpuct, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
             cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
             cfg.selector.gumbel_noise, dummy, empty_hist, wlog,
             buf_a.input, buf_a.policy, buf_a.value,
-            free_a, &we->wait_a, 1);
+            free_a, &we->wait_a, 1, cfg.selector.two_fold_repetition, tb_ready);
 
         we->engine_b = std::make_unique<MCTSEngine>(
             cfg.selector.node_pool_size, cfg.selector.batch_size_per_worker,
             iq_b, rq_b[w], w,
-            cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
+            cfg.selector.cpuct, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
             cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
             cfg.selector.gumbel_noise, dummy, empty_hist, wlog,
             buf_b.input, buf_b.policy, buf_b.value,
-            free_b, &we->wait_b, 1);
+            free_b, &we->wait_b, 1, cfg.selector.two_fold_repetition, tb_ready);
 
         we->selector_a = std::make_unique<ActionSelector>(
             "sel_a_" + std::to_string(w), w, cfg.selector, wlog);
@@ -1027,6 +1044,7 @@ static int run_tournament(const PlayConfig& cfg,
         main_logger.log("INFO", "Results appended to " + results_path);
     }
 
+    if (tb_ready) tb_free();
     return 0;
 }
 
