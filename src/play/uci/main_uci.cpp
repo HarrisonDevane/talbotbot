@@ -43,8 +43,8 @@
 #include <yaml-cpp/yaml.h>
 
 #include "chess.hpp"
-#include "puct_mcts.hpp"
-#include "puct_action_selector.hpp"
+#include "mcts_engine.hpp"
+#include "action_selector.hpp"
 #include "inference_batcher.hpp"
 #include "logger.hpp"
 #include "time_control.hpp"
@@ -54,6 +54,53 @@
 namespace fs = std::filesystem;
 
 static std::atomic<bool> global_stop_event{false};
+
+// ---- stdout serialisation ---------------------------------------------------
+// UCI output comes from three places once we go async: main thread (uciok /
+// readyok / echoes), search worker (bestmove), info thread (info lines).
+// Each writer takes stdout_mtx around its complete line to prevent torn
+// output that would confuse GUI parsers.
+static std::mutex stdout_mtx;
+
+static inline void uci_out(const std::string& line) {
+    std::lock_guard<std::mutex> lock(stdout_mtx);
+    std::cout << line << std::endl;
+}
+
+// ---- info-line helpers ------------------------------------------------------
+// q -> centipawns via logit map. This is standard for NN engines with WDL
+// heads: cp is monotone in q, saturates smoothly near +-1, and roughly
+// matches the scale GUIs expect for cp scores. Clamped to a sane range.
+static int q_to_cp(double q) {
+    const double EPS = 1e-6;
+    if (q >  1.0 - EPS) q =  1.0 - EPS;
+    if (q < -1.0 + EPS) q = -1.0 + EPS;
+    double cp = 200.0 * std::log10((1.0 + q) / (1.0 - q));
+    if (cp >  10000.0) cp =  10000.0;
+    if (cp < -10000.0) cp = -10000.0;
+    return static_cast<int>(std::round(cp));
+}
+
+// Walk from root following max-visits child. Stop at unexpanded/leaf.
+// Reads are unlocked (visits/first_child raced against the search thread)
+// -- torn reads produce at worst a wobbly PV in one frame, invisible to GUIs.
+static std::vector<std::string> extract_pv(MCTSNode* root, int max_depth = 16) {
+    std::vector<std::string> pv;
+    MCTSNode* node = root;
+    while (node && node->is_expanded() && node->num_children > 0 && (int)pv.size() < max_depth) {
+        MCTSNode* best = nullptr;
+        int best_visits = -1;
+        for (int i = 0; i < node->num_children; ++i) {
+            MCTSNode* c = node->first_child + i;
+            if (c->visits > best_visits) { best_visits = c->visits; best = c; }
+        }
+        if (!best || best->visits <= 0) break;
+        pv.push_back(chess::uci::moveToUci(best->move));
+        node = best;
+    }
+    return pv;
+}
+// -----------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------
 static std::vector<std::string> split(const std::string& s, char delimiter) {
@@ -74,29 +121,11 @@ static DWORD_PTR mask_from_cores(const std::vector<int>& cores) {
 
 // =============================================================================
 // CONFIG
+//
+// UCI-only. Fields that used to live in the shared PlayConfig but were only
+// touched by the tournament path (opening_file, games_per_match, batcher_a/b
+// cores, etc.) are gone. If we need one back later, add it here explicitly.
 // =============================================================================
-
-struct TreeParams {
-    // Shared MCTS
-    int node_pool_size;
-    int batch_size_per_worker;
-    double virtual_loss;
-    double contempt;
-    double policy_softmax_temp;
-    bool two_fold_repetition;
-    int default_nodes;
-
-    // PUCT-only
-    double cpuct;
-    double temperature_visits;
-
-    // Shared selection
-    double draw_cutoff;
-    double resignation_probability;
-    double resignation_cutoff;
-    int temperature_ply_cutoff;
-};
-
 struct UciConfig {
     // paths
     std::string model_file_path;   // model.yaml -- dims live here
@@ -122,8 +151,8 @@ struct UciConfig {
     int board_dim;
     int policy_moves;
 
-    // flat params for MCTS & Action Selection
-    TreeParams tree;
+    // mcts / selection (single struct; ActionSelector reads what it needs)
+    ActionSelectorConfig selector;
 
     // time control
     TimeControlConfig time_control;
@@ -131,6 +160,11 @@ struct UciConfig {
     // tablebase
     bool        tablebase_enabled = false;
     std::string tablebase_path;
+
+    // Inference-only search behaviour: bail out of gumbel phases when the
+    // top-two candidates differ in raw Q by at least this much. 0 disables.
+    double early_stop_q_gap = 0.0;
+    int early_stop_min_visits = 0;
 };
 
 static UciConfig load_config(const std::string& config_file_path) {
@@ -141,7 +175,6 @@ static UciConfig load_config(const std::string& config_file_path) {
     YAML::Node eval_n = root["evaluation"];
     YAML::Node infer_n= root["inference"];
     YAML::Node mcts_n = root["mcts"];
-    YAML::Node puct_n = root["puct"];
     YAML::Node sel_n  = root["selection"];
 
     cfg.model_file_path    = global["model_file"].as<std::string>();
@@ -180,22 +213,32 @@ static UciConfig load_config(const std::string& config_file_path) {
         }
     }
 
-    TreeParams& s = cfg.tree;
+    ActionSelectorConfig& s = cfg.selector;
     s.node_pool_size         = mcts_n["node_pool_size"].as<int>();
-    s.batch_size_per_worker  = mcts_n["worker_minibatch_size"].as<int>();
     s.virtual_loss           = mcts_n["virtual_loss"].as<double>();
     s.contempt               = mcts_n["contempt"].as<double>();
-    s.policy_softmax_temp   = mcts_n["policy_softmax_temp"].as<double>();
+    s.deficit_eps                  = mcts_n["deficit_eps"].as<double>();
     s.two_fold_repetition    = mcts_n["two_fold_repetition"].as<bool>();
-
-    s.cpuct                  = puct_n["cpuct"].as<double>();
-    s.temperature_visits     = puct_n["temperature_visits"].as<double>();
-    s.default_nodes          = puct_n["default_nodes"].as<int>();
-
     s.draw_cutoff            = sel_n["draw_cutoff"].as<double>();
+    s.gumbel_c_visit         = mcts_n["gumbel_c_visit"].as<double>();
+    s.gumbel_c_scale         = mcts_n["gumbel_c_scale"].as<double>();
+    s.gumbel_noise           = mcts_n["gumbel_noise"].as<double>();
+    s.gumbel_search_depth    = mcts_n["gumbel_search_depth"].as<double>();
+    s.gumbel_m               = mcts_n["gumbel_m"].as<double>();
+    s.batch_size_per_worker  = mcts_n["worker_minibatch_size"].as<int>();
     s.temperature_ply_cutoff = sel_n["temperature_ply_cutoff"].as<int>();
+    s.temperature_q_decay    = sel_n["temperature_q_decay"].as<double>();
     s.resignation_probability= sel_n["resignation_probability"].as<double>();
     s.resignation_cutoff     = sel_n["resignation_cutoff"].as<double>();
+
+    // Optional: inference early-stop threshold. Missing = disabled (0.0).
+    if (mcts_n["early_stop_q_gap"]) {
+        cfg.early_stop_q_gap = mcts_n["early_stop_q_gap"].as<double>();
+    }
+
+    if (mcts_n["early_stop_min_visits"]) {
+        cfg.early_stop_min_visits = mcts_n["early_stop_min_visits"].as<int>();
+    }
 
     // time_control is REQUIRED for UCI (clock-based search is the whole point).
     YAML::Node tc_n = root["time_control"];
@@ -216,6 +259,19 @@ static UciConfig load_config(const std::string& config_file_path) {
 
 // =============================================================================
 // SEARCH WORKER
+//
+// The worker thread owns the ENTIRE lifecycle of a search:
+//   1. wait for start_flag
+//   2. mcts.reset(board, history)
+//   3. spawn info sub-thread (peeks tree ~1Hz -> "info ..." lines)
+//   4. run_simulations_fixed / _timed
+//   5. join info sub-thread
+//   6. agent.select_move + emit "bestmove ..."
+//   7. flip done_flag, notify main
+//
+// This means main thread never blocks on cv_done -- it fires `go`, sets
+// start_flag, returns to stdin polling. That's what lets `stop` (or `quit`)
+// actually arrive during a search.
 // =============================================================================
 struct SearchWorker {
     std::thread thread;
@@ -225,13 +281,28 @@ struct SearchWorker {
     bool start_flag = false;
     bool quit_flag  = false;
     bool done_flag  = true;
+
+    // Per-search inputs (set by main under mtx before notifying cv_start).
     chess::Board board;
     std::vector<chess::Board> history;
     int search_nodes = 0;
+    int gumbel_m     = 0;
     bool timed       = false;
+    int ply_count    = 1;
     std::chrono::steady_clock::time_point soft_deadline;
     std::chrono::steady_clock::time_point hard_deadline;
-    PuctMCTS* mcts = nullptr;
+
+    // Shared references (bound once by main after construction).
+    MCTSEngine*     mcts  = nullptr;
+    ActionSelector* agent = nullptr;
+    Logger*         logger = nullptr;
+    double          contempt = 0.0;    // for score-cp conversion
+
+    // Info-thread coordination. search_active is true from the moment main
+    // signals cv_start until the worker has emitted bestmove. The info
+    // sub-thread loops while true.
+    std::atomic<bool> search_active{false};
+
     DWORD_PTR core_mask = 0;
 };
 
@@ -256,6 +327,13 @@ static SharedBuffers make_shared_buffers(const UciConfig& cfg) {
 
 // =============================================================================
 // ROOT SYZYGY PROBE
+//
+// If the position is within the loaded tables and has no castling rights,
+// probe DTZ at the root and return the TB-optimal move -- the one that
+// preserves the result AND makes progress toward mate under the 50-move rule.
+// This is what actually *converts* won endings (KBN-v-K etc.); the in-tree WDL
+// probe only scores positions exactly, it cannot order winning moves by
+// progress, so on its own it shuffles.
 // =============================================================================
 static bool probe_root_tablebase(const chess::Board& board,
                                  chess::Move& out,
@@ -309,6 +387,9 @@ static bool probe_root_tablebase(const chess::Board& board,
     wdl_out = TB_GET_WDL(res);
     dtz_out = TB_GET_DTZ(res);
 
+    // Decode TB move: from-square, to-square, promotion piece. The library
+    // returns fields as raw ints; the mapping to chess::Move is exact match
+    // among the legal move list (we don't fabricate a Move from thin air).
     const unsigned from = TB_GET_FROM(res);
     const unsigned to   = TB_GET_TO(res);
     const unsigned promo= TB_GET_PROMOTES(res);
@@ -319,6 +400,7 @@ static bool probe_root_tablebase(const chess::Board& board,
         if ((unsigned)m.from().index() != from) continue;
         if ((unsigned)m.to().index()   != to)   continue;
         if (m.typeOf() == chess::Move::PROMOTION) {
+            // Fathom promo encoding: 1=Q, 2=R, 3=B, 4=N; anything else -> mismatch.
             chess::PieceType want;
             switch (promo) {
                 case 1: want = PieceType::QUEEN;  break;
@@ -329,16 +411,23 @@ static bool probe_root_tablebase(const chess::Board& board,
             }
             if (m.promotionType() != want) continue;
         } else if (promo != 0) {
-            continue;   
+            continue;   // TB says promotion but move type isn't
         }
         out = m;
         return true;
     }
-    return false;   
+    return false;   // decoded move not found among legal moves -> run search
 }
 
 // =============================================================================
 // CONFIG RESOLUTION
+//
+// UCI GUIs launch the exe with zero args. That means the exe has to find its
+// own config -- no relative "run from project root" trick like the trainer.
+// Resolution order:
+//   1. $TALBOT_CONFIG env var (dev / A-B testing convenience)
+//   2. play_uci.yaml sitting next to talbot.exe
+//   3. fatal error with a clear message
 // =============================================================================
 static std::string resolve_config_path() {
     if (const char* env = std::getenv("TALBOT_CONFIG")) {
@@ -347,6 +436,7 @@ static std::string resolve_config_path() {
     char buf[MAX_PATH];
     DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
     if (n == 0 || n == MAX_PATH) {
+        // Shouldn't happen; fall back to bare filename which resolves against cwd.
         return "play_uci.yaml";
     }
     return (fs::path(std::string(buf, n)).parent_path() / "play_uci.yaml").string();
@@ -354,6 +444,8 @@ static std::string resolve_config_path() {
 
 // =============================================================================
 int main(int /*argc*/, char* /*argv*/[]) {
+    // A GUI launches us with no args and expects UCI on stdio. Do not add flags.
+
     const std::string config_file_path = resolve_config_path();
     if (!fs::exists(config_file_path)) {
         std::cerr << "Fatal: config not found. Looked at:\n"
@@ -398,6 +490,9 @@ int main(int /*argc*/, char* /*argv*/[]) {
     }
 
     // ---- Syzygy tablebases --------------------------------------------------
+    // tb_init is the one non-thread-safe Fathom call; do it here at startup,
+    // before the search worker thread can probe. tb_ready is what we hand to
+    // the engine -- false if disabled OR if init found no tables.
     bool tb_ready = false;
     if (cfg.tablebase_enabled) {
         if (tb_init(cfg.tablebase_path.c_str())) {
@@ -442,50 +537,148 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
     std::atomic<int> wait_count{0};
 
-    auto mcts_engine = std::make_unique<PuctMCTS>(
-        cfg.tree.node_pool_size, cfg.tree.batch_size_per_worker,
+    auto mcts_engine = std::make_unique<MCTSEngine>(
+        cfg.selector.node_pool_size, cfg.selector.batch_size_per_worker,
         inference_queue, result_queues[0], 0,
-        cfg.tree.virtual_loss, cfg.tree.contempt, cfg.tree.policy_softmax_temp, cfg.tree.cpuct, board, history, main_logger,
+        cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
+        cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
+        cfg.selector.gumbel_noise, board, history, main_logger,
         buf.input, buf.policy, buf.value,
-        buffer_free_slots, &wait_count, 1, cfg.tree.two_fold_repetition, tb_ready);
+        buffer_free_slots, &wait_count, 1, cfg.selector.two_fold_repetition, tb_ready);
 
     mcts_engine->set_nps_alpha(cfg.time_control.nps_ewma_alpha);
+    mcts_engine->early_stop_q_gap = cfg.early_stop_q_gap;
+    mcts_engine->early_stop_min_visits = cfg.early_stop_min_visits;
     TimeControl time_control(cfg.time_control);
 
     // ---- search worker thread ----------------------------------------------
+    // Agent must exist before we start the thread since the worker holds a
+    // pointer to it (used inside the search-completion select_move call).
+    ActionSelector agent("uci_agent", 0, cfg.selector, main_logger);
+    int ply_count = 1;
+
     SearchWorker search_worker;
-    search_worker.mcts = mcts_engine.get();
+    search_worker.mcts     = mcts_engine.get();
+    search_worker.agent    = &agent;
+    search_worker.logger   = &main_logger;
+    search_worker.contempt = cfg.selector.contempt;
     search_worker.core_mask = mask_from_cores(cfg.game_worker_cores);
 
     search_worker.thread = std::thread([worker = &search_worker]() {
         if (worker->core_mask != 0)
             SetThreadAffinityMask(GetCurrentThread(), worker->core_mask);
+
         while (true) {
             std::unique_lock<std::mutex> lock(worker->mtx);
             worker->cv_start.wait(lock, [&]{ return worker->start_flag || worker->quit_flag; });
             if (worker->quit_flag) break;
-            worker->mcts->reset(worker->board, worker->history);
-            if (worker->timed) {
-                worker->mcts->run_simulations_timed(
-                    worker->soft_deadline,
-                    worker->hard_deadline);
-            } else {
-                worker->mcts->run_simulations_fixed(worker->search_nodes);
-            }
-            worker->start_flag = false;
-            worker->done_flag  = true;
+
+            // Snapshot inputs so the info sub-thread doesn't have to lock.
+            chess::Board board = worker->board;
+            std::vector<chess::Board> history = worker->history;
+            const bool timed = worker->timed;
+            const int  gumbel_m     = worker->gumbel_m;
+            const int  search_nodes = worker->search_nodes;
+            const int  ply_snapshot = worker->ply_count;
+            const auto soft_dl = worker->soft_deadline;
+            const auto hard_dl = worker->hard_deadline;
             lock.unlock();
+
+            worker->mcts->reset(board, history);
+
+            // ---- info emission (sub-thread) --------------------------------
+            // Ticks ~1Hz; polls the search_active flag every 50ms so it exits
+            // promptly when the search finishes. Reads on engine.root are
+            // unlocked -- torn stats produce at worst a wobbly info line.
+            worker->search_active.store(true, std::memory_order_relaxed);
+            const auto search_start = std::chrono::steady_clock::now();
+
+            std::thread info_thread([worker, search_start]() {
+                const auto emit_interval = std::chrono::milliseconds(1000);
+                const auto poll_interval = std::chrono::milliseconds(50);
+                auto next_emit = std::chrono::steady_clock::now() + emit_interval;
+
+                while (worker->search_active.load(std::memory_order_relaxed)) {
+                    std::this_thread::sleep_for(poll_interval);
+                    auto now = std::chrono::steady_clock::now();
+                    if (now < next_emit) continue;
+                    next_emit = now + emit_interval;
+
+                    MCTSNode* root = worker->mcts->root;
+                    if (!root || root->visits == 0) continue;
+
+                    int nodes = worker->mcts->simulation_count;
+                    long long elapsed_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(now - search_start).count();
+                    long long nps = elapsed_ms > 0 ? (nodes * 1000LL / elapsed_ms) : 0;
+
+                    // Root's expected_value is in own-mover perspective; that
+                    // matches UCI's cp convention (positive = side-to-move
+                    // stands better). No flip needed.
+                    double q = root->expected_value(worker->contempt);
+                    int cp = q_to_cp(q);
+
+                    std::vector<std::string> pv = extract_pv(root);
+                    std::ostringstream oss;
+                    oss << "info depth " << pv.size()
+                        << " nodes " << nodes
+                        << " nps " << nps
+                        << " time " << elapsed_ms
+                        << " score cp " << cp
+                        << " pv";
+                    for (const auto& m : pv) oss << " " << m;
+                    uci_out(oss.str());
+                }
+            });
+            // -----------------------------------------------------------------
+
+            if (timed) {
+                worker->mcts->run_simulations_timed(gumbel_m, soft_dl, hard_dl);
+            } else {
+                worker->mcts->run_simulations_fixed(search_nodes, gumbel_m);
+            }
+
+            // Signal info thread to exit and join it before touching root
+            // for the final select_move.
+            worker->search_active.store(false, std::memory_order_relaxed);
+            if (info_thread.joinable()) info_thread.join();
+
+            // Emit final info line + bestmove.
+            {
+                MCTSNode* root = worker->mcts->root;
+                if (root && root->visits > 0) {
+                    long long elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - search_start).count();
+                    long long nps = elapsed_ms > 0 ? (worker->mcts->simulation_count * 1000LL / elapsed_ms) : 0;
+                    double q = root->expected_value(worker->contempt);
+                    int cp = q_to_cp(q);
+                    std::vector<std::string> pv = extract_pv(root);
+                    std::ostringstream oss;
+                    oss << "info depth " << pv.size()
+                        << " nodes " << worker->mcts->simulation_count
+                        << " nps " << nps
+                        << " time " << elapsed_ms
+                        << " score cp " << cp
+                        << " pv";
+                    for (const auto& m : pv) oss << " " << m;
+                    uci_out(oss.str());
+                }
+            }
+
+            SelectionResult result = worker->agent->select_move(worker->mcts->root, ply_snapshot);
+            std::string best_move_str = (result.best_move == chess::Move::NO_MOVE)
+                ? "0000" : chess::uci::moveToUci(result.best_move);
+            uci_out("bestmove " + best_move_str);
+            worker->logger->log("DEBUG", "Engine -> GUI: bestmove " + best_move_str);
+
+            {
+                std::lock_guard<std::mutex> l2(worker->mtx);
+                worker->start_flag = false;
+                worker->done_flag  = true;
+            }
             worker->cv_done.notify_one();
         }
     });
-
-    PuctActionSelector::Config asel_cfg{
-        { cfg.tree.contempt, cfg.tree.draw_cutoff, cfg.tree.resignation_probability,
-          cfg.tree.resignation_cutoff, cfg.tree.temperature_ply_cutoff },
-        cfg.tree.temperature_visits
-    };
-    PuctActionSelector agent("uci_agent", 0, asel_cfg, main_logger);
-    int ply_count = 1;
 
     // ---- UCI command loop --------------------------------------------------
     std::string line;
@@ -497,12 +690,14 @@ int main(int /*argc*/, char* /*argv*/[]) {
         const std::string& command = tokens[0];
 
         if (command == "uci") {
-            std::cout << "id name Talbot UCI" << std::endl;
-            std::cout << "id author Talbot Dev" << std::endl;
-            std::cout << "uciok" << std::endl;
+            uci_out("id name Talbot UCI");
+            uci_out("id author Talbot Dev");
+            uci_out("uciok");
         }
         else if (command == "isready") {
-            std::cout << "readyok" << std::endl;
+            // Return readyok unconditionally -- it's a heartbeat, not a
+            // "wait for search to complete" gate.
+            uci_out("readyok");
         }
         else if (command == "ucinewgame") {
             board.setFen(chess::constants::STARTPOS);
@@ -537,6 +732,9 @@ int main(int /*argc*/, char* /*argv*/[]) {
             }
         }
         else if (command == "go") {
+            // Root tablebase probe: if the position is inside the loaded tables,
+            // play the DTZ-optimal move immediately and skip the search entirely
+            // -- this is the path that converts won endings.
             if (tb_ready) {
                 chess::Move tb_move;
                 unsigned tb_wdl = 0, tb_dtz = 0;
@@ -547,16 +745,16 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     const std::string mv = chess::uci::moveToUci(tb_move);
                     main_logger.log("INFO", "Root TB hit: " + mv + " wdl=" + wdl_str +
                                     " dtz=" + std::to_string(tb_dtz) + " -- skipping search.");
-                    std::cout << "info string syzygy " << wdl_str
-                              << " dtz " << tb_dtz << std::endl;
-                    std::cout << "bestmove " << mv << std::endl;
+                    uci_out("info string syzygy " + std::string(wdl_str) + " dtz " + std::to_string(tb_dtz));
+                    uci_out("bestmove " + mv);
                     continue;
                 }
             }
 
+            // Parse the subset of UCI `go` params we support.
             int64_t wtime = -1, btime = -1, winc = 0, binc = 0, movetime = -1;
             int movestogo = 0;
-            int total_search_nodes = cfg.tree.default_nodes;
+            int total_search_nodes = static_cast<int>(cfg.selector.gumbel_search_depth);
             for (size_t i = 1; i + 1 < tokens.size(); ++i) {
                 if      (tokens[i] == "nodes")     total_search_nodes = std::stoi(tokens[i + 1]);
                 else if (tokens[i] == "wtime")     wtime     = std::stoll(tokens[i + 1]);
@@ -572,15 +770,20 @@ int main(int /*argc*/, char* /*argv*/[]) {
             auto now = std::chrono::steady_clock::now();
 
             if (ply_count <= 2) {
+                // Use fixed nodes at the very start of the game -- NPS estimate
+                // is stale from the previous game (or zero) and the trainer's
+                // budget is a reasonable proxy.
                 timed = false;
-                total_search_nodes = cfg.tree.default_nodes;
+                total_search_nodes = static_cast<int>(cfg.selector.gumbel_search_depth);
                 main_logger.log("INFO", "Opening ply " + std::to_string(ply_count) + " detected. Forcing fixed-node search.");
             } else if (movetime >= 0) {
+                // Fixed per-move time: spend (almost) all of it, no soft target.
                 timed = true;
                 int64_t budget = std::max<int64_t>(1, movetime - cfg.time_control.move_overhead_ms);
                 soft_dl = now + std::chrono::milliseconds(budget);
                 hard_dl = soft_dl;
             } else if (wtime >= 0 || btime >= 0) {
+                // Clock-based: allocate from our side's clock via TimeControl.
                 bool white = (board.sideToMove() == chess::Color::WHITE);
                 ClockState cs;
                 cs.time_left_ms = white ? wtime : btime;
@@ -594,12 +797,33 @@ int main(int /*argc*/, char* /*argv*/[]) {
                 main_logger.log("INFO", "Time alloc: target=" + std::to_string(tb.target_ms) +
                                 "ms hard=" + std::to_string(tb.hard_limit_ms) + "ms");
             }
+            // else: no clock, no movetime -> fixed node budget (`go`, `go nodes`, `go infinite`).
+
+            // Defensive: if a previous search is somehow still running (a
+            // compliant GUI should have waited for bestmove first), request
+            // stop and wait so we don't overwrite the worker's inputs.
+            {
+                std::unique_lock<std::mutex> lock(search_worker.mtx);
+                if (!search_worker.done_flag) {
+                    lock.unlock();
+                    mcts_engine->request_stop();
+                    std::unique_lock<std::mutex> lock2(search_worker.mtx);
+                    search_worker.cv_done.wait(lock2, [&]{ return search_worker.done_flag; });
+                }
+            }
+
+            // Clear the stop flag now (BEFORE signalling start). Doing this
+            // inside run_simulations_* would race: a `stop` between our
+            // notify_one and the worker's clear would be lost.
+            mcts_engine->clear_stop();
 
             {
                 std::lock_guard<std::mutex> lock(search_worker.mtx);
-                search_worker.board    = board;
-                search_worker.history  = history;
-                search_worker.timed    = timed;
+                search_worker.board     = board;
+                search_worker.history   = history;
+                search_worker.gumbel_m  = static_cast<int>(cfg.selector.gumbel_m);
+                search_worker.timed     = timed;
+                search_worker.ply_count = ply_count;
                 if (timed) {
                     search_worker.soft_deadline = soft_dl;
                     search_worker.hard_deadline = hard_dl;
@@ -608,22 +832,29 @@ int main(int /*argc*/, char* /*argv*/[]) {
                 }
                 search_worker.done_flag  = false;
                 search_worker.start_flag = true;
-                search_worker.cv_start.notify_one();
             }
+            search_worker.cv_start.notify_one();
+            // NB: no wait. Main returns to stdin loop so `stop` / `isready` /
+            // `quit` can be received during the search. bestmove is emitted
+            // by the worker thread itself when the search finishes.
+        }
+        else if (command == "stop") {
+            // Signal the search to abandon at its next check (~128 sims).
+            // Worker will emit bestmove from whatever tree state it has and
+            // flip done_flag. Idempotent; no-op if no search is running.
+            mcts_engine->request_stop();
+        }
+        else if (command == "quit") {
+            // Interrupt any in-flight search so we can shut down promptly.
+            mcts_engine->request_stop();
             {
                 std::unique_lock<std::mutex> lock(search_worker.mtx);
                 search_worker.cv_done.wait(lock, [&]{ return search_worker.done_flag; });
             }
-            SelectionResult result = agent.select_move(mcts_engine->root, ply_count);
-            std::string best_move_str =
-                (result.best_move == chess::Move::NO_MOVE)
-                    ? "0000" : chess::uci::moveToUci(result.best_move);
-            std::cout << "bestmove " << best_move_str << std::endl;
-            main_logger.log("DEBUG", "Engine -> GUI: bestmove " + best_move_str);
-        }
-        else if (command == "quit") {
             break;
         }
+        // Unknown commands (including "setoption", "ponderhit", "debug" for
+        // now) are silently ignored -- to be filled in as we iterate.
     }
 
     main_logger.log("INFO", "Quit received. Terminating worker...");

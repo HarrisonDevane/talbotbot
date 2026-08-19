@@ -8,7 +8,7 @@
 #include <torch/torch.h>
 #include "chess.hpp"
 #include "logger.hpp"
-#include "gumbel_mcts.hpp" 
+#include "mcts_engine.hpp" 
 #include "data_generator.hpp" 
 #include <zstd.h>
 

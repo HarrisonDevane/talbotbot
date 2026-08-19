@@ -6,7 +6,7 @@ global:
   buffer_ramp_steps: 40000                                        # Steps to reach max buffer size (linear)
   buffer_size_gb: 32                                              # Size of LMDB on disk
   build_steps: 500                                                # Steps for a new engine build
-  train_dir: 'train_dir'                                          # Base dir for all run artifacts.
+  model_path: 'train_dir/models/model'                            # Path to model base name
 
 inference:
   inference_worker_cores: [13, 14, 15]                            # Dedicated CPU cores for the Batching Process (dispatcher, collector, filler)
@@ -32,19 +32,17 @@ mcts:
   worker_minibatch_size: 16                                       # Max positions a single worker sends at once
   virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored (prevents threads flocking)
   contempt: 0.0                                                   # Contempt for playing drawing positions
-  policy_softmax_temp: 1.0
+  deficit_eps: 0.0
   two_fold_repetition: False
-
-gumbel:
-  c_visit: 50.0                                                   # Sigma used for gumbel score calculation
-  c_scale: 1.0                                                    # Scale for sigma with visit count
-  noise: 1.0                                                      # Gumbel noise value
-  search_depth: 128                                               # Search depth budget
-  m: 16                                                           # m value for sequential halving (top m moves sampled)
-  temperature_q_decay: 0.1                                        # Absolute Q value [-1, 1] Boltzmann temperature decay
+  gumbel_c_visit: 50.0                                            # Sigma used for gumbel score calculation
+  gumbel_c_scale: 1.0                                             # Scale for sigma with visit count
+  gumbel_noise: 1.0                                               # Gumbel noise value
+  gumbel_search_depth: 128                                        # Search depth budget
+  gumbel_m: 16                                                    # m value for sequential halving (top m moves sampled)
 
 selection:
   temperature_ply_cutoff: 30                                      # Sample proportional to visit count for first moves
+  temperature_q_decay: 0.1                                        # Absolute Q value [-1, 1] Boltzmann temperature decay
   draw_cutoff: 0.0                                                # Value threshold to consider a game a draw
   resignation_probability: 0.9                                    # Chance the bot checks for resignation allowed
   resignation_cutoff: -0.80                                       # Value head cutoff for resignation

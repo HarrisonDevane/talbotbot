@@ -2,7 +2,8 @@
 
 #include <vector>
 #include "chess.hpp"
-#include "mcts_base.hpp"    // MCTSNode + ModelConfig live here now
+#include "mcts_engine.hpp"
+#include "action_selector.hpp"
 #include "logger.hpp"
 
 struct TargetResult {
@@ -10,23 +11,14 @@ struct TargetResult {
     double entropy = 0.0;
 };
 
-// Stateless helper: turn a finished gumbel-search tree into training targets.
-// The three knobs it needs -- contempt for value framing, gumbel_c_visit /
-// gumbel_c_scale for the σ scale on the completed-Q softmax -- live in
-// TargetGenerator::Config below rather than piggy-backing on a wider config.
 class TargetGenerator {
 public:
-    struct Config {
-        double contempt;
-        double gumbel_c_visit;
-        double gumbel_c_scale;
-    };
-
+    // Pure stateless mathematical observer
     static TargetResult generate_targets(
-        MCTSNode* root,
+        MCTSNode* root, 
         const chess::Board& board,
-        const Config& cfg,
-        const ModelConfig& model_config,
+        const ActionSelectorConfig& config, 
+        const ModelConfig& model_config, 
         const double target_shrinkage_k,
         Logger& logger
     );

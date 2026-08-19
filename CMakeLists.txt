@@ -17,12 +17,10 @@ set(FATHOM_DIR "${DEP_ROOT}/Fathom")
 
 # 2. DEFINE SHARED SOURCES
 # Core engine: used by training, play, and UCI executables.
-# Only the base classes are truly shared. Gumbel-specific variants live under
-# talbot_engine, PUCT-specific variants (when re-enabled) live under talbot_uci.
 set(SHARED_SOURCES
-    src/core/mcts_base.cpp
+    src/core/action_selector.cpp
+    src/core/mcts_engine.cpp
     src/core/mcts_node.cpp
-    src/core/action_selector_base.cpp
     src/core/inference_batcher.cpp
     src/core/board_utils.cpp
     "${FATHOM_DIR}/src/tbprobe.c"
@@ -32,8 +30,6 @@ set(SHARED_SOURCES
 # Main Training Engine -- training-only sources live in src/train/.
 add_executable(talbot_engine
     ${SHARED_SOURCES}
-    src/train/gumbel_mcts.cpp              # gumbel variant of MctsBase
-    src/train/gumbel_action_selector.cpp   # gumbel variant of ActionSelectorBase
     src/train/main_train.cpp
     src/train/data_generator.cpp
     src/train/target_generator.cpp
@@ -45,8 +41,6 @@ add_executable(talbot_engine
 # Standalone UCI Engine: reads play_uci.yaml and communicates via UCI protocol.
 add_executable(talbot_uci
     ${SHARED_SOURCES}
-    src/play/shared/puct_mcts.cpp
-    src/play/shared/puct_action_selector.cpp
     src/play/uci/main_uci.cpp
     src/play/shared/time_control.cpp
 )
