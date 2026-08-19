@@ -10,7 +10,7 @@
 #include <mutex>
 #include <c10/cuda/CUDAStream.h>
 #include "logger.hpp"
-#include "mcts_engine.hpp" 
+#include "mcts_base.hpp" 
 #include "concurrentqueue.h"
 
 class InferenceBatcher {

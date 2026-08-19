@@ -16,13 +16,13 @@ set(ZSTD_DIR "${DEP_ROOT}/zstd")
 set(FATHOM_DIR "${DEP_ROOT}/Fathom")
 
 # 2. DEFINE SHARED SOURCES
-# Core engine: used by both the training and play executables.
-# Lives in src/core/ and depends on nothing else under src/.
+# Core engine: used by training, play, and UCI executables.
+# Only the base classes are truly shared. Gumbel-specific variants live under
+# talbot_engine, PUCT-specific variants (when re-enabled) live under talbot_uci.
 set(SHARED_SOURCES
-    src/core/trt_builder.cpp
-    src/core/action_selector.cpp
-    src/core/mcts_engine.cpp
+    src/core/mcts_base.cpp
     src/core/mcts_node.cpp
+    src/core/action_selector_base.cpp
     src/core/inference_batcher.cpp
     src/core/board_utils.cpp
     "${FATHOM_DIR}/src/tbprobe.c"
@@ -32,6 +32,8 @@ set(SHARED_SOURCES
 # Main Training Engine -- training-only sources live in src/train/.
 add_executable(talbot_engine
     ${SHARED_SOURCES}
+    src/train/gumbel_mcts.cpp              # gumbel variant of MctsBase
+    src/train/gumbel_action_selector.cpp   # gumbel variant of ActionSelectorBase
     src/train/main_train.cpp
     src/train/data_generator.cpp
     src/train/target_generator.cpp
@@ -40,26 +42,29 @@ add_executable(talbot_engine
     "${LMDB_DIR}/midl.c"
 )
 
-# Play Engine: --uci and --tournament modes.
-# Play-only sources live in src/play/.
-add_executable(talbot_play
+# Standalone UCI Engine: reads play_uci.yaml and communicates via UCI protocol.
+add_executable(talbot_uci
     ${SHARED_SOURCES}
-    src/play/main_play.cpp
-    src/play/game_worker.cpp
-    src/play/self_play_session.cpp
-    src/play/opening_book.cpp
-    src/play/time_control.cpp
-
+    src/play/shared/puct_mcts.cpp
+    src/play/shared/puct_action_selector.cpp
+    src/play/uci/main_uci.cpp
+    src/play/shared/time_control.cpp
 )
 
-# 4. SETUP INCLUDES (Apply to both)
-# Every src/ subfolder is on the include path so existing bare includes
-# (#include "mcts_engine.hpp") continue to resolve with no source edits.
+# TRT Compile Tool: standalone exe that turns an ONNX file into a serialized TensorRT engine.
+add_executable(talbot_trt_compile
+    src/tools/main_trt_compile.cpp
+    src/tools/trt_builder.cpp
+)
+
+# 4. SETUP INCLUDES
 set(INCLUDE_DIRS
     "./src"
     "./src/core"
     "./src/train"
     "./src/play"
+    "./src/play/shared"
+    "./src/play/uci"
     "./src/third_party"
     "${DEP_ROOT}"
     "${LIBTORCH_DIR}/include"
@@ -73,7 +78,14 @@ set(INCLUDE_DIRS
 )
 
 target_include_directories(talbot_engine PRIVATE ${INCLUDE_DIRS})
-target_include_directories(talbot_play   PRIVATE ${INCLUDE_DIRS})
+target_include_directories(talbot_uci    PRIVATE ${INCLUDE_DIRS})
+
+# Lean include set for the compile tool
+target_include_directories(talbot_trt_compile PRIVATE
+    "./src/tools"
+    "${CUDA_PATH}/include"
+    "${TRT_DIR}/include"
+)
 
 # 5. COMPILER FLAGS
 if(MSVC)
@@ -82,12 +94,13 @@ if(MSVC)
     target_compile_definitions(talbot_engine PRIVATE NOMINMAX)
     target_compile_options(talbot_engine PRIVATE ${MSVC_FLAGS})
 
-    target_compile_definitions(talbot_play PRIVATE NOMINMAX)
-    target_compile_options(talbot_play PRIVATE ${MSVC_FLAGS})
+    target_compile_definitions(talbot_uci PRIVATE NOMINMAX)
+    target_compile_options(talbot_uci PRIVATE ${MSVC_FLAGS})
 
-    # Fathom's tbprobe.c uses C11 <stdatomic.h>; MSVC only enables C atomics
-    # under /std:c11 (or c17). Scoped to this one source so the LMDB C files
-    # (mdb.c / midl.c) keep compiling under the MSVC default, untouched.
+    target_compile_definitions(talbot_trt_compile PRIVATE NOMINMAX)
+    target_compile_options(talbot_trt_compile PRIVATE ${MSVC_FLAGS})
+
+    # Fathom's tbprobe.c uses C11 <stdatomic.h>; MSVC requires /std:c11 or c17.
     set_source_files_properties(
         "${FATHOM_DIR}/src/tbprobe.c"
         PROPERTIES COMPILE_OPTIONS "/std:c11;/experimental:c11atomics"
@@ -104,7 +117,7 @@ set(LINK_DIRS
 )
 
 target_link_directories(talbot_engine PRIVATE ${LINK_DIRS})
-target_link_directories(talbot_play   PRIVATE ${LINK_DIRS})
+target_link_directories(talbot_uci    PRIVATE ${LINK_DIRS})
 
 set(LIBS
     torch torch_cpu c10 c10_cuda torch_cuda
@@ -116,12 +129,23 @@ set(LIBS
 )
 
 target_link_libraries(talbot_engine PRIVATE ${LIBS})
-target_link_libraries(talbot_play   PRIVATE ${LIBS})
+target_link_libraries(talbot_uci    PRIVATE ${LIBS})
+
+# Compile tool: lean link.
+target_link_directories(talbot_trt_compile PRIVATE
+    "${CUDA_PATH}/lib/x64"
+    "${TRT_DIR}/lib"
+)
+target_link_libraries(talbot_trt_compile PRIVATE
+    cudart
+    nvinfer_10
+    nvonnxparser_10
+)
 
 # Special linker flags for LibTorch/CUDA compatibility
 set(LINK_OPTS "/INCLUDE:?warp_size@cuda@at@@YAHXZ /OPT:NOREF /RELEASE")
 set_target_properties(talbot_engine PROPERTIES LINK_FLAGS ${LINK_OPTS})
-set_target_properties(talbot_play   PROPERTIES LINK_FLAGS ${LINK_OPTS})
+set_target_properties(talbot_uci    PROPERTIES LINK_FLAGS ${LINK_OPTS})
 
 # 7. POST-BUILD: AUTOMATED DLL DEPLOYMENT
 function(deploy_dlls target_name)
@@ -162,4 +186,12 @@ function(deploy_dlls target_name)
 endfunction()
 
 deploy_dlls(talbot_engine)
-deploy_dlls(talbot_play)
+deploy_dlls(talbot_uci)
+
+# TRT compile tool DLL deployment
+add_custom_command(TARGET talbot_trt_compile POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${TRT_DIR}/lib" $<TARGET_FILE_DIR:talbot_trt_compile>
+    COMMAND ${CMAKE_COMMAND} -E copy "${CUDA_PATH}/bin/x64/cudart64_13.dll" $<TARGET_FILE_DIR:talbot_trt_compile>
+    COMMAND ${CMAKE_COMMAND} -E copy "${CUDA_PATH}/bin/x64/cublas64_13.dll" $<TARGET_FILE_DIR:talbot_trt_compile>
+    COMMAND ${CMAKE_COMMAND} -E copy "${CUDA_PATH}/bin/x64/cublasLt64_13.dll" $<TARGET_FILE_DIR:talbot_trt_compile>
+)

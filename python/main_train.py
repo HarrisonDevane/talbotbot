@@ -19,7 +19,6 @@ from model import ChessAIModel, fuse_bn_for_export
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 
-RL_DIR = os.path.abspath(os.path.join(root_dir, "train_dir"))
 RL_PARAMS_FILE = os.path.abspath(os.path.join(root_dir, "config", "train.yaml"))
 MODEL_FILE = os.path.abspath(os.path.join(root_dir, "config", "model.yaml"))
 
@@ -39,7 +38,17 @@ class RLOrchestrator:
         with open(MODEL_FILE, 'r') as f:
             self.model_config = yaml.safe_load(f)
 
-        self.buffer_file_path = os.path.abspath(os.path.join(RL_DIR, "replay_memory.lmdb"))
+        # Resolve train_dir. Relative paths are anchored at project root so
+        # config files remain portable; absolute paths (e.g. a scratch disk)
+        # are respected as-is.
+        train_dir_cfg = self.params_config['global']['train_dir']
+        if os.path.isabs(train_dir_cfg):
+            self.train_dir = train_dir_cfg
+        else:
+            self.train_dir = os.path.abspath(os.path.join(root_dir, train_dir_cfg))
+        os.makedirs(os.path.join(self.train_dir, "models"), exist_ok=True)
+
+        self.buffer_file_path = os.path.join(self.train_dir, "replay_memory.lmdb")
         
         db_is_new = not os.path.exists(self.buffer_file_path)
         
@@ -66,7 +75,7 @@ class RLOrchestrator:
 
         rotation_interval = self.params_config['global']['logging_rotation_steps']
         target_folder_step = (self.current_step // rotation_interval) * rotation_interval
-        initial_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:06d}")
+        initial_log_dir = os.path.join(self.train_dir, f"run_step_{target_folder_step:06d}")
 
         os.makedirs(initial_log_dir, exist_ok=True)
         
@@ -86,8 +95,7 @@ class RLOrchestrator:
             fmt="[%(asctime)s] %(message)s"
         )
 
-        base_path = os.path.join(root_dir, self.params_config['global']['model_path'])
-        self.model_pth = os.path.abspath(base_path + ".pth")
+        self.model_pth = os.path.join(self.train_dir, "models", "model.pth")
         self.train_task = None
         self.next_build_step = self._calculate_next_build_step(self.current_step)
         
@@ -182,14 +190,14 @@ class RLOrchestrator:
         model = ChessAIModel(self.model_config)
         
         # Ensure base models directory exists
-        os.makedirs(os.path.join(RL_DIR, 'models'), exist_ok=True)
+        os.makedirs(os.path.join(self.train_dir, 'models'), exist_ok=True)
         
         # 1. Save the active model for the C++ engine
         save_dict = {'model_state_dict': model.state_dict()}
         torch.save(save_dict, self.model_pth)
         
         # 2. Save the permanent seed snapshot to the correct subfolder
-        backup_dir = os.path.join(RL_DIR, 'models', 'checkpoints')
+        backup_dir = os.path.join(self.train_dir, 'models', 'checkpoints')
         os.makedirs(backup_dir, exist_ok=True)
         
         seed_backup_path = os.path.join(backup_dir, 'step_000000_model.pth')
@@ -227,7 +235,7 @@ class RLOrchestrator:
         self.logger.info(f"Launching C++ Engine: {engine_exe}")
         cmd = [
             engine_exe,
-            "--train_dir", RL_DIR,
+            "--train_dir", self.train_dir,
             "--config_file", RL_PARAMS_FILE,
             "--model_file", MODEL_FILE,
             "--db_path", self.buffer_file_path
@@ -253,7 +261,7 @@ class RLOrchestrator:
 
         rotation_interval = self.params_config['global']['logging_rotation_steps']
         target_folder_step = (self.current_step // rotation_interval) * rotation_interval
-        current_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:06d}")
+        current_log_dir = os.path.join(self.train_dir, f"run_step_{target_folder_step:06d}")
 
         last_time_check = time.time()
 
@@ -290,7 +298,7 @@ class RLOrchestrator:
                 step_start_time = time.time()
 
                 target_folder_step = (self.current_step // rotation_interval) * rotation_interval
-                new_log_dir = os.path.join(RL_DIR, f"run_step_{target_folder_step:06d}")
+                new_log_dir = os.path.join(self.train_dir, f"run_step_{target_folder_step:06d}")
 
                 if new_log_dir != current_log_dir:
                     os.makedirs(new_log_dir, exist_ok=True)
@@ -329,7 +337,7 @@ class RLOrchestrator:
                     self._wait_for_trt_engine()
 
                     # Store backup and state accurately corresponding to the build step
-                    backup_dir = os.path.join(RL_DIR, 'models', 'checkpoints')
+                    backup_dir = os.path.join(self.train_dir, 'models', 'checkpoints')
                     os.makedirs(backup_dir, exist_ok=True)
 
                     model_backup_path = os.path.join(backup_dir, f'step_{self.current_step:06d}_model.pth')

@@ -21,8 +21,9 @@
 #include "io_writer.hpp"
 #include "board_utils.hpp"
 #include "logger.hpp"
-#include "inference_batcher.hpp" 
-#include "trt_builder.hpp"
+#include "inference_batcher.hpp"
+
+#include <fstream>
 
 namespace fs = std::filesystem;
 
@@ -58,6 +59,117 @@ void write_lmdb_signal(MDB_env* env, MDB_dbi dbi, const char* key_name, uint64_t
         mdb_put(txn, dbi, &key, &data, 0);
         mdb_txn_commit(txn);
     }
+}
+
+// -----------------------------------------------------------------------------
+// TRT compilation is now out-of-process: we shell out to talbot_trt_compile.exe
+// (built from src/tools/main_trt_compile.cpp) instead of calling TRTBuilder
+// directly. This keeps a single source of truth for engine build flags -- the
+// compile exe -- shared between training, evaluation, and any external tooling.
+//
+// The exe writes the engine to disk. For hot-reload we read it back into
+// memory so InferenceBatcher::signal_trt_reload can consume the bytes
+// directly, matching the previous in-process API contract.
+// -----------------------------------------------------------------------------
+
+// Location of talbot_trt_compile.exe -- assumed to live next to talbot_engine.exe
+// (i.e. same CMake build output directory). Falls back to bare name (relies on
+// cwd / PATH) if GetModuleFileName fails, which shouldn't happen in practice.
+std::string resolve_trt_compile_exe() {
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (n == 0 || n == MAX_PATH) return "talbot_trt_compile.exe";
+    return (fs::path(std::string(buf, n)).parent_path()
+            / "talbot_trt_compile.exe").string();
+}
+
+// Read a file into a byte vector. Empty vector on any failure (missing file,
+// zero size, short read).
+std::vector<uint8_t> read_engine_bytes(const std::string& path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return {};
+    std::streamsize size = f.tellg();
+    if (size <= 0) return {};
+    f.seekg(0, std::ios::beg);
+    std::vector<uint8_t> buf(static_cast<size_t>(size));
+    if (!f.read(reinterpret_cast<char*>(buf.data()), size)) return {};
+    return buf;
+}
+
+// Run talbot_trt_compile.exe synchronously. Returns the exe's exit code, or
+// -1 if the process couldn't be started at all. Uses CreateProcess (not
+// std::system) to avoid cmd.exe's quoting quirks around paths with spaces.
+//
+// Child stdout is redirected to NUL so per-rebuild progress noise does not
+// spam the training terminal every build step. Child stderr is left inherited
+// so genuine build failures still surface.
+int run_trt_compile(const std::string& compile_exe,
+                    const std::string& onnx_path,
+                    const std::string& engine_path,
+                    int max_batch,
+                    int input_planes) {
+    std::string cmd = "\"" + compile_exe + "\""
+                    + " \"" + onnx_path + "\""
+                    + " \"" + engine_path + "\""
+                    + " --input-planes " + std::to_string(input_planes)
+                    + " --max-batch "    + std::to_string(max_batch)
+                    + " --force";
+
+    // Open an inheritable handle to NUL for the child's stdout.
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength        = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE null_out = CreateFileA("NUL", GENERIC_WRITE,
+                                  FILE_SHARE_WRITE | FILE_SHARE_READ,
+                                  &sa, OPEN_EXISTING, 0, nullptr);
+    if (null_out == INVALID_HANDLE_VALUE) return -1;
+
+    STARTUPINFOA si = {};
+    si.cb         = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = null_out;
+    si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION pi = {};
+
+    // CreateProcessA requires a writable command-line buffer.
+    std::vector<char> mutable_cmd(cmd.begin(), cmd.end());
+    mutable_cmd.push_back('\0');
+
+    BOOL ok = CreateProcessA(
+        nullptr,                 // let CreateProcess parse the app name from cmd
+        mutable_cmd.data(),
+        nullptr, nullptr,        // security attrs
+        TRUE,                    // must inherit handles for STARTF_USESTDHANDLES
+        0,                       // flags: no new console
+        nullptr, nullptr,        // env, cwd -- inherit
+        &si, &pi
+    );
+    if (!ok) {
+        CloseHandle(null_out);
+        return -1;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code = 0;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(null_out);
+    return static_cast<int>(exit_code);
+}
+
+// Compile + read-back combined. Returns engine bytes on success, empty on any
+// failure (compile-exe launch failed, non-zero exit, unreadable output file).
+std::vector<uint8_t> compile_trt_engine(const std::string& compile_exe,
+                                        const std::string& onnx_path,
+                                        const std::string& engine_path,
+                                        int max_batch,
+                                        int input_planes) {
+    int rc = run_trt_compile(compile_exe, onnx_path, engine_path,
+                             max_batch, input_planes);
+    if (rc != 0) return {};
+    return read_engine_bytes(engine_path);
 }
 
 int main(int argc, char* argv[]) {
@@ -180,8 +292,11 @@ int main(int argc, char* argv[]) {
     ThreadSafeQueue<int> buffer_free_slots;
     for (int i = 0; i < total_slots; ++i) buffer_free_slots.push(i);
 
-    std::string onnx_path = config["global"]["model_path"].as<std::string>() + ".onnx";
-    std::string engine_path = config["global"]["model_path"].as<std::string>() + ".engine";
+    // All model artifacts live under {train_dir}/models/model.{onnx,engine,pt}.
+    // Python side (main_train.py) uses the exact same layout for .pth.
+    const std::string model_base = train_dir + "/models/model";
+    std::string onnx_path   = model_base + ".onnx";
+    std::string engine_path = model_base + ".engine";
 
     main_logger.log("INFO", "[MAIN] Synchronizing with LMDB TRT IPC Flags...");
     
@@ -204,16 +319,24 @@ int main(int argc, char* argv[]) {
         throw std::runtime_error("Fatal: __TRT_EXPORT_SIGNAL missing in DB. Python failed to seed protocol.");
     }
 
+    const std::string trt_compile_exe = resolve_trt_compile_exe();
+
     if (needs_initial_build) {
-        main_logger.log("INFO", "[BUILD] TensorRT is cooking. Terminal will be silent for ~60s...");
-        auto result = TRTBuilder::build_engine(onnx_path, inference_batch_size, input_planes, main_logger);
-        if (result) {
-            TRTBuilder::save_engine(*result, engine_path);
+        main_logger.log("INFO",
+            "[BUILD] TensorRT is cooking. Terminal will be silent for ~60s...");
+        // Initial build only needs the .engine file on disk; the batcher will
+        // pick it up when it constructs below. We don't need the bytes here.
+        int rc = run_trt_compile(trt_compile_exe, onnx_path, engine_path,
+                                 inference_batch_size, input_planes);
+        if (rc == 0) {
             write_lmdb_signal(lmdb_env, shared_dbi, "__TRT_ENGINE_READY", export_signal);
             last_handled_export_step = export_signal;
-            main_logger.log("INFO", "[BUILD] Initial Engine Build complete. IPC Ready signal written.");
+            main_logger.log("INFO",
+                "[BUILD] Initial Engine Build complete. IPC Ready signal written.");
         } else {
-            throw std::runtime_error("Initial TRT Build returned null result.");
+            throw std::runtime_error(
+                "Initial TRT Build failed (talbot_trt_compile.exe exit=" +
+                std::to_string(rc) + ").");
         }
     }
 
@@ -224,7 +347,7 @@ int main(int argc, char* argv[]) {
     
     int batcher_log_level = config["inference"]["logging_level"].as<int>();
     int log_interval_sec = config["inference"]["logging_interval_sec"].as<int>();
-    std::string model_path = config["global"]["model_path"].as<std::string>() + ".pt";
+    std::string model_path = model_base + ".pt";
     int batch_timeout = config["inference"]["batch_timeout_ms"].as<int>();
 
     main_logger.log("INFO", "[MAIN] Initializing Batcher...");
@@ -239,7 +362,7 @@ int main(int argc, char* argv[]) {
 
     main_logger.log("INFO", "[MAIN] Initializing Data Generator Workers...");
     DataGenerator generator(
-        config["global"], config["data_generation"], config["mcts"], config["selection"],
+        config["global"], config["data_generation"], config["mcts"], config["gumbel"], config["selection"],
         model, train_dir, rot_interval, main_logger,
         inference_queue, result_queues, shared_input_buffer, shared_policy_buffer, shared_value_buffer,
         buffer_free_slots, completed_games_queue, init_games + 1, current_step
@@ -291,49 +414,48 @@ int main(int argc, char* argv[]) {
                 uint64_t current_train_step = current_step.load(std::memory_order_relaxed);
                 uint64_t current_export_signal = exported_step;
 
-                std::thread([&batcher, &main_logger, onnx_path, engine_path, inference_batch_size, 
-                                lmdb_env, shared_dbi, current_train_step, current_export_signal, input_planes]() {
-                    
+                std::thread([&batcher, &main_logger, onnx_path, engine_path, inference_batch_size,
+                                lmdb_env, shared_dbi, current_train_step, current_export_signal,
+                                input_planes, trt_compile_exe]() {
+
                     auto start_time = std::chrono::steady_clock::now();
-                    
+
                     try {
                         // Request pause and wait for pipeline drain
                         main_logger.log("INFO", "Initiating Synchronous Pipeline Drain...");
                         batcher.request_pause();
-                        
+
                         while (!batcher.is_fully_paused() && !global_stop_event.load()) {
                             std::this_thread::sleep_for(std::chrono::milliseconds(5));
                         }
-                        
+
                         if (global_stop_event.load()) {
                             batcher.cancel_pause();
                             trt_update_in_progress.store(false);
                             return;
                         }
-                        
+
                         main_logger.log("INFO", "Pipeline drained.");
                         main_logger.log("INFO", "Executing FULL ENGINE REBUILD (this will take ~60s)...");
 
-                        auto result = TRTBuilder::build_engine(
-                            onnx_path, 
-                            inference_batch_size,
-                            input_planes, 
-                            main_logger
-                        );
-                        
-                        if (result) {
-                            batcher.signal_trt_reload(result->serialized_data, static_cast<int>(current_train_step));
-                            
+                        // Shell out to talbot_trt_compile.exe. It writes the
+                        // engine to disk; we read the bytes back so the
+                        // batcher's hot-reload path is unchanged.
+                        auto engine_bytes = compile_trt_engine(
+                            trt_compile_exe, onnx_path, engine_path,
+                            inference_batch_size, input_planes);
+
+                        if (!engine_bytes.empty()) {
+                            batcher.signal_trt_reload(engine_bytes, static_cast<int>(current_train_step));
+
                             while (batcher.is_fully_paused() && !global_stop_event.load()) {
                                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                             }
-                            
-                            TRTBuilder::save_engine(*result, engine_path);
-                            
+
                             double duration = std::chrono::duration<double>(
                                 std::chrono::steady_clock::now() - start_time
                             ).count();
-                            main_logger.log("INFO", "Full rebuild completed in " + 
+                            main_logger.log("INFO", "Full rebuild completed in " +
                                             std::to_string(duration) + " seconds.");
 
                             write_lmdb_signal(lmdb_env, shared_dbi, "__TRT_ENGINE_READY", current_export_signal);
@@ -341,12 +463,12 @@ int main(int argc, char* argv[]) {
                             main_logger.log("CRITICAL", "Full rebuild FAILED. Resuming with old engine.");
                             batcher.cancel_pause();
                         }
-                        
+
                     } catch (const std::exception& e) {
                         main_logger.log("CRITICAL", std::string("TRT Update Failed: ") + e.what());
                         batcher.cancel_pause();
                     }
-                    
+
                     trt_update_in_progress.store(false);
                 }).detach();
             }

@@ -6,7 +6,6 @@
 #include <string>
 #include <vector>
 #include <iostream>
-#include "logger.hpp"
 
 class TRTLogger : public nvinfer1::ILogger {
     void log(Severity severity, const char* msg) noexcept override {
@@ -23,10 +22,9 @@ public:
     };
 
     static std::unique_ptr<EngineResult> build_engine(
-        const std::string& onnx_path, 
+        const std::string& onnx_path,
         int max_batch_size,
-        int input_planes,
-        Logger& logger
+        int input_planes
     );
 
     static void save_engine(const EngineResult& result, const std::string& engine_path);

@@ -11,7 +11,8 @@
 
 DataGenerator::DataGenerator(
     const YAML::Node& global_cfg,
-    const YAML::Node& data_gen_cfg, const YAML::Node& mcts_cfg, const YAML::Node& sel_cfg, const YAML::Node& model_cfg,
+    const YAML::Node& data_gen_cfg, const YAML::Node& mcts_cfg, const YAML::Node& gumbel_cfg,
+    const YAML::Node& sel_cfg, const YAML::Node& model_cfg,
     const std::string& rl_dir_in, int rot_interval,
     Logger& logger,
     moodycamel::ConcurrentQueue<std::pair<int, int>>& i_queue,
@@ -44,22 +45,31 @@ DataGenerator::DataGenerator(
     model_config.board_dim = model_cfg["model"]["board_dim"].as<int>();
     model_config.policy_moves = model_cfg["model"]["total_policy_moves"].as<int>();
 
-    selector_config.node_pool_size = mcts_cfg["node_pool_size"].as<int>();
-    selector_config.batch_size_per_worker = mcts_cfg["worker_minibatch_size"].as<int>();
-    selector_config.virtual_loss = mcts_cfg["virtual_loss"].as<double>();
-    selector_config.contempt = mcts_cfg["contempt"].as<double>();
-    selector_config.cpuct = mcts_cfg["cpuct"].as<double>();
-    selector_config.two_fold_repetition = mcts_cfg["two_fold_repetition"].as<bool>();
-    selector_config.gumbel_c_visit = mcts_cfg["gumbel_c_visit"].as<double>();
-    selector_config.gumbel_c_scale = mcts_cfg["gumbel_c_scale"].as<double>();
-    selector_config.gumbel_noise = mcts_cfg["gumbel_noise"].as<double>();
-    selector_config.gumbel_search_depth = mcts_cfg["gumbel_search_depth"].as<int>();
-    selector_config.gumbel_m = mcts_cfg["gumbel_m"].as<int>();
-    selector_config.temperature_ply_cutoff = sel_cfg["temperature_ply_cutoff"].as<int>();
-    selector_config.temperature_q_decay = sel_cfg["temperature_q_decay"].as<double>();
-    selector_config.draw_cutoff = sel_cfg["draw_cutoff"].as<double>();
-    selector_config.resignation_probability = sel_cfg["resignation_probability"].as<double>();
-    selector_config.resignation_cutoff = sel_cfg["resignation_cutoff"].as<double>();
+    // Shared MCTS knobs (mcts: block). cpuct and draw_cutoff aren't here
+    // anymore -- cpuct doesn't exist for gumbel at all, draw_cutoff moved
+    // to selection:.
+    tree_params.node_pool_size        = mcts_cfg["node_pool_size"].as<int>();
+    tree_params.batch_size_per_worker = mcts_cfg["worker_minibatch_size"].as<int>();
+    tree_params.virtual_loss          = mcts_cfg["virtual_loss"].as<double>();
+    tree_params.contempt              = mcts_cfg["contempt"].as<double>();
+    tree_params.policy_softmax_temp  = mcts_cfg["policy_softmax_temp"].as<double>();
+    tree_params.two_fold_repetition   = mcts_cfg["two_fold_repetition"].as<bool>();
+
+    // Gumbel-specific knobs (gumbel: block). Yaml keys are unprefixed inside
+    // the block; struct field names keep the "gumbel_" prefix for readability
+    // at the use site.
+    tree_params.gumbel_c_visit       = gumbel_cfg["c_visit"].as<double>();
+    tree_params.gumbel_c_scale       = gumbel_cfg["c_scale"].as<double>();
+    tree_params.gumbel_noise         = gumbel_cfg["noise"].as<double>();
+    tree_params.gumbel_search_depth  = gumbel_cfg["search_depth"].as<int>();
+    tree_params.gumbel_m             = gumbel_cfg["m"].as<int>();
+    tree_params.temperature_q_decay  = gumbel_cfg["temperature_q_decay"].as<double>();
+
+    // Shared action-selection knobs (selection: block).
+    tree_params.temperature_ply_cutoff  = sel_cfg["temperature_ply_cutoff"].as<int>();
+    tree_params.draw_cutoff             = sel_cfg["draw_cutoff"].as<double>();
+    tree_params.resignation_probability = sel_cfg["resignation_probability"].as<double>();
+    tree_params.resignation_cutoff      = sel_cfg["resignation_cutoff"].as<double>();
 
     main_logger.log("INFO", "DataGenerator logic loop initialized.");
 }
@@ -117,22 +127,42 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
     logger.log("INFO", "=== GAME WORKER " + std::to_string(core_id) + " ===");
 
     std::atomic<int>* core_wait_count = core_wait_counts[core_index].get();
-    
+
     // --- Coordinator takes ownership of the Engine ---
+    // GumbelMCTS ctor: no cpuct, no draw_cutoff (dropped in split). Takes
+    // shared MCTS args + the three gumbel knobs.
     chess::Board dummy;
     dummy.setFen(chess::constants::STARTPOS);
-    MCTSEngine mcts(
-        selector_config.node_pool_size, selector_config.batch_size_per_worker, 
+    GumbelMCTS mcts(
+        tree_params.node_pool_size, tree_params.batch_size_per_worker,
         inference_queue, result_queues[logical_idx], logical_idx,
-        selector_config.cpuct, selector_config.virtual_loss, selector_config.contempt,
-        selector_config.draw_cutoff, selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
-        selector_config.gumbel_noise, dummy, std::vector<chess::Board>(), logger,
+        tree_params.virtual_loss, tree_params.contempt, tree_params.policy_softmax_temp,
+        tree_params.gumbel_c_visit, tree_params.gumbel_c_scale,
+        tree_params.gumbel_noise,
+        dummy, std::vector<chess::Board>(), logger,
         shared_input_buffer, shared_policy_buffer, shared_value_buffer,
         buffer_free_slots, core_wait_count, config.workers_per_core,
-        selector_config.two_fold_repetition, false
+        tree_params.two_fold_repetition, false
     );
 
-    ActionSelector agent("worker_" + std::to_string(worker_id), logical_idx, selector_config, logger);
+    // GumbelActionSelector::Config inherits SharedConfig; aggregate-init with
+    // the shared fields first, then the gumbel-only field.
+    GumbelActionSelector::Config asel_cfg{
+        { tree_params.contempt,
+          tree_params.draw_cutoff,
+          tree_params.resignation_probability,
+          tree_params.resignation_cutoff,
+          tree_params.temperature_ply_cutoff },
+        tree_params.temperature_q_decay
+    };
+    GumbelActionSelector agent("worker_" + std::to_string(worker_id), logical_idx, asel_cfg, logger);
+
+    // Config for TargetGenerator -- three fields, built once per worker.
+    TargetGenerator::Config tgt_cfg{
+        tree_params.contempt,
+        tree_params.gumbel_c_visit,
+        tree_params.gumbel_c_scale
+    };
 
     while (!stop_event.load()) {
         local_step_cache = current_step.load(std::memory_order_relaxed);
@@ -174,12 +204,12 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
 
             // 1. Search
             mcts.reset(board, history);
-            int sim_count = mcts.run_simulations_fixed(selector_config.gumbel_search_depth, selector_config.gumbel_m);
-            double root_v_mix = mcts.root->calculate_v_mix(selector_config.contempt);
+            int sim_count = mcts.run_simulations_fixed(tree_params.gumbel_search_depth, tree_params.gumbel_m);
+            double root_v_mix = mcts.root->calculate_v_mix(tree_params.contempt);
 
             // 2. Generate Targets
             TargetResult targets = TargetGenerator::generate_targets(
-                mcts.root, board, selector_config, model_config, config.target_shrinkage_k, logger
+                mcts.root, board, tgt_cfg, model_config, config.target_shrinkage_k, logger
             );
 
             // 3. Select Action

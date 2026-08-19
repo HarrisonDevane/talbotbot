@@ -9,8 +9,8 @@
 #include <torch/torch.h>
 #include <yaml-cpp/yaml.h>
 #include "chess.hpp"
-#include "mcts_engine.hpp"
-#include "action_selector.hpp"
+#include "gumbel_mcts.hpp"              // pulls in mcts_base.hpp transitively
+#include "gumbel_action_selector.hpp"   // pulls in action_selector_base.hpp
 #include "logger.hpp"
 #include "target_generator.hpp"
 #include "concurrentqueue.h"
@@ -54,6 +54,7 @@ public:
         const YAML::Node& global_cfg,
         const YAML::Node& data_gen_cfg,
         const YAML::Node& mcts_cfg,
+        const YAML::Node& gumbel_cfg,   // new: gumbel: block in train.yaml
         const YAML::Node& sel_cfg,
         const YAML::Node& model_cfg,
         const std::string& rl_dir,
@@ -77,8 +78,36 @@ public:
 
 private:
     DataGenConfig config;
-    ActionSelectorConfig selector_config;
-    ModelConfig model_config; 
+
+    // Flat yaml-derived parameters used to construct each worker's
+    // GumbelMCTS + GumbelActionSelector + TargetGenerator::Config. Internal
+    // to DataGenerator so no other TU depends on this shape.
+    struct TreeParams {
+        // Shared MCTS (mcts: block)
+        int    node_pool_size;
+        int    batch_size_per_worker;
+        double virtual_loss;
+        double contempt;
+        double policy_softmax_temp;
+        bool   two_fold_repetition;
+
+        // Gumbel-specific (gumbel: block)
+        double gumbel_c_visit;
+        double gumbel_c_scale;
+        double gumbel_noise;
+        int    gumbel_search_depth;
+        int    gumbel_m;
+        double temperature_q_decay;
+
+        // Shared action-selection (selection: block)
+        int    temperature_ply_cutoff;
+        double draw_cutoff;
+        double resignation_probability;
+        double resignation_cutoff;
+    };
+    TreeParams tree_params;
+
+    ModelConfig model_config;
     
     Logger& main_logger; 
     std::atomic<bool> stop_event;

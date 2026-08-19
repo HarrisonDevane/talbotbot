@@ -1,5 +1,6 @@
 #include "trt_builder.hpp"
 #include <fstream>
+#include <iostream>
 #include <vector>
 #include <cuda_runtime_api.h>
 
@@ -18,7 +19,7 @@ std::vector<char> read_file_bytes(const std::string& path) {
 }
 }  // namespace
 
-std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::string& onnx_path, int max_batch_size, int input_planes, Logger& logger) {
+std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::string& onnx_path, int max_batch_size, int input_planes) {
     cudaSetDevice(0);
 
     auto builder = std::unique_ptr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(gTRTLogger));
@@ -26,12 +27,11 @@ std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::st
     auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(explicitBatch));
     auto parser = std::unique_ptr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, gTRTLogger));
 
-    logger.log("INFO", "TensorRT: Parsing ONNX file...");
+    std::cout << "parsing ONNX..." << std::endl;
     if (!parser->parseFromFile(onnx_path.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
-        logger.log("ERROR", "TensorRT: Failed to parse ONNX file");
+        std::cerr << "ONNX parse failed" << std::endl;
         return nullptr;
     }
-    logger.log("INFO", "TensorRT: ONNX parsing complete.");
 
     auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     auto profile = builder->createOptimizationProfile();
@@ -55,23 +55,14 @@ std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::st
     std::unique_ptr<nvinfer1::ITimingCache> timing_cache(
         config->createTimingCache(cache_blob.data(), cache_blob.size()));
     if (timing_cache) {
-        if (!config->setTimingCache(*timing_cache, /*ignoreMismatch=*/false)) {
-            logger.log("WARN", "TensorRT: setTimingCache failed; building without cache.");
-        } else if (cache_blob.empty()) {
-            logger.log("INFO", "TensorRT: timing cache cold (no usable file); will profile and write.");
-        } else {
-            logger.log("INFO", "TensorRT: timing cache loaded (" +
-                       std::to_string(cache_blob.size()) + " bytes).");
-        }
-    } else {
-        logger.log("WARN", "TensorRT: createTimingCache returned null; building without cache.");
+        config->setTimingCache(*timing_cache, /*ignoreMismatch=*/false);
     }
     // -------------------------------------------------------------------------
 
     auto plan = std::unique_ptr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
-    
+
     if (!plan) {
-        logger.log("ERROR", "TensorRT: Engine build failed");
+        std::cerr << "engine build failed" << std::endl;
         return nullptr;
     }
 
@@ -85,10 +76,6 @@ std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::st
             if (out) {
                 out.write(reinterpret_cast<const char*>(serialized->data()),
                           static_cast<std::streamsize>(serialized->size()));
-                logger.log("INFO", "TensorRT: timing cache written (" +
-                           std::to_string(serialized->size()) + " bytes).");
-            } else {
-                logger.log("WARN", "TensorRT: could not open timing cache for writing: " + cache_path);
             }
         }
     }
@@ -99,8 +86,7 @@ std::unique_ptr<TRTBuilder::EngineResult> TRTBuilder::build_engine(const std::st
         reinterpret_cast<uint8_t*>(plan->data()),
         reinterpret_cast<uint8_t*>(plan->data()) + plan->size()
     );
-    
-    logger.log("INFO", "TensorRT: Engine build complete.");
+
     return result;
 }
 

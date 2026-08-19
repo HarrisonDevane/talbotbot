@@ -5,7 +5,7 @@
 
 TargetResult TargetGenerator::generate_targets(
     MCTSNode* root, const chess::Board& board,
-    const ActionSelectorConfig& config, const ModelConfig& model_config, const double target_shrinkage_k, Logger& logger) 
+    const Config& cfg, const ModelConfig& model_config, const double target_shrinkage_k, Logger& logger) 
 {
     TargetResult result;
     result.policy_vector.resize(model_config.policy_moves, 0.0f);
@@ -42,13 +42,13 @@ TargetResult TargetGenerator::generate_targets(
     // softmax over exact values (paper-canonical Eq. 11 behaviour).
 
 
-    double v_mix = root->calculate_v_mix(config.contempt);
+    double v_mix = root->calculate_v_mix(cfg.contempt);
 
     int max_visits = 0;
     for (int i = 0; i < num_children; ++i) {
         max_visits = std::max(max_visits, all_children[i]->visits);
     }
-    double sigma_scale = (config.gumbel_c_visit + max_visits) * config.gumbel_c_scale;
+    double sigma_scale = (cfg.gumbel_c_visit + max_visits) * cfg.gumbel_c_scale;
 
     std::vector<float> base_logits(num_children);
     float max_logit = -1e20f;
@@ -63,10 +63,10 @@ TargetResult TargetGenerator::generate_targets(
             int fo = c->forced_outcome;
             if      (fo == -1) q =  1.0;              // proven win for us
             else if (fo ==  1) q = -1.0;              // proven loss
-            else               q =  config.contempt;  // proven draw
+            else               q =  cfg.contempt;  // proven draw
         } else {
             q = (c->visits > 0)
-                ? (c->visits * -c->expected_value(config.contempt) + target_shrinkage_k * v_mix) / (c->visits + target_shrinkage_k)
+                ? (c->visits * -c->expected_value(cfg.contempt) + target_shrinkage_k * v_mix) / (c->visits + target_shrinkage_k)
                 : v_mix;
         }
 
