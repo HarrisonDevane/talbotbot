@@ -11,22 +11,20 @@ MCTSNode* MCTSNode::get_child(chess::Move m) const {
 }
 
 double MCTSNode::expected_value(double contempt) const {
-    if (visits == 0) return (raw_w - raw_l) + (contempt * raw_d);
+    if (visits == 0) return (raw_w - raw_l()) + (contempt * raw_d);
     return (w_sum - l_sum + (contempt * d_sum)) / visits;
 }
 
+// No caching -- callers store if they need to reuse. noise: non-root
+// descendants pass 0; root children pass their entry from
+// MCTSEngine::root_gumbel_noise[].
 double MCTSNode::calculate_gumbel_score(double contempt, double gumbel_c_visit,
                                         double gumbel_c_scale, double max_visits,
-                                        double v_mix) {
+                                        double v_mix, double noise) const {
     double q_val = (visits > 0) ? -expected_value(contempt) : v_mix;
     double q_norm = (q_val + 1.0) / 2.0;
-
     double sigma = (gumbel_c_visit + max_visits) * gumbel_c_scale;
-    double score = raw_logit + gumbel_noise + (sigma * q_norm);
-    // Cache in float. Callers that need the just-computed value may also use
-    // the return value (higher precision) to avoid the round-trip.
-    gumbel_score = static_cast<float>(score);
-    return score;
+    return raw_logit + noise + (sigma * q_norm);
 }
 
 double MCTSNode::calculate_v_mix(double contempt) const {
@@ -41,6 +39,6 @@ double MCTSNode::calculate_v_mix(double contempt) const {
             sum_q_weighted += (child->visits * child_q);
         }
     }
-    double raw_q = (raw_w - raw_l) + (contempt * raw_d);
+    double raw_q = (raw_w - raw_l()) + (contempt * raw_d);
     return (raw_q + sum_q_weighted) / (1.0 + sum_visits);
 }

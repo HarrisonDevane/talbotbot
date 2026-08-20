@@ -182,6 +182,19 @@ endfunction()
 deploy_dlls(talbot_engine)
 deploy_dlls(talbot_uci)
 
+# Ship play_uci.yaml AND model.yaml next to talbot_uci.exe. Both are required
+# at startup; keeping the copies live-synced avoids the "edited config in repo
+# but forgot to copy to build dir" trap. model.engine is copied manually as
+# discussed earlier (it's a build artifact, not a source file).
+add_custom_command(TARGET talbot_uci POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/config/play_uci.yaml"
+        "$<TARGET_FILE_DIR:talbot_uci>/play_uci.yaml"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/config/model.yaml"
+        "$<TARGET_FILE_DIR:talbot_uci>/model.yaml"
+)
+
 # TRT compile tool DLL deployment
 add_custom_command(TARGET talbot_trt_compile POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${TRT_DIR}/lib" $<TARGET_FILE_DIR:talbot_trt_compile>

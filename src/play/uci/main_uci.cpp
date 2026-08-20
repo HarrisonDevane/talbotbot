@@ -5,16 +5,20 @@
 //
 // UCI clients (chess GUIs, cutechess-cli, tournament tools) launch engines
 // with NO arguments and speak UCI on stdin/stdout. There is deliberately no
-// CLI here: the exe reads its config file from
+// CLI here and no env-var overrides. The exe requires three files sitting
+// next to it:
 //
-//   1. $TALBOT_CONFIG, if set
-//   2. play_uci.yaml sitting next to the exe
+//   play_uci.yaml   -- all runtime config (paths derived, no external file deps)
+//   model.yaml      -- architecture spec (input_planes / board_dim / policy_moves).
+//                      Shipped alongside the .engine so dims can't drift.
+//   model.engine    -- TensorRT-compiled network (name is hardcoded)
 //
-// in that order, and errors out otherwise.
+// Missing any of the three is fatal at startup.
 //
-// This file was lifted from the old talbot_play --uci path. Tournament code,
-// tournament config fields, and the --uci / --tournament subcommand dispatcher
-// live in talbot_tournament / talbot_lichess now, not here.
+// GUI-tweakable settings are exposed as UCI options (SyzygyPath, MoveOverhead,
+// etc.) advertised in the `uci` handshake and applied via `setoption`. Some
+// options (Threads, Ponder, UCI_AnalyseMode, Clear Hash, SyzygyProbeLimit)
+// are advertised for GUI compatibility but accepted-and-ignored.
 // =============================================================================
 
 #define NOMINMAX
@@ -72,35 +76,80 @@ static inline void uci_out(const std::string& line) {
 // heads: cp is monotone in q, saturates smoothly near +-1, and roughly
 // matches the scale GUIs expect for cp scores. Clamped to a sane range.
 static int q_to_cp(double q) {
-    const double EPS = 1e-6;
-    if (q >  1.0 - EPS) q =  1.0 - EPS;
-    if (q < -1.0 + EPS) q = -1.0 + EPS;
-    double cp = 200.0 * std::log10((1.0 + q) / (1.0 - q));
-    if (cp >  10000.0) cp =  10000.0;
-    if (cp < -10000.0) cp = -10000.0;
+    // The literal constant 1.5620688421 in the formula is tan⁻¹(10) / 90 * 180/π — it's calibrated so that q = 1.0 (nominal win) maps to cp ≈ +900, 
+    // roughly matching Stockfish's "clearly winning but not mate" range. Sensible default.
+    const double max_q = 1.569 / 1.5620688421;
+    q = std::clamp(q, -max_q, max_q);
+    double cp = 90.0 * std::tan(q * 1.5620688421);
+    
     return static_cast<int>(std::round(cp));
 }
 
-// Walk from root following max-visits child. Stop at unexpanded/leaf.
-// Reads are unlocked (visits/first_child raced against the search thread)
-// -- torn reads produce at worst a wobbly PV in one frame, invisible to GUIs.
-static std::vector<std::string> extract_pv(MCTSNode* root, int max_depth = 16) {
+static MCTSNode* get_best_root_child(MCTSNode* root, MCTSEngine* engine, double contempt) {
+    if (!root || root->num_children == 0) return nullptr;
+
+    // Was: pick argmax of the cached MCTSNode::gumbel_score field. The field
+    // was dropped from MCTSNode; the value is now recomputed inline from
+    // (raw_logit + root_gumbel_noise[i] + sigma * v_mix_completion), same
+    // formula, same inputs, same result.
+    double max_visits = 0.0;
+    for (int i = 0; i < root->num_children; ++i) {
+        MCTSNode* c = root->first_child + i;
+        if (c->visits > max_visits) max_visits = c->visits;
+    }
+    const double v_mix = root->calculate_v_mix(contempt);
+
+    MCTSNode* best = nullptr;
+    double best_score = -1e20;
+    for (int i = 0; i < root->num_children; ++i) {
+        MCTSNode* c = root->first_child + i;
+        double noise = (i < (int)engine->root_gumbel_noise.size())
+                     ? engine->root_gumbel_noise[i] : 0.0;
+        double score = c->calculate_gumbel_score(
+            contempt, engine->gumbel_c_visit, engine->gumbel_c_scale,
+            max_visits, v_mix, noise);
+        if (score > best_score) {
+            best_score = score;
+            best = c;
+        }
+    }
+    return best;
+}
+
+static double best_child_q(MCTSNode* root, MCTSEngine* engine, double contempt) {
+    MCTSNode* best = get_best_root_child(root, engine, contempt);
+    if (!best || best->visits <= 0) return std::nan("");
+    return -best->expected_value(contempt);
+}
+
+static std::vector<std::string> extract_pv(MCTSNode* root, MCTSEngine* engine, double contempt, int max_depth = 32) {
     std::vector<std::string> pv;
     MCTSNode* node = root;
+
+    // 1. Pick the actual best move at the root using Gumbel Score
+    MCTSNode* best = get_best_root_child(node, engine, contempt);
+    if (!best || best->visits <= 0) return pv;
+
+    pv.push_back(chess::uci::moveToUci(best->move));
+    node = best;
+
+    // 2. Walk the rest of the tree using max visits
     while (node && node->is_expanded() && node->num_children > 0 && (int)pv.size() < max_depth) {
-        MCTSNode* best = nullptr;
-        int best_visits = -1;
+        MCTSNode* next_best = nullptr;
+        int max_v = 0;
         for (int i = 0; i < node->num_children; ++i) {
             MCTSNode* c = node->first_child + i;
-            if (c->visits > best_visits) { best_visits = c->visits; best = c; }
+            if (c->visits > max_v) {
+                max_v = c->visits;
+                next_best = c;
+            }
         }
-        if (!best || best->visits <= 0) break;
-        pv.push_back(chess::uci::moveToUci(best->move));
-        node = best;
+        if (!next_best || max_v <= 0) break;
+        pv.push_back(chess::uci::moveToUci(next_best->move));
+        node = next_best;
     }
     return pv;
 }
-// -----------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------
 static std::vector<std::string> split(const std::string& s, char delimiter) {
@@ -127,11 +176,9 @@ static DWORD_PTR mask_from_cores(const std::vector<int>& cores) {
 // cores, etc.) are gone. If we need one back later, add it here explicitly.
 // =============================================================================
 struct UciConfig {
-    // paths
-    std::string model_file_path;   // model.yaml -- dims live here
-    std::string base_log_dir;
-    std::string base_model_path;
-    std::string engine_path;       // derived: base_model_path + ".engine"
+    // Paths -- all resolved relative to exe_dir at startup, none in yaml.
+    std::string engine_path;                 // {exe_dir}/model.engine (hardcoded name)
+    std::string base_log_dir;                // from engine.log_dir; empty = disabled
     int  main_logging_level;
 
     // cores
@@ -146,7 +193,7 @@ struct UciConfig {
     int batcher_logging_level;
     int logging_interval_sec;
 
-    // model dims (loaded from model.yaml)
+    // model dims (loaded from model.yaml sitting next to the exe)
     int input_planes;
     int board_dim;
     int policy_moves;
@@ -165,23 +212,27 @@ struct UciConfig {
     // top-two candidates differ in raw Q by at least this much. 0 disables.
     double early_stop_q_gap = 0.0;
     int early_stop_min_visits = 0;
+    bool early_return_on_forced_win;
 };
 
-static UciConfig load_config(const std::string& config_file_path) {
+// The exe_dir is passed in so we can set engine_path (model.engine sits next
+// to the exe by contract; there is no yaml override).
+static UciConfig load_config(const std::string& config_file_path,
+                             const std::string& exe_dir) {
     UciConfig cfg;
 
-    YAML::Node root   = YAML::LoadFile(config_file_path);
-    YAML::Node global = root["global"];
-    YAML::Node eval_n = root["evaluation"];
-    YAML::Node infer_n= root["inference"];
-    YAML::Node mcts_n = root["mcts"];
-    YAML::Node sel_n  = root["selection"];
+    YAML::Node root    = YAML::LoadFile(config_file_path);
+    YAML::Node engine  = root["engine"];        // renamed from "global"
+    YAML::Node eval_n  = root["evaluation"];
+    YAML::Node infer_n = root["inference"];
+    YAML::Node mcts_n  = root["mcts"];
+    YAML::Node sel_n   = root["selection"];
 
-    cfg.model_file_path    = global["model_file"].as<std::string>();
-    cfg.base_log_dir       = global["log_dir"].as<std::string>();
-    cfg.main_logging_level = global["main_logging_level"].as<int>();
-    cfg.base_model_path    = global["model_path"].as<std::string>();
-    cfg.engine_path        = cfg.base_model_path + ".engine";
+    if (!engine) throw std::runtime_error("play_uci.yaml missing 'engine:' block");
+
+    cfg.engine_path        = exe_dir + "/model.engine";
+    cfg.base_log_dir       = engine["log_dir"] ? engine["log_dir"].as<std::string>() : std::string();
+    cfg.main_logging_level = engine["log_level"] ? engine["log_level"].as<int>() : 20;
 
     if (eval_n && eval_n["main_cores"])
         for (const auto& c : eval_n["main_cores"]) cfg.main_cores.push_back(c.as<int>());
@@ -197,27 +248,23 @@ static UciConfig load_config(const std::string& config_file_path) {
     cfg.batcher_logging_level = infer_n["logging_level"].as<int>();
     cfg.logging_interval_sec  = infer_n["logging_interval_sec"].as<int>();
 
-    YAML::Node model = YAML::LoadFile(cfg.model_file_path);
+    // Model dims come from model.yaml sitting next to the exe -- single
+    // source of truth with the trained artifact. play_uci.yaml no longer
+    // duplicates these, so no drift risk.
+    const std::string model_yaml_path = exe_dir + "/model.yaml";
+    YAML::Node model = YAML::LoadFile(model_yaml_path);
     cfg.input_planes = model["model"]["input_planes"].as<int>();
     cfg.board_dim    = model["model"]["board_dim"].as<int>();
     cfg.policy_moves = model["model"]["total_policy_moves"].as<int>();
 
-    if (YAML::Node tb_n = root["tablebase"]) {
-        if (tb_n["enabled"] && tb_n["enabled"].as<bool>()) {
-            if (!tb_n["path"]) {
-                throw std::runtime_error(
-                    "tablebase.enabled is true but tablebase.path is missing");
-            }
-            cfg.tablebase_enabled = true;
-            cfg.tablebase_path    = tb_n["path"].as<std::string>();
-        }
-    }
+    // Tablebase: no yaml block. TB probing is off at startup; the GUI enables
+    // it by sending `setoption name SyzygyPath value <path>`.
 
     ActionSelectorConfig& s = cfg.selector;
     s.node_pool_size         = mcts_n["node_pool_size"].as<int>();
     s.virtual_loss           = mcts_n["virtual_loss"].as<double>();
     s.contempt               = mcts_n["contempt"].as<double>();
-    s.deficit_eps                  = mcts_n["deficit_eps"].as<double>();
+    s.deficit_eps            = mcts_n["deficit_eps"].as<double>();
     s.two_fold_repetition    = mcts_n["two_fold_repetition"].as<bool>();
     s.draw_cutoff            = sel_n["draw_cutoff"].as<double>();
     s.gumbel_c_visit         = mcts_n["gumbel_c_visit"].as<double>();
@@ -239,6 +286,11 @@ static UciConfig load_config(const std::string& config_file_path) {
     if (mcts_n["early_stop_min_visits"]) {
         cfg.early_stop_min_visits = mcts_n["early_stop_min_visits"].as<int>();
     }
+
+    if (mcts_n["early_return_on_forced_win"]) {
+        cfg.early_return_on_forced_win = mcts_n["early_return_on_forced_win"].as<bool>();
+    }
+
 
     // time_control is REQUIRED for UCI (clock-based search is the whole point).
     YAML::Node tc_n = root["time_control"];
@@ -422,92 +474,89 @@ static bool probe_root_tablebase(const chess::Board& board,
 // =============================================================================
 // CONFIG RESOLUTION
 //
-// UCI GUIs launch the exe with zero args. That means the exe has to find its
-// own config -- no relative "run from project root" trick like the trainer.
-// Resolution order:
-//   1. $TALBOT_CONFIG env var (dev / A-B testing convenience)
-//   2. play_uci.yaml sitting next to talbot.exe
-//   3. fatal error with a clear message
+// UCI GUIs launch the exe with zero args. The contract is: play_uci.yaml
+// and model.engine both sit next to talbot.exe. No overrides, no env vars,
+// no CLI flags. Missing either -> fatal at startup with a clear message.
 // =============================================================================
-static std::string resolve_config_path() {
-    if (const char* env = std::getenv("TALBOT_CONFIG")) {
-        if (env[0] != '\0') return std::string(env);
-    }
+static std::string get_exe_dir() {
     char buf[MAX_PATH];
     DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n == 0 || n == MAX_PATH) {
-        // Shouldn't happen; fall back to bare filename which resolves against cwd.
-        return "play_uci.yaml";
-    }
-    return (fs::path(std::string(buf, n)).parent_path() / "play_uci.yaml").string();
+    if (n == 0 || n == MAX_PATH) return "";      // shouldn't happen on Windows
+    return fs::path(std::string(buf, n)).parent_path().string();
 }
 
 // =============================================================================
 int main(int /*argc*/, char* /*argv*/[]) {
     // A GUI launches us with no args and expects UCI on stdio. Do not add flags.
 
-    const std::string config_file_path = resolve_config_path();
+    const std::string exe_dir = get_exe_dir();
+    if (exe_dir.empty()) {
+        std::cerr << "Fatal: could not determine exe directory (GetModuleFileName failed).\n";
+        return 1;
+    }
+
+    const std::string config_file_path = exe_dir + "/play_uci.yaml";
     if (!fs::exists(config_file_path)) {
-        std::cerr << "Fatal: config not found. Looked at:\n"
-                  << "  1. $TALBOT_CONFIG env var (unset or empty)\n"
-                  << "  2. " << config_file_path << "\n"
-                  << "Place play_uci.yaml next to talbot.exe or set TALBOT_CONFIG.\n";
+        std::cerr << "Fatal: play_uci.yaml not found at " << config_file_path << "\n"
+                  << "It must sit in the same directory as talbot.exe.\n";
+        return 1;
+    }
+
+    const std::string model_yaml_path = exe_dir + "/model.yaml";
+    if (!fs::exists(model_yaml_path)) {
+        std::cerr << "Fatal: model.yaml not found at " << model_yaml_path << "\n"
+                  << "It must sit in the same directory as talbot.exe.\n";
         return 1;
     }
 
     UciConfig cfg;
     try {
-        cfg = load_config(config_file_path);
+        cfg = load_config(config_file_path, exe_dir);
     } catch (const std::exception& e) {
         std::cerr << "Fatal: failed to load config (" << config_file_path
                   << "): " << e.what() << std::endl;
         return 1;
     }
 
-    // ---- logging ------------------------------------------------------------
-    auto now = std::chrono::system_clock::now();
-    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-    std::tm* lt = std::localtime(&now_time);
-    std::ostringstream time_oss;
-    time_oss << std::put_time(lt, "%Y-%m-%d_%H-%M-%S");
-    std::string run_log_dir = cfg.base_log_dir + "/" + time_oss.str();
-    fs::create_directories(run_log_dir);
+    if (!fs::exists(cfg.engine_path)) {
+        std::cerr << "Fatal: model.engine not found at " << cfg.engine_path << "\n"
+                  << "It must sit in the same directory as talbot.exe.\n";
+        return 1;
+    }
+
+    // ---- logging (optional) -------------------------------------------------
+    // If engine.log_dir was empty in the yaml, base_log_dir is empty; we skip
+    // creating any directories and let Logger's empty-dir path make every
+    // log() call a no-op. This keeps UCI silent by default -- what tournament
+    // runners expect from a shipped engine.
+    std::string run_log_dir;
+    if (!cfg.base_log_dir.empty()) {
+        auto now = std::chrono::system_clock::now();
+        std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+        std::tm* lt = std::localtime(&now_time);
+        std::ostringstream time_oss;
+        time_oss << std::put_time(lt, "%Y-%m-%d_%H-%M-%S");
+        run_log_dir = cfg.base_log_dir + "/" + time_oss.str();
+        fs::create_directories(run_log_dir);
+    }
 
     Logger main_logger("uci_main", run_log_dir, cfg.main_logging_level);
     main_logger.rotate(0, 0);
     main_logger.log("INFO", "Booting Talbot UCI Engine...");
     main_logger.log("INFO", "Config: " + config_file_path);
+    main_logger.log("INFO", "Engine: " + cfg.engine_path);
 
     if (!cfg.main_cores.empty()) {
         DWORD_PTR m = mask_from_cores(cfg.main_cores);
         if (m != 0) SetThreadAffinityMask(GetCurrentThread(), m);
     }
 
-    if (!fs::exists(cfg.engine_path)) {
-        main_logger.log("CRITICAL", "Engine file missing at " + cfg.engine_path);
-        std::cerr << "Fatal: TRT engine missing at " << cfg.engine_path << std::endl;
-        return 1;
-    }
+    // (engine_path existence already validated pre-logger.)
 
-    // ---- Syzygy tablebases --------------------------------------------------
-    // tb_init is the one non-thread-safe Fathom call; do it here at startup,
-    // before the search worker thread can probe. tb_ready is what we hand to
-    // the engine -- false if disabled OR if init found no tables.
+    // Tablebase is disabled at startup. The GUI enables it by sending
+    // `setoption name SyzygyPath value <path>`, which triggers tb_init in
+    // the setoption handler below.
     bool tb_ready = false;
-    if (cfg.tablebase_enabled) {
-        if (tb_init(cfg.tablebase_path.c_str())) {
-            tb_ready = (TB_LARGEST > 0);
-            main_logger.log("INFO", "Syzygy initialised from " + cfg.tablebase_path +
-                            " (TB_LARGEST=" + std::to_string(TB_LARGEST) + ")");
-            if (!tb_ready) {
-                main_logger.log("WARNING",
-                    "tb_init ok but TB_LARGEST=0 -- no tables at path. Probing disabled.");
-            }
-        } else {
-            main_logger.log("ERROR",
-                "tb_init failed for " + cfg.tablebase_path + " -- probing disabled.");
-        }
-    }
 
     // ---- inference plumbing -------------------------------------------------
     SharedBuffers buf = make_shared_buffers(cfg);
@@ -549,7 +598,9 @@ int main(int /*argc*/, char* /*argv*/[]) {
     mcts_engine->set_nps_alpha(cfg.time_control.nps_ewma_alpha);
     mcts_engine->early_stop_q_gap = cfg.early_stop_q_gap;
     mcts_engine->early_stop_min_visits = cfg.early_stop_min_visits;
-    TimeControl time_control(cfg.time_control);
+    mcts_engine->early_return_on_forced_win = cfg.early_return_on_forced_win;
+    // TimeControl is reconstructed per-go so setoption MoveOverhead changes
+    // take effect on the next search.
 
     // ---- search worker thread ----------------------------------------------
     // Agent must exist before we start the thread since the worker holds a
@@ -607,24 +658,33 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     MCTSNode* root = worker->mcts->root;
                     if (!root || root->visits == 0) continue;
 
+                    std::string score_str;
+                    if (root->has_forced_outcome() && root->forced_outcome != 0) {
+                        int moves_to_mate = (root->distance_to_mate + 1) / 2;
+                        if (root->forced_outcome == -1) moves_to_mate = -moves_to_mate;
+                        score_str = "score mate " + std::to_string(moves_to_mate);
+                    } else {
+                        double q = best_child_q(root, worker->mcts, worker->contempt);
+                        if (std::isnan(q)) continue;
+                        score_str = "score cp " + std::to_string(q_to_cp(q));
+                    }
+
                     int nodes = worker->mcts->simulation_count;
                     long long elapsed_ms =
                         std::chrono::duration_cast<std::chrono::milliseconds>(now - search_start).count();
                     long long nps = elapsed_ms > 0 ? (nodes * 1000LL / elapsed_ms) : 0;
 
-                    // Root's expected_value is in own-mover perspective; that
-                    // matches UCI's cp convention (positive = side-to-move
-                    // stands better). No flip needed.
-                    double q = root->expected_value(worker->contempt);
-                    int cp = q_to_cp(q);
+                    std::vector<std::string> pv = extract_pv(root, worker->mcts, worker->contempt);
+                    int depth    = worker->mcts->max_selection_depth;
+                    int seldepth = std::max(depth, (int)pv.size());
 
-                    std::vector<std::string> pv = extract_pv(root);
                     std::ostringstream oss;
-                    oss << "info depth " << pv.size()
+                    oss << "info depth " << depth
+                        << " seldepth " << seldepth
                         << " nodes " << nodes
                         << " nps " << nps
                         << " time " << elapsed_ms
-                        << " score cp " << cp
+                        << " " << score_str
                         << " pv";
                     for (const auto& m : pv) oss << " " << m;
                     uci_out(oss.str());
@@ -650,22 +710,42 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     long long elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - search_start).count();
                     long long nps = elapsed_ms > 0 ? (worker->mcts->simulation_count * 1000LL / elapsed_ms) : 0;
-                    double q = root->expected_value(worker->contempt);
-                    int cp = q_to_cp(q);
-                    std::vector<std::string> pv = extract_pv(root);
-                    std::ostringstream oss;
-                    oss << "info depth " << pv.size()
-                        << " nodes " << worker->mcts->simulation_count
-                        << " nps " << nps
-                        << " time " << elapsed_ms
-                        << " score cp " << cp
-                        << " pv";
-                    for (const auto& m : pv) oss << " " << m;
-                    uci_out(oss.str());
+                    
+                    std::string score_str;
+                    bool skip_emit = false;
+
+                    if (root->has_forced_outcome() && root->forced_outcome != 0) {
+                        int moves_to_mate = (root->distance_to_mate + 1) / 2;
+                        if (root->forced_outcome == -1) moves_to_mate = -moves_to_mate;
+                        score_str = "score mate " + std::to_string(moves_to_mate);
+                    } else {
+                        double q = best_child_q(root, worker->mcts, worker->contempt);
+                        if (!std::isnan(q)) {
+                            score_str = "score cp " + std::to_string(q_to_cp(q));
+                        } else {
+                            skip_emit = true;
+                        }
+                    }
+
+                    if (!skip_emit) {
+                        std::vector<std::string> pv = extract_pv(root, worker->mcts, worker->contempt);
+                        int depth    = worker->mcts->max_selection_depth;
+                        int seldepth = std::max(depth, (int)pv.size());
+                        std::ostringstream oss;
+                        oss << "info depth " << depth
+                            << " seldepth " << seldepth
+                            << " nodes " << worker->mcts->simulation_count
+                            << " nps " << nps
+                            << " time " << elapsed_ms
+                            << " " << score_str
+                            << " pv";
+                        for (const auto& m : pv) oss << " " << m;
+                        uci_out(oss.str());
+                    }
                 }
             }
 
-            SelectionResult result = worker->agent->select_move(worker->mcts->root, ply_snapshot);
+            SelectionResult result = worker->agent->select_move(worker->mcts->root, ply_snapshot, worker->mcts);
             std::string best_move_str = (result.best_move == chess::Move::NO_MOVE)
                 ? "0000" : chess::uci::moveToUci(result.best_move);
             uci_out("bestmove " + best_move_str);
@@ -692,6 +772,23 @@ int main(int /*argc*/, char* /*argv*/[]) {
         if (command == "uci") {
             uci_out("id name Talbot UCI");
             uci_out("id author Talbot Dev");
+
+            // Options -- advertised to GUIs so they show up in settings UI.
+            // Applied on setoption:
+            //   SyzygyPath     -- reinits tablebase probing at the new path.
+            //   MoveOverhead   -- mutates cfg.time_control for subsequent gos.
+            // Accepted but ignored (kept so GUIs don't complain and so we
+            // reserve the names for later):
+            //   Threads, Ponder, UCI_AnalyseMode, SyzygyProbeLimit, Clear Hash
+            uci_out("option name Threads type spin default 1 min 1 max 1");
+            uci_out("option name Ponder type check default false");
+            uci_out("option name MoveOverhead type spin default " +
+                    std::to_string(cfg.time_control.move_overhead_ms) + " min 0 max 5000");
+            uci_out("option name SyzygyPath type string default " +
+                    (cfg.tablebase_path.empty() ? std::string("<empty>") : cfg.tablebase_path));
+            uci_out("option name SyzygyProbeLimit type spin default 7 min 0 max 7");
+            uci_out("option name UCI_AnalyseMode type check default false");
+            uci_out("option name Clear Hash type button");
             uci_out("uciok");
         }
         else if (command == "isready") {
@@ -784,13 +881,17 @@ int main(int /*argc*/, char* /*argv*/[]) {
                 hard_dl = soft_dl;
             } else if (wtime >= 0 || btime >= 0) {
                 // Clock-based: allocate from our side's clock via TimeControl.
+                // Constructed fresh each go so setoption MoveOverhead changes
+                // take effect on the very next search rather than being frozen
+                // at exe-launch.
                 bool white = (board.sideToMove() == chess::Color::WHITE);
                 ClockState cs;
                 cs.time_left_ms = white ? wtime : btime;
                 cs.increment_ms = white ? winc  : binc;
                 cs.moves_to_go  = movestogo;
                 cs.ply          = ply_count;
-                TimeBudget tb = time_control.allocate(cs);
+                TimeControl tc(cfg.time_control);
+                TimeBudget tb = tc.allocate(cs);
                 timed = true;
                 soft_dl = now + std::chrono::milliseconds(tb.target_ms);
                 hard_dl = now + std::chrono::milliseconds(tb.hard_limit_ms);
@@ -853,8 +954,87 @@ int main(int /*argc*/, char* /*argv*/[]) {
             }
             break;
         }
-        // Unknown commands (including "setoption", "ponderhit", "debug" for
-        // now) are silently ignored -- to be filled in as we iterate.
+        else if (command == "setoption") {
+            // Grammar: setoption name <NAME words> [value <VALUE words>]
+            // NAME can contain spaces (e.g. "Clear Hash"); VALUE too (paths).
+            if (tokens.size() < 3 || tokens[1] != "name") {
+                main_logger.log("WARNING", "Malformed setoption: " + line);
+                continue;
+            }
+            size_t value_idx = tokens.size();
+            for (size_t i = 2; i < tokens.size(); ++i) {
+                if (tokens[i] == "value") { value_idx = i; break; }
+            }
+            std::string opt_name;
+            for (size_t i = 2; i < value_idx; ++i) {
+                if (i > 2) opt_name += " ";
+                opt_name += tokens[i];
+            }
+            std::string opt_value;
+            for (size_t i = value_idx + 1; i < tokens.size(); ++i) {
+                if (i > value_idx + 1) opt_value += " ";
+                opt_value += tokens[i];
+            }
+
+            if (opt_value.size() >= 2 &&
+                ((opt_value.front() == '\'' && opt_value.back() == '\'') ||
+                (opt_value.front() == '"'  && opt_value.back() == '"'))) {
+                opt_value = opt_value.substr(1, opt_value.size() - 2);
+            }
+
+            std::string key = opt_name;
+            std::transform(key.begin(), key.end(), key.begin(),
+                           [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+
+            if (key == "syzygypath") {
+                // Reinit TB probing at the new path. Empty path disables.
+                // Any in-flight search would race with tb_free; UCI protocol
+                // says setoption comes between searches, so we don't defend.
+                if (tb_ready) { tb_free(); tb_ready = false; }
+                cfg.tablebase_path    = opt_value;
+                cfg.tablebase_enabled = !opt_value.empty();
+                if (cfg.tablebase_enabled && opt_value != "<empty>") {
+                    if (tb_init(opt_value.c_str())) {
+                        tb_ready = (TB_LARGEST > 0);
+                        main_logger.log("INFO", "SyzygyPath -> " + opt_value +
+                                        " (TB_LARGEST=" + std::to_string(TB_LARGEST) + ")");
+                    } else {
+                        main_logger.log("ERROR", "tb_init failed for " + opt_value);
+                    }
+                } else {
+                    main_logger.log("INFO", "SyzygyPath cleared; TB probing disabled.");
+                }
+                // MCTSEngine captured use_tablebase at construction; push the
+                // new value in so the in-tree probe actually fires (or stops).
+                // Also affects the root-probe path via tb_ready directly.
+                mcts_engine->use_tablebase = tb_ready;
+            }
+            else if (key == "moveoverhead") {
+                try {
+                    long long v = std::stoll(opt_value);
+                    if (v < 0) v = 0;
+                    if (v > 5000) v = 5000;
+                    cfg.time_control.move_overhead_ms = v;
+                    // TimeControl is reconstructed per-go via the cfg it holds,
+                    // so this takes effect on the next `go`. If TimeControl
+                    // ever caches the value, we'd need to mutate the instance
+                    // here instead.
+                    main_logger.log("INFO", "MoveOverhead -> " + std::to_string(v) + "ms");
+                } catch (...) {
+                    main_logger.log("WARNING", "MoveOverhead: bad value '" + opt_value + "'");
+                }
+            }
+            else if (key == "threads" || key == "ponder" || key == "uci_analysemode" ||
+                     key == "syzygyprobelimit" || key == "clear hash") {
+                // Advertised for GUI compatibility; not applied.
+                main_logger.log("INFO", "setoption '" + opt_name +
+                                "' accepted (no effect in this build).");
+            }
+            else {
+                main_logger.log("INFO", "setoption '" + opt_name + "' unknown -- ignored.");
+            }
+        }
+        // Unknown commands (ponderhit, debug, etc.) silently ignored.
     }
 
     main_logger.log("INFO", "Quit received. Terminating worker...");

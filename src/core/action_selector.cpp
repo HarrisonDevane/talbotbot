@@ -20,7 +20,7 @@ void ActionSelector::reset_for_new_game() {
     logger.log("DEBUG", "Agent state reset. Resignation allowed: " + std::string(use_resignation ? "True" : "False"));
 }
 
-SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
+SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSEngine* engine) {
     SelectionResult result;
     
     int num_children = root->num_children;
@@ -72,15 +72,32 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
     MCTSNode* top_node;
     double best_q = -2.0;
 
-    // Find best Q of child nodes
+    // gumbel_score cache dropped from MCTSNode. Recompute inline via the
+    // same formula the cache held: calculate_gumbel_score() with noise
+    // pulled from engine->root_gumbel_noise. max_visits/v_mix computed once
+    // over the candidate set, exactly as the old _rescore did before this
+    // sort was reached.
+    auto gscore = [&](MCTSNode* n, double mv, double vm) -> double {
+        int idx = static_cast<int>(n - root->first_child);
+        double noise = (idx >= 0 && idx < (int)engine->root_gumbel_noise.size())
+                     ? engine->root_gumbel_noise[idx] : 0.0;
+        return n->calculate_gumbel_score(
+            config.contempt, engine->gumbel_c_visit, engine->gumbel_c_scale,
+            mv, vm, noise);
+    };
+
     if (!non_forced_visited.empty()) {
-        std::sort(non_forced_visited.begin(), non_forced_visited.end(), [](MCTSNode* a, MCTSNode* b) {
+        double mv = 0.0;
+        for (MCTSNode* c : non_forced_visited) if (c->visits > mv) mv = c->visits;
+        double vm = root->calculate_v_mix(config.contempt);
+        std::sort(non_forced_visited.begin(), non_forced_visited.end(),
+                  [&](MCTSNode* a, MCTSNode* b) {
             if (a->visits != b->visits) return a->visits > b->visits;
-            return a->gumbel_score > b->gumbel_score;
+            return gscore(a, mv, vm) > gscore(b, mv, vm);
         });
         MCTSNode* m1 = non_forced_visited[0];
         MCTSNode* m2 = (non_forced_visited.size() > 1) ? non_forced_visited[1] : m1;
-        top_node = (m1->gumbel_score > m2->gumbel_score) ? m1 : m2;
+        top_node = (gscore(m1, mv, vm) > gscore(m2, mv, vm)) ? m1 : m2;
         best_q = -top_node->expected_value(config.contempt);
     }
 
@@ -191,15 +208,19 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count) {
             std::discrete_distribution<> d(weights.begin(), weights.end());
             result.best_move = non_forced_visited[d(rng)]->move;
         } else {
-            // Deterministic: pick the gumbel winner
-            std::sort(non_forced_visited.begin(), non_forced_visited.end(), [](MCTSNode* a, MCTSNode* b) {
+            // Deterministic: pick the gumbel winner. Same formula as the
+            // dropped gumbel_score field, computed inline via gscore().
+            double mv = 0.0;
+            for (MCTSNode* c : non_forced_visited) if (c->visits > mv) mv = c->visits;
+            double vm = root->calculate_v_mix(config.contempt);
+            std::sort(non_forced_visited.begin(), non_forced_visited.end(),
+                      [&](MCTSNode* a, MCTSNode* b) {
                 if (a->visits != b->visits) return a->visits > b->visits;
-                return a->gumbel_score > b->gumbel_score;
+                return gscore(a, mv, vm) > gscore(b, mv, vm);
             });
             MCTSNode* m1 = non_forced_visited[0];
             MCTSNode* m2 = (non_forced_visited.size() > 1) ? non_forced_visited[1] : m1;
-            MCTSNode* gumbel_winner = (m1->gumbel_score > m2->gumbel_score) ? m1 : m2;
-            result.best_move = (m1->gumbel_score > m2->gumbel_score) ? m1->move : m2->move;
+            result.best_move = (gscore(m1, mv, vm) > gscore(m2, mv, vm)) ? m1->move : m2->move;
         }
         
     // Rule E: Delay Mate

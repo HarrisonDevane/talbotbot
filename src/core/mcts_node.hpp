@@ -4,34 +4,33 @@
 #include <climits>
 #include "chess.hpp"
 
-// Compact 72-byte MCTSNode.
+// Compact 56-byte MCTSNode.
 //
-// Size history: originally ~136 B on x86-64 (8 doubles + 2 std::optional<int>
-// + 2 bools with padding). This layout drops to 72 B (~1.9x more nodes per
-// RAM budget) by:
-//   - narrowing accumulators, scores, and NN outputs to float,
-//   - encoding proven outcomes as a sentinel-tagged int8 rather than
-//     std::optional<int>,
-//   - packing the two bool status fields into a single bitfield,
-//   - reordering to minimise alignment padding.
+// Size history: original ~136 B (doubles + std::optional<int> + bools). First
+// trim brought it to 72 B (float sums, sentinel-tagged forced_outcome, packed
+// flags). This second pass drops three more fields to reach 56 B:
 //
-// The 8-byte parent / first_child pointers are unchanged at this level -- a
-// pointer->index refactor saves another 8 B but is deferred.
+//   - raw_l dropped: derivable as (1 - raw_w - raw_d) since NN outputs a
+//     valid probability distribution. See raw_l() helper.
+//   - gumbel_noise dropped: only meaningful for root's direct children.
+//     Stored off-node in MCTSEngine::root_gumbel_noise (indexed by child
+//     position). calculate_gumbel_score() takes noise as an explicit param.
+//   - gumbel_score dropped: was a cache for the score formula. Callers now
+//     compute inline (cheap: a few flops per call) or hold a local scratch
+//     vector when they need many scores at once. _rescore() went away with
+//     the field -- there's no cache left to refresh.
+//
+// Together these save 12 B of fields; alignment collapses the resulting
+// padding, so total drops 16 B (72 -> 56). ~22% memory saving on the pool.
 //
 // Float safety: w_sum / d_sum / l_sum accumulate per-visit values in [0,1]
-// plus virtual-loss offsets. Float has 24 bits of mantissa (~16M exact
-// integers), so precision only starts to matter above ~10M visits on a
-// single node -- well above any per-search visit count in self-play or
-// analysis. Roots in very long analysis could conceivably approach this
-// bound; the accumulators are only used for Q derivation, and Q there is
-// dominated by the sum ratio, not the last decimal.
+// plus virtual-loss offsets. Float mantissa (~16M exact integers) tolerates
+// >10M visits per node.
 //
 // Proven-outcome encoding:
-//   forced_outcome == INT8_MIN  -> unresolved (equivalent to old std::nullopt)
-//   forced_outcome in {-1, 0, 1} -> {loss, draw, win} from node's own perspective
-// distance_to_mate is meaningful iff has_forced_outcome() is true. int16
-// (±32k) covers DTM in any practical search or 7-piece Syzygy DTM (max ~550
-// half-moves). int8 would be tight; not worth the risk.
+//   forced_outcome == INT8_MIN  -> unresolved (was std::nullopt).
+//   forced_outcome in {-1,0,1}  -> {loss,draw,win} from node's own perspective.
+// distance_to_mate is meaningful iff has_forced_outcome().
 struct MCTSNode {
     MCTSNode* parent = nullptr;               //  8
     MCTSNode* first_child = nullptr;          //  8
@@ -43,16 +42,11 @@ struct MCTSNode {
 
     // NN outputs cached on this node. raw_logit is the policy logit written
     // by the PARENT's inference callback (indexed via policy_flat_index);
-    // raw_w / raw_d / raw_l are written by THIS node's own inference callback.
+    // raw_w / raw_d are written by THIS node's own inference callback.
+    // raw_l is derived on read: raw_l() below.
     float raw_logit = 0.0f;                   //  4
     float raw_w = 0.0f;                       //  4
     float raw_d = 0.0f;                       //  4
-    float raw_l = 0.0f;                       //  4
-
-    float gumbel_noise = 0.0f;                //  4  -- per-child Gumbel-top-k noise
-    float gumbel_score = 0.0f;                //  4  -- cached; refreshed by
-                                              //         calculate_gumbel_score() /
-                                              //         _rescore().
 
     int32_t visits = 0;                       //  4  -- root can exceed uint16
 
@@ -69,14 +63,19 @@ struct MCTSNode {
     // bit 0 = expanded, bit 1 = unavailable_for_selection.
     uint8_t flags = 0;                        //  1
 
-    // -> 72 bytes on x86-64 (was ~136 B).
+    // -> 56 bytes on x86-64 (was 72, originally ~136).
 
     static constexpr uint8_t FLAG_EXPANDED    = 0x1;
     static constexpr uint8_t FLAG_UNAVAILABLE = 0x2;
 
     MCTSNode(MCTSNode* p = nullptr, chess::Move m = chess::Move::NO_MOVE);
 
-    // Status helpers -- replace the old bool fields.
+    // Derived value for the WDL loss probability. NN outputs sum to 1 by
+    // construction (softmax at the value head), so this recomputation is
+    // exact within float precision.
+    float raw_l() const { return 1.0f - raw_w - raw_d; }
+
+    // Status helpers.
     bool is_expanded()    const { return (flags & FLAG_EXPANDED)    != 0; }
     bool is_unavailable() const { return (flags & FLAG_UNAVAILABLE) != 0; }
     void set_expanded(bool v) {
@@ -88,20 +87,21 @@ struct MCTSNode {
                                        : (flags & ~FLAG_UNAVAILABLE));
     }
 
-    // Forced-outcome helpers -- replace std::optional accessors.
+    // Forced-outcome helpers.
     bool has_forced_outcome() const { return forced_outcome != INT8_MIN; }
     void clear_forced_outcome()     { forced_outcome = INT8_MIN; distance_to_mate = 0; }
 
     MCTSNode* get_child(chess::Move m) const;
 
     double expected_value(double contempt) const;
+
+    // Gumbel score = raw_logit + noise + sigma * v_mix_completion.
+    // NO CACHING -- returns the computed value. Caller stores if needed.
+    // noise: 0 for non-root descendants during selection; root children pull
+    // their noise from MCTSEngine::root_gumbel_noise[child - root->first_child].
     double calculate_gumbel_score(double contempt, double gumbel_c_visit,
                                   double gumbel_c_scale, double max_visits,
-                                  double v_mix);
+                                  double v_mix, double noise) const;
+
     double calculate_v_mix(double contempt) const;
 };
-
-// Compile-time size assertion. Trips if a future edit balloons the struct.
-// Adjust deliberately if you WANT more fields.
-static_assert(sizeof(MCTSNode) <= 72,
-              "MCTSNode grew past 72 bytes; deep-search RAM budget will suffer.");

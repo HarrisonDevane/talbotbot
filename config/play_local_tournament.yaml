@@ -2,7 +2,7 @@ global:
   model_file: 'D:/Projects/talbot/config/model.yaml'             # Path to the model architecture config
   checkpoint_dir: 'D:/Projects/talbot/train_dir/models/checkpoints'  # Folder containing the .pth files in tournament_models
   log_dir: 'D:/Projects/talbot/logs/local_tournament'            # Directory for all tournament run logs
-  exe_path: './build/Release/talbot_play.exe'                    # Path to the compiled play engine
+  exe_path: './build/Release/talbot_tournament.exe'                    # Path to the compiled play engine
   main_logging_level: 20                                         # Logging level for the Tournament Orchestrator
 
 evaluation:
@@ -18,18 +18,19 @@ inference:
   logging_level: 20                                              # Logging level for the Batcher Diagnostics
 
 mcts:
-  node_pool_size: 100000                                         # Capacity of the MCTS node pool (allocated PER engine; 2 per worker)
-  worker_minibatch_size: 32                                      # Max positions a single worker sends at once
-  virtual_loss: 0.3                                              # Penalty applied to nodes currently being explored
-  contempt: 0.0                                                  # Contempt for playing drawing positions
-  cpuct: 1.75
+  node_pool_size: 50000                                        # Capacity of the persistent MCTS node pool
+  worker_minibatch_size: 128                                       # Max positions sent to batcher at once
+  virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored
+  contempt: 0.0                                                   # Contempt for playing drawing positions
+  deficit_eps: 0.5
   two_fold_repetition: true
-  gumbel_c_visit: 50.0                                           # Sigma used for gumbel score calculation
-  gumbel_c_scale: 1.0                                            # Scale for sigma with visit count
-  gumbel_noise: 0.0                                              # 0.0 for deterministic tournament play
-  gumbel_search_depth: 800                                       # Node evaluation budget per move
-  gumbel_m: 32                                                   # m value for sequential halving
-
+  early_return_on_forced_win: true
+  gumbel_c_visit: 50.0                                            # Sigma used for gumbel score calculation
+  gumbel_c_scale: 1.0                                             # Scale for sigma with visit count
+  gumbel_noise: 0.0                                               # 0.0 for deterministic tournament play
+  gumbel_search_depth: 1000                                       # Fallback node budget when UCI gives no time
+  gumbel_m: 64                                                    # m value for sequential halving
+  
 selection:
   temperature_ply_cutoff: 0                                      # Sample proportional to visit count for first moves (0 = always deterministic)
   temperature_q_decay: 0.0                                       # Absolute Q value [-1, 1] Boltzmann temperature decay
@@ -48,13 +49,3 @@ tournament:
   opening_file: 'D:/Projects/talbot/data/opening_pgn/8moves_v3.pgn'  # Path to the PGN file of opening lines
   max_ply_length: 400                                            # Hard cutoff in half-moves before a game is forced drawn
   worker_logging_level: 50                                       # Logging level for MCTS game worker: 20 = per move analysis, 50 = only PGN
-
-tournament_models:
-  - step_010000_model.pth
-  - step_020000_model.pth
-  - step_030000_model.pth
-  - step_040000_model.pth
-  - step_050000_model.pth
-  - step_060000_model.pth
-  - step_070000_model.pth
-  - step_080000_model.pth

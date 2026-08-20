@@ -83,6 +83,13 @@ public:
         *ptr = MCTSNode(parent, move); 
         return ptr;
     }
+
+    // Cheap pre-check so callers can bail cleanly instead of throwing from
+    // allocate(). Used by _queue_leaf_for_inference to decide whether an
+    // expansion is safe.
+    bool   has_capacity(size_t n) const { return next_idx + n <= pool.size(); }
+    size_t remaining()             const { return pool.size() - next_idx; }
+    size_t capacity()              const { return pool.size(); }
 };
 
 class MCTSEngine {
@@ -90,6 +97,7 @@ public:
     int worker_batch_size;
     int worker_id;
     bool two_fold_repetition;
+    bool early_terminal_return;
     double deficit_eps;
     double virtual_loss;
     double contempt;
@@ -97,6 +105,10 @@ public:
     int simulation_count;
     int inference_sent;
     int inference_received;
+
+    // Deepest ply reached by _select this search. Reset in reset(); updated
+    // at the end of _select. Reported as "depth" in UCI info lines.
+    int max_selection_depth = 0;
     double gumbel_c_visit;
     double gumbel_c_scale;
     double gumbel_noise;
@@ -150,6 +162,21 @@ public:
     // this from play_uci.yaml.
     double early_stop_q_gap = 0.0;
     int early_stop_min_visits = 0;
+    bool early_return_on_forced_win = false;
+    // ----------------------------------------------------------------------
+
+    // ---- Off-node gumbel noise (was per-MCTSNode) ------------------------
+    // Sized in _build_candidates to root->num_children. Only root's direct
+    // children have meaningful noise; interior nodes always pass 0 to
+    // calculate_gumbel_score. Lookup by index: root_gumbel_noise[child - root->first_child].
+    std::vector<float> root_gumbel_noise;
+
+    // ---- Pool exhaustion guard -------------------------------------------
+    // Set by _queue_leaf_for_inference when the pool can't fit another
+    // expansion. Both run_simulations paths check this in the outer loop,
+    // same shape as stop_requested. Cleared in reset(). Atomic so the search
+    // worker can set from any thread context (in practice only its own).
+    std::atomic<bool> pool_exhausted{false};
     // ----------------------------------------------------------------------
 
     std::atomic<int>* core_wait_count;
@@ -243,7 +270,8 @@ private:
     int  _build_candidates(int max_m, std::vector<MCTSNode*>& all_nodes,
                            std::vector<MCTSNode*>& active_candidates);
     void _run_round0(std::vector<MCTSNode*>& active_candidates, int& remaining_search_depth);
-    void _rescore(std::vector<MCTSNode*>& nodes);
+    // _rescore removed: no gumbel_score cache to refresh. Sites that needed
+    // fresh scores now compute inline via calculate_gumbel_score(...).
     void _halve(std::vector<MCTSNode*>& active_candidates);
     void _flush_inflight();
 
@@ -254,4 +282,5 @@ private:
 
     template <typename Predicate, typename WorkFn>
     void _spin_wait(Predicate should_keep_waiting, WorkFn work_fn);
+    bool _should_return_on_forced_win() const;
 };

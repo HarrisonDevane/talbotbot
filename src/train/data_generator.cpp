@@ -183,7 +183,7 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
             );
 
             // 3. Select Action
-            SelectionResult move_result = agent.select_move(mcts.root, ply_count);
+            SelectionResult move_result = agent.select_move(mcts.root, ply_count, &mcts);
 
             auto move_end_time = std::chrono::high_resolution_clock::now();
             double total_move_time = std::chrono::duration<double>(move_end_time - move_start_time).count();

@@ -49,5 +49,10 @@ public:
     void reset_for_new_game();
     void set_name(const std::string& new_name) { name = new_name; }
 
-    SelectionResult select_move(MCTSNode* root, int ply_count);
+    // MCTSEngine* threaded through so we can inline-recompute gumbel_score
+    // for the tie-break sort. Was reading MCTSNode::gumbel_score directly;
+    // that field was dropped, so we now compute via calculate_gumbel_score
+    // with noise pulled from engine->root_gumbel_noise. Formula, inputs,
+    // and output identical to the pre-drop behaviour.
+    SelectionResult select_move(MCTSNode* root, int ply_count, MCTSEngine* engine);
 };

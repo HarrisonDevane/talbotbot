@@ -42,6 +42,11 @@ public:
     }
 
     void rotate(int global_step, int rotation_interval) {
+        // Empty rl_dir => logging disabled. All log() calls fall through to
+        // the "file not open" branch and become no-ops. Callers (UCI, etc.)
+        // opt out of file logging by leaving log_dir empty in their config.
+        if (rl_dir.empty()) return;
+
         // FLAT DIRECTORY BYPASS: If rotation is <= 0, drop directly into rl_dir
         if (rotation_interval <= 0) {
             if (!log_file.is_open()) {
