@@ -9,7 +9,11 @@
 #include "logger.hpp"
 
 struct ActionSelectorConfig {
-    int node_pool_size;
+    // Unused since stage 3 -- kept only so any callers still populating this
+    // field don't fail to compile. Pool sizing lives on MCTSEngine::pool_sizing_cfg
+    // now; nothing here reads it.
+    int node_pool_size = 0;
+
     double contempt;
     double deficit_eps;
     double virtual_loss;
@@ -49,10 +53,10 @@ public:
     void reset_for_new_game();
     void set_name(const std::string& new_name) { name = new_name; }
 
-    // MCTSEngine* threaded through so we can inline-recompute gumbel_score
-    // for the tie-break sort. Was reading MCTSNode::gumbel_score directly;
-    // that field was dropped, so we now compute via calculate_gumbel_score
-    // with noise pulled from engine->root_gumbel_noise. Formula, inputs,
-    // and output identical to the pre-drop behaviour.
+    // Iterates root's edges (MCTSEdge*). move and raw_logit live on the edge;
+    // visits / expected_value / forced_outcome live on edge->child (nullable
+    // -- unmaterialised children treated the same as visits==0 was pre-split).
+    // Gumbel tie-break sort computes score inline via MCTSEdge::calculate_gumbel_score
+    // with noise pulled from engine->root_gumbel_noise, same formula as before.
     SelectionResult select_move(MCTSNode* root, int ply_count, MCTSEngine* engine);
 };

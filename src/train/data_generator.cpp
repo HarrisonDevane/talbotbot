@@ -5,12 +5,13 @@
 #include <cstring>
 #include <c10/util/Half.h>
 #include "board_utils.hpp"
+#include "pgn_writer.hpp"
 #include <sstream>
 #include <windows.h> 
 #include <cmath>
 
 DataGenerator::DataGenerator(
-    const YAML::Node& global_cfg,
+    const YAML::Node& pool_cfg,
     const YAML::Node& data_gen_cfg, const YAML::Node& mcts_cfg, const YAML::Node& sel_cfg, const YAML::Node& model_cfg,
     const std::string& rl_dir_in, int rot_interval,
     Logger& logger,
@@ -44,7 +45,9 @@ DataGenerator::DataGenerator(
     model_config.board_dim = model_cfg["model"]["board_dim"].as<int>();
     model_config.policy_moves = model_cfg["model"]["total_policy_moves"].as<int>();
 
-    selector_config.node_pool_size = mcts_cfg["node_pool_size"].as<int>();
+    // node_pool_size is no longer read from YAML -- pool is sized per-reset
+    // from pool_sizing knobs against gumbel_search_depth. See predict_pool_needs.
+    // The field on ActionSelectorConfig is left unused until stage 5.
     selector_config.batch_size_per_worker = mcts_cfg["worker_minibatch_size"].as<int>();
     selector_config.virtual_loss = mcts_cfg["virtual_loss"].as<double>();
     selector_config.contempt = mcts_cfg["contempt"].as<double>();
@@ -61,10 +64,19 @@ DataGenerator::DataGenerator(
     selector_config.resignation_probability = sel_cfg["resignation_probability"].as<double>();
     selector_config.resignation_cutoff = sel_cfg["resignation_cutoff"].as<double>();
 
+    // --- Pool sizing block (required) ---------------------------------------
+    // Fed to MCTSEngine::pool_sizing_cfg post-construction. Same 5 knobs
+    // as play_uci.yaml but typically with smaller caps -- training only ever
+    // runs gumbel_search_depth-sim searches.
+    pool_sizing_cfg.avg_branching       = pool_cfg["avg_branching"].as<double>();
+    pool_sizing_cfg.node_safety_factor  = pool_cfg["node_safety_factor"].as<double>();
+    pool_sizing_cfg.edge_safety_factor  = pool_cfg["edge_safety_factor"].as<double>();
+    pool_sizing_cfg.node_hard_cap_bytes = (size_t)pool_cfg["node_hard_cap_mb"].as<size_t>() * 1024ull * 1024ull;
+    pool_sizing_cfg.edge_hard_cap_bytes = (size_t)pool_cfg["edge_hard_cap_mb"].as<size_t>() * 1024ull * 1024ull;
+
     main_logger.log("INFO", "DataGenerator logic loop initialized.");
 }
 
-// [Destructor, start, stop, _generate_pgn identical to current...]
 DataGenerator::~DataGenerator() { stop(); }
 void DataGenerator::start() {
     int logical_idx = 0;
@@ -79,28 +91,6 @@ void DataGenerator::start() {
 void DataGenerator::stop() {
     stop_event.store(true);
     for (auto& t : workers) if (t.joinable()) t.join();
-}
-
-void DataGenerator::_generate_pgn(int game_number, const std::vector<GameTransition>& transitions, const std::string& result_str, Logger& logger) {
-    std::stringstream pgn;
-    pgn << "[Event \"Self-Play Game " << game_number << "\"]\n";
-    pgn << "[Site \"Talbot C++ Engine\"]\n";
-    pgn << "[Result \"" << result_str << "\"]\n";
-    pgn << "[White \"Talbot Agent\"]\n";
-    pgn << "[Black \"Talbot Agent\"]\n\n";
-
-    chess::Board temp_board;
-    temp_board.setFen(chess::constants::STARTPOS);
-
-    for (size_t i = 0; i < transitions.size(); ++i) {
-        if (i % 12 == 0 && i != 0) pgn << "\n";
-        if (i % 2 == 0) pgn << (i / 2 + 1) << ". ";
-        pgn << chess::uci::moveToSan(temp_board, transitions[i].move) << " ";
-        temp_board.makeMove(transitions[i].move);
-    }
-    
-    pgn << result_str << "\n";
-    logger.log("CRITICAL", "Game PGN:\n" + pgn.str());
 }
 
 void DataGenerator::worker_main(int logical_idx, int core_id) {
@@ -121,8 +111,17 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
     // --- Coordinator takes ownership of the Engine ---
     chess::Board dummy;
     dummy.setFen(chess::constants::STARTPOS);
+
+    // Training runs an exactly-known number of sims per search
+    // (gumbel_search_depth). Size the initial pools for that -- the first
+    // reset() then finds capacity already sufficient and doesn't grow.
+    PoolTargets initial_targets = MCTSEngine::predict_pool_needs_static(
+        selector_config.gumbel_search_depth, pool_sizing_cfg);
+
     MCTSEngine mcts(
-        selector_config.node_pool_size, selector_config.batch_size_per_worker, 
+        static_cast<int>(initial_targets.node_target),
+        static_cast<int>(initial_targets.edge_target),
+        selector_config.batch_size_per_worker,
         inference_queue, result_queues[logical_idx], logical_idx,
         selector_config.deficit_eps, selector_config.virtual_loss, selector_config.contempt,
         selector_config.draw_cutoff, selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
@@ -131,6 +130,7 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
         buffer_free_slots, core_wait_count, config.workers_per_core,
         selector_config.two_fold_repetition, false
     );
+    mcts.pool_sizing_cfg = pool_sizing_cfg;
 
     ActionSelector agent("worker_" + std::to_string(worker_id), logical_idx, selector_config, logger);
 
@@ -173,7 +173,10 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
             auto move_start_time = std::chrono::high_resolution_clock::now();
 
             // 1. Search
-            mcts.reset(board, history);
+            //   Pool targets from the exact-known sim budget. After move 1
+            //   this is a no-op grow (capacity already sufficient).
+            PoolTargets pt = mcts.predict_pool_needs(selector_config.gumbel_search_depth);
+            mcts.reset(board, history, pt.node_target, pt.edge_target);
             int sim_count = mcts.run_simulations_fixed(selector_config.gumbel_search_depth, selector_config.gumbel_m);
             double root_v_mix = mcts.root->calculate_v_mix(selector_config.contempt);
 
@@ -247,7 +250,21 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
             }
         }
         
-        _generate_pgn(current_game_num, raw_training_data, pgn_result, logger);
+        // Build minimal PGN via shared writer. Training runs millions of games,
+        // so we skip per-move annotations, date, time-control tags -- just the
+        // Seven Tag Roster + ECO + moves + result.
+        PgnHeader hdr;
+        hdr.event = "Self-Play Game " + std::to_string(current_game_num);
+        hdr.site  = "Talbot C++ Engine";
+        hdr.white = "Talbot Agent";
+        hdr.black = "Talbot Agent";
+
+        std::vector<chess::Move> game_moves;
+        game_moves.reserve(raw_training_data.size());
+        for (const auto& t : raw_training_data) game_moves.push_back(t.move);
+
+        const std::string pgn = build_pgn(hdr, game_moves, {}, pgn_result, PgnConfig::minimal());
+        logger.log("CRITICAL", "Game PGN:\n" + pgn);
 
         CompletedGame game;
         game.game_number = current_game_num;

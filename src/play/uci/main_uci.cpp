@@ -85,68 +85,70 @@ static int q_to_cp(double q) {
     return static_cast<int>(std::round(cp));
 }
 
-static MCTSNode* get_best_root_child(MCTSNode* root, MCTSEngine* engine, double contempt) {
+// Root argmax under Gumbel score. Under the edge/node split, iteration is
+// over MCTSEdge; the child pointer may be nullptr for unvisited edges (which
+// score as v_mix). Returns the winning edge (never nullptr unless the root
+// has no children).
+static MCTSEdge* get_best_root_edge(MCTSNode* root, MCTSEngine* engine, double contempt) {
     if (!root || root->num_children == 0) return nullptr;
 
-    // Was: pick argmax of the cached MCTSNode::gumbel_score field. The field
-    // was dropped from MCTSNode; the value is now recomputed inline from
-    // (raw_logit + root_gumbel_noise[i] + sigma * v_mix_completion), same
-    // formula, same inputs, same result.
     double max_visits = 0.0;
     for (int i = 0; i < root->num_children; ++i) {
-        MCTSNode* c = root->first_child + i;
-        if (c->visits > max_visits) max_visits = c->visits;
+        MCTSNode* c = (root->first_edge + i)->child;
+        if (c && c->visits > max_visits) max_visits = c->visits;
     }
     const double v_mix = root->calculate_v_mix(contempt);
 
-    MCTSNode* best = nullptr;
+    MCTSEdge* best = nullptr;
     double best_score = -1e20;
     for (int i = 0; i < root->num_children; ++i) {
-        MCTSNode* c = root->first_child + i;
+        MCTSEdge* e = root->first_edge + i;
         double noise = (i < (int)engine->root_gumbel_noise.size())
                      ? engine->root_gumbel_noise[i] : 0.0;
-        double score = c->calculate_gumbel_score(
+        double score = e->calculate_gumbel_score(
             contempt, engine->gumbel_c_visit, engine->gumbel_c_scale,
             max_visits, v_mix, noise);
         if (score > best_score) {
             best_score = score;
-            best = c;
+            best = e;
         }
     }
     return best;
 }
 
 static double best_child_q(MCTSNode* root, MCTSEngine* engine, double contempt) {
-    MCTSNode* best = get_best_root_child(root, engine, contempt);
-    if (!best || best->visits <= 0) return std::nan("");
-    return -best->expected_value(contempt);
+    MCTSEdge* best = get_best_root_edge(root, engine, contempt);
+    if (!best || !best->child || best->child->visits <= 0) return std::nan("");
+    return -best->child->expected_value(contempt);
 }
 
 static std::vector<std::string> extract_pv(MCTSNode* root, MCTSEngine* engine, double contempt, int max_depth = 32) {
     std::vector<std::string> pv;
-    MCTSNode* node = root;
+    if (!root) return pv;
 
-    // 1. Pick the actual best move at the root using Gumbel Score
-    MCTSNode* best = get_best_root_child(node, engine, contempt);
-    if (!best || best->visits <= 0) return pv;
+    // 1. Root move: pick actual best move (Gumbel Score), not just max visits.
+    MCTSEdge* root_best = get_best_root_edge(root, engine, contempt);
+    if (!root_best || !root_best->child || root_best->child->visits <= 0) return pv;
 
-    pv.push_back(chess::uci::moveToUci(best->move));
-    node = best;
+    pv.push_back(chess::uci::moveToUci(root_best->move));
+    MCTSNode* node = root_best->child;
 
-    // 2. Walk the rest of the tree using max visits
+    // 2. Rest of the tree: walk by max visits. Unvisited edges are skipped
+    //    (nullptr child means the sim never descended there).
     while (node && node->is_expanded() && node->num_children > 0 && (int)pv.size() < max_depth) {
-        MCTSNode* next_best = nullptr;
+        MCTSEdge* next_best = nullptr;
         int max_v = 0;
         for (int i = 0; i < node->num_children; ++i) {
-            MCTSNode* c = node->first_child + i;
-            if (c->visits > max_v) {
-                max_v = c->visits;
-                next_best = c;
+            MCTSEdge* e = node->first_edge + i;
+            if (!e->child) continue;
+            if (e->child->visits > max_v) {
+                max_v = e->child->visits;
+                next_best = e;
             }
         }
         if (!next_best || max_v <= 0) break;
         pv.push_back(chess::uci::moveToUci(next_best->move));
-        node = next_best;
+        node = next_best->child;
     }
     return pv;
 }
@@ -163,30 +165,30 @@ static std::vector<std::string> split(const std::string& s, char delimiter) {
 }
 
 static DWORD_PTR mask_from_cores(const std::vector<int>& cores) {
-    DWORD_PTR mask = 0;
-    for (int c : cores) mask |= (static_cast<DWORD_PTR>(1) << c);
-    return mask;
+    DWORD_PTR m = 0;
+    for (int c : cores) {
+        if (c >= 0 && c < (int)(sizeof(DWORD_PTR) * 8)) m |= (DWORD_PTR{1} << c);
+    }
+    return m;
 }
 
 // =============================================================================
-// CONFIG
-//
-// UCI-only. Fields that used to live in the shared PlayConfig but were only
-// touched by the tournament path (opening_file, games_per_match, batcher_a/b
-// cores, etc.) are gone. If we need one back later, add it here explicitly.
+// CONFIG STRUCT (single source of truth for all UCI runtime knobs)
 // =============================================================================
 struct UciConfig {
-    // Paths -- all resolved relative to exe_dir at startup, none in yaml.
-    std::string engine_path;                 // {exe_dir}/model.engine (hardcoded name)
-    std::string base_log_dir;                // from engine.log_dir; empty = disabled
-    int  main_logging_level;
+    // paths
+    std::string engine_path;
+    std::string base_log_dir;
+
+    // logging
+    int main_logging_level;
 
     // cores
     std::vector<int> main_cores;
-    std::vector<int> game_worker_cores;         // where the search worker pins
-    std::vector<int> inference_worker_cores;    // batcher's dispatcher/collector/filler
+    std::vector<int> game_worker_cores;
+    std::vector<int> inference_worker_cores;
 
-    // inference / batcher
+    // inference batcher
     int inference_batch_size;
     int max_batch_size;
     int batch_timeout_ms;
@@ -203,6 +205,9 @@ struct UciConfig {
 
     // time control
     TimeControlConfig time_control;
+
+    // pool sizing (fed into MCTSEngine::pool_sizing_cfg post-construction)
+    PoolSizingConfig pool_sizing;
 
     // tablebase
     bool        tablebase_enabled = false;
@@ -261,7 +266,9 @@ static UciConfig load_config(const std::string& config_file_path,
     // it by sending `setoption name SyzygyPath value <path>`.
 
     ActionSelectorConfig& s = cfg.selector;
-    s.node_pool_size         = mcts_n["node_pool_size"].as<int>();
+    // node_pool_size dropped from YAML in stage 3 -- pool is sized per-reset
+    // from pool_sizing knobs against NPS x time (see worker thread below).
+    // The ActionSelectorConfig field itself is retained (unused) until stage 5.
     s.virtual_loss           = mcts_n["virtual_loss"].as<double>();
     s.contempt               = mcts_n["contempt"].as<double>();
     s.deficit_eps            = mcts_n["deficit_eps"].as<double>();
@@ -306,6 +313,16 @@ static UciConfig load_config(const std::string& config_file_path,
     tc.nps_ewma_alpha     = tc_n["nps_ewma_alpha"].as<double>();
     tc.nps_ewma           = tc_n["nps_ewma_default"].as<double>();
 
+    // pool_sizing is REQUIRED -- MCTSEngine has no fallback. Same 5 knobs as
+    // train.yaml but caps typically larger since UCI runs multi-second searches.
+    YAML::Node pool_n = root["pool_sizing"];
+    if (!pool_n) throw std::runtime_error("play_uci.yaml is missing pool_sizing block");
+    cfg.pool_sizing.avg_branching       = pool_n["avg_branching"].as<double>();
+    cfg.pool_sizing.node_safety_factor  = pool_n["node_safety_factor"].as<double>();
+    cfg.pool_sizing.edge_safety_factor  = pool_n["edge_safety_factor"].as<double>();
+    cfg.pool_sizing.node_hard_cap_bytes = (size_t)pool_n["node_hard_cap_mb"].as<size_t>() * 1024ull * 1024ull;
+    cfg.pool_sizing.edge_hard_cap_bytes = (size_t)pool_n["edge_hard_cap_mb"].as<size_t>() * 1024ull * 1024ull;
+
     return cfg;
 }
 
@@ -314,7 +331,7 @@ static UciConfig load_config(const std::string& config_file_path,
 //
 // The worker thread owns the ENTIRE lifecycle of a search:
 //   1. wait for start_flag
-//   2. mcts.reset(board, history)
+//   2. mcts.reset(board, history, node_target, edge_target)   // stage 3: grows pools
 //   3. spawn info sub-thread (peeks tree ~1Hz -> "info ..." lines)
 //   4. run_simulations_fixed / _timed
 //   5. join info sub-thread
@@ -486,7 +503,7 @@ static std::string get_exe_dir() {
 }
 
 // =============================================================================
-int main(int /*argc*/, char* /*argv*/[]) {
+int main(int argc, char* argv[]) {
     // A GUI launches us with no args and expects UCI on stdio. Do not add flags.
 
     const std::string exe_dir = get_exe_dir();
@@ -518,6 +535,28 @@ int main(int /*argc*/, char* /*argv*/[]) {
         return 1;
     }
 
+    // CLI Override: --cores <comma_separated_ints>
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--cores" && i + 1 < argc) {
+            std::vector<int> override_cores;
+            std::stringstream ss(argv[++i]);
+            std::string token;
+            while (std::getline(ss, token, ',')) {
+                try {
+                    override_cores.push_back(std::stoi(token));
+                } catch (...) {
+                    std::cerr << "Fatal: Invalid core integer: " << token << "\n";
+                    return 1;
+                }
+            }
+            if (!override_cores.empty()) {
+                cfg.main_cores = override_cores;
+                cfg.game_worker_cores = override_cores;
+            }
+        }
+    }
+
     if (!fs::exists(cfg.engine_path)) {
         std::cerr << "Fatal: model.engine not found at " << cfg.engine_path << "\n"
                   << "It must sit in the same directory as talbot.exe.\n";
@@ -535,7 +574,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
         std::time_t now_time = std::chrono::system_clock::to_time_t(now);
         std::tm* lt = std::localtime(&now_time);
         std::ostringstream time_oss;
-        time_oss << std::put_time(lt, "%Y-%m-%d_%H-%M-%S");
+        time_oss << std::put_time(lt, "%Y-%m-%d_%H-%M-%S") << "_pid" << GetCurrentProcessId();
         run_log_dir = cfg.base_log_dir + "/" + time_oss.str();
         fs::create_directories(run_log_dir);
     }
@@ -586,8 +625,17 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
     std::atomic<int> wait_count{0};
 
+    // Prime pool sizing for engine construction. We size the initial pool
+    // for a ~5-second first search at the default NPS -- large enough that
+    // the very first reset() doesn't need to grow. Subsequent resets grow
+    // as needed based on the true measured NPS.
+    PoolTargets initial = MCTSEngine::predict_pool_needs_static(
+        static_cast<int>(cfg.time_control.nps_ewma * 5.0), cfg.pool_sizing);
+
     auto mcts_engine = std::make_unique<MCTSEngine>(
-        cfg.selector.node_pool_size, cfg.selector.batch_size_per_worker,
+        static_cast<int>(initial.node_target),
+        static_cast<int>(initial.edge_target),
+        cfg.selector.batch_size_per_worker,
         inference_queue, result_queues[0], 0,
         cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
         cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
@@ -595,7 +643,11 @@ int main(int /*argc*/, char* /*argv*/[]) {
         buf.input, buf.policy, buf.value,
         buffer_free_slots, &wait_count, 1, cfg.selector.two_fold_repetition, tb_ready);
 
+    mcts_engine->pool_sizing_cfg = cfg.pool_sizing;
     mcts_engine->set_nps_alpha(cfg.time_control.nps_ewma_alpha);
+    // Prime NPS at construction (not just ucinewgame) so predict_pool_needs_for_time
+    // returns a real number on the very first search too.
+    mcts_engine->reset_nps_history(cfg.time_control.nps_ewma);
     mcts_engine->early_stop_q_gap = cfg.early_stop_q_gap;
     mcts_engine->early_stop_min_visits = cfg.early_stop_min_visits;
     mcts_engine->early_return_on_forced_win = cfg.early_return_on_forced_win;
@@ -635,7 +687,20 @@ int main(int /*argc*/, char* /*argv*/[]) {
             const auto hard_dl = worker->hard_deadline;
             lock.unlock();
 
-            worker->mcts->reset(board, history);
+            // Predict pool needs BEFORE reset(). For the timed path, we size
+            // for (hard_dl - now) at the current EWMA NPS. hard_dl already
+            // incorporates time_control.hard_multiplier, so safety_multiplier
+            // here is 1.0. For the fixed path (opening plies / go nodes / no
+            // clock), sim count is known exactly.
+            PoolTargets pt;
+            if (timed) {
+                double time_s = std::chrono::duration<double>(
+                    hard_dl - std::chrono::steady_clock::now()).count();
+                pt = worker->mcts->predict_pool_needs_for_time(time_s, 1.0);
+            } else {
+                pt = worker->mcts->predict_pool_needs(search_nodes);
+            }
+            worker->mcts->reset(board, history, pt.node_target, pt.edge_target);
 
             // ---- info emission (sub-thread) --------------------------------
             // Ticks ~1Hz; polls the search_active flag every 50ms so it exits

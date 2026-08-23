@@ -13,11 +13,18 @@ TargetResult TargetGenerator::generate_targets(
     int num_children = root->num_children;
     if (num_children == 0) return result;
 
-    std::vector<MCTSNode*> all_children;
+    // Under the edge/node split, move + raw_logit live on MCTSEdge and are
+    // always present (edges are fully populated at expansion). Visit stats
+    // and forced-outcome flags live on edge->child, which is nullable for
+    // unvisited edges -- treated identically to the pre-split visits==0
+    // case (q defaults to v_mix).
+    std::vector<MCTSEdge*> all_edges;
+    all_edges.reserve(num_children);
     chess::Movelist all_moves;
-    for(int i = 0; i < num_children; ++i) {
-        all_children.push_back(root->first_child + i);
-        all_moves.add(all_children.back()->move);
+    for (int i = 0; i < num_children; ++i) {
+        MCTSEdge* e = root->first_edge + i;
+        all_edges.push_back(e);
+        all_moves.add(e->move);
     }
 
     // Improved policy: pi' = softmax(raw_logit + sigma(completedQ))
@@ -46,7 +53,8 @@ TargetResult TargetGenerator::generate_targets(
 
     int max_visits = 0;
     for (int i = 0; i < num_children; ++i) {
-        max_visits = std::max(max_visits, all_children[i]->visits);
+        MCTSNode* c = all_edges[i]->child;
+        if (c != nullptr) max_visits = std::max(max_visits, c->visits);
     }
     double sigma_scale = (config.gumbel_c_visit + max_visits) * config.gumbel_c_scale;
 
@@ -54,24 +62,28 @@ TargetResult TargetGenerator::generate_targets(
     float max_logit = -1e20f;
 
     for (int i = 0; i < num_children; ++i) {
-        MCTSNode* c = all_children[i];
+        MCTSEdge* e = all_edges[i];
+        MCTSNode* c = e->child;
 
         double q;
-        if (c->has_forced_outcome()) {
+        if (c != nullptr && c->has_forced_outcome()) {
             // Proven subtree: exact value, no shrinkage, visits irrelevant.
             // forced_outcome is from the child's perspective; negate for ours.
             int fo = c->forced_outcome;
             if      (fo == -1) q =  1.0;              // proven win for us
             else if (fo ==  1) q = -1.0;              // proven loss
             else               q =  config.contempt;  // proven draw
+        } else if (c == nullptr || c->visits == 0) {
+            // Unmaterialised or materialised-but-never-visited: fall back to
+            // v_mix (matches pre-split behaviour where every child existed
+            // but might have visits==0).
+            q = v_mix;
         } else {
-            q = (c->visits > 0)
-                ? (c->visits * -c->expected_value(config.contempt) + target_shrinkage_k * v_mix) / (c->visits + target_shrinkage_k)
-                : v_mix;
+            q = (c->visits * -c->expected_value(config.contempt) + target_shrinkage_k * v_mix) / (c->visits + target_shrinkage_k);
         }
 
         double q_norm = (q + 1.0) / 2.0;
-        base_logits[i] = static_cast<float>(c->raw_logit + sigma_scale * q_norm);
+        base_logits[i] = static_cast<float>(e->raw_logit + sigma_scale * q_norm);
         if (base_logits[i] > max_logit) max_logit = base_logits[i];
     }
 

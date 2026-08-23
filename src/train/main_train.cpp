@@ -362,7 +362,7 @@ int main(int argc, char* argv[]) {
 
     main_logger.log("INFO", "[MAIN] Initializing Data Generator Workers...");
     DataGenerator generator(
-        config["global"], config["data_generation"], config["mcts"], config["selection"],
+        config["pool_sizing"], config["data_generation"], config["mcts"], config["selection"],
         model, train_dir, rot_interval, main_logger,
         inference_queue, result_queues, shared_input_buffer, shared_policy_buffer, shared_value_buffer,
         buffer_free_slots, completed_games_queue, init_games + 1, current_step

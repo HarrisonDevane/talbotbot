@@ -3,23 +3,22 @@ engine:
   log_level: 20                                                   # 10=DEBUG 20=INFO 30=WARNING 40=ERROR 50=CRITICAL
 
 evaluation:
-  main_cores: [3]                                                 # Dedicated CPU cores for the main C++ orchestrator
-  game_worker_cores: [5]                                 # Dedicated CPU cores for games
+  main_cores: []                                                 # Dedicated CPU cores for the main C++ orchestrator
+  game_worker_cores: []                                          # Dedicated CPU cores for games
 
 inference:
-  inference_worker_cores: [13, 14, 15]                            # Dedicated CPU cores for the Batching Process
-  batch_size: 128                                                  # Max batch size during inference
+  inference_worker_cores: []                            # Dedicated CPU cores for the Batching Process
+  batch_size: 128                                                 # Max batch size during inference
   batch_size_factor: 32                                           # Multiplier for batch size to determine max slots
   batch_timeout_ms: 10                                            # How long the GPU batcher waits
   logging_interval_sec: 10                                        # Interval for system metrics logging
   logging_level: 20                                               # Logging level for the Batcher Diagnostics
 
 mcts:
-  node_pool_size: 100000000                                        # Capacity of the persistent MCTS node pool
   worker_minibatch_size: 128                                       # Max positions sent to batcher at once
   virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored
   contempt: 0.0                                                   # Contempt for playing drawing positions
-  deficit_eps: 0.5
+  deficit_eps: 0.2
   two_fold_repetition: true
   early_stop_q_gap: 0.2
   early_stop_min_visits: 1000
@@ -29,6 +28,13 @@ mcts:
   gumbel_noise: 0.0                                               # 0.0 for deterministic tournament play
   gumbel_search_depth: 1000                                       # Fallback node budget when UCI gives no time
   gumbel_m: 64                                                    # m value for sequential halving
+
+pool_sizing:
+  avg_branching: 35.0                                             # Avg legal moves per chess position
+  node_safety_factor: 1.5                                         # Slack over predicted sims for node count
+  edge_safety_factor: 2.0                                         # Slack over (sims * branching) for edge count
+  node_hard_cap_mb: 2000                                           # Per-worker MCTSNode pool ceiling (~10.4M nodes @ 48B)
+  edge_hard_cap_mb: 2000                                           # Per-worker MCTSEdge pool ceiling (~98M edges @ 16B)
 
 selection:
   temperature_ply_cutoff: 0                                       # Sample proportional to visit count for first moves
@@ -46,4 +52,4 @@ time_control:
   move_overhead_ms: 100                                           # Overridable via UCI MoveOverhead option
   min_think_ms: 10                                                # Floor so we never emit a 0ms move in time scramble
   nps_ewma_alpha: 0.40                                            # Smoothing for trailing nodes/sec estimate
-  nps_ewma_default: 25000                                         # Default NPS for first move in non-starting positions
+  nps_ewma_default: 20000                                         # Default NPS for first move in non-starting positions

@@ -149,12 +149,18 @@ void InferenceBatcher::run(
     }
 
     if (logger.get_level() <= 20) {
-        logger.log("INFO", "Dispatcher pinned to cores [" + role_cores[0] + "]"
-                           ", Collector pinned to cores [" + role_cores[1] + "]"
-                           ", Filler pinned to cores [" + role_cores[2] + "]");
+        if (core_ids.empty()) {
+            logger.log("INFO", "Inference batcher threads NOT pinned (empty core list) -- OS-scheduled.");
+        } else {
+            logger.log("INFO", "Dispatcher pinned to cores [" + role_cores[0] + "]"
+                               ", Collector pinned to cores [" + role_cores[1] + "]"
+                               ", Filler pinned to cores [" + role_cores[2] + "]");
+        }
     }
 
-    SetThreadAffinityMask(GetCurrentThread(), frontendMask);
+    if (frontendMask != 0) {
+        SetThreadAffinityMask(GetCurrentThread(), frontendMask);
+    }
     load_initial_engine(logger);
 
     auto input_shape = shared_input_buffer[0].sizes();
@@ -205,7 +211,9 @@ void InferenceBatcher::run(
     std::atomic<bool> slot_free[NUM_SLOTS] = {true, true, true};
 
     std::thread collector_thread([&]() {
-        SetThreadAffinityMask(GetCurrentThread(), backendMask);
+        if (backendMask != 0) {
+            SetThreadAffinityMask(GetCurrentThread(), backendMask);
+        }
         last_report_time = std::chrono::steady_clock::now();
         
         uint64_t previousTotalTicks = 0;
@@ -357,7 +365,9 @@ void InferenceBatcher::run(
     });
 
     std::thread filler_thread([&]() {
-        SetThreadAffinityMask(GetCurrentThread(), fillerMask);
+        if (fillerMask != 0) {
+            SetThreadAffinityMask(GetCurrentThread(), fillerMask);
+        }
         int current_slot = 0;
         
         while (!stop_event.load()) {

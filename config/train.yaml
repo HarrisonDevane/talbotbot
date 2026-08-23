@@ -1,12 +1,12 @@
 global:
-  total_training_steps: 100000                                    # Total gradient updates to perform
+  total_training_steps: 110000                                    # Total gradient updates to perform
   logging_rotation_steps: 1000                                    # How often to make a new log folder
   min_buffer_size: 2000000                                        # Minimum replay buffer size
   max_buffer_size: 40000000                                       # Max buffer size
   buffer_ramp_steps: 40000                                        # Steps to reach max buffer size (linear)
   buffer_size_gb: 32                                              # Size of LMDB on disk
   build_steps: 500                                                # Steps for a new engine build
-  model_path: 'train_dir/models/model'                            # Path to model base name
+  train_dir: 'train_dir'                            # Path to model base name
 
 inference:
   inference_worker_cores: [13, 14, 15]                            # Dedicated CPU cores for the Batching Process (dispatcher, collector, filler)
@@ -28,7 +28,6 @@ data_generation:
   io_logging_level: 20                                            # Logging level for IO operations
 
 mcts:
-  node_pool_size: 50000                                           # Capacity of the persistent MCTS node pool
   worker_minibatch_size: 16                                       # Max positions a single worker sends at once
   virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored (prevents threads flocking)
   contempt: 0.0                                                   # Contempt for playing drawing positions
@@ -39,6 +38,13 @@ mcts:
   gumbel_noise: 1.0                                               # Gumbel noise value
   gumbel_search_depth: 128                                        # Search depth budget
   gumbel_m: 16                                                    # m value for sequential halving (top m moves sampled)
+
+pool_sizing:
+  avg_branching: 35.0                                             # Avg legal moves per chess position
+  node_safety_factor: 1.2                                         # Slack over predicted sims for node count
+  edge_safety_factor: 5.0                                         # Slack over (sims * branching) for edge count
+  node_hard_cap_mb: 50                                            # Per-worker MCTSNode pool ceiling (~1M nodes @ 48B)
+  edge_hard_cap_mb: 100                                            # Per-worker MCTSEdge pool ceiling (~3M edges @ 16B)
 
 selection:
   temperature_ply_cutoff: 30                                      # Sample proportional to visit count for first moves

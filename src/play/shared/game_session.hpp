@@ -32,6 +32,7 @@
 #include <vector>
 #include <optional>
 #include "chess.hpp"
+#include "time_control.hpp"    // for TimeBudget (used by our_time_budget)
 
 // -----------------------------------------------------------------------------
 // Result of a finished game, from White's point of view, plus a reason.
@@ -44,6 +45,7 @@ enum class SessionEndReason {
     DRAW_RULES,      // stalemate / 50-move / repetition / insufficient material
     RESIGNATION,     // a side resigned (ActionSelector resignation path)
     PLY_LIMIT,       // hit the max_ply_length hard cutoff -> scored as draw
+    TIME_LOSS,       // side flagged (clock reached zero in timed play)
     OPPONENT_LEFT,   // remote opponent aborted/disconnected (Lichess)
     ABORTED          // session torn down externally (quit, error, timeout)
 };
@@ -99,6 +101,12 @@ public:
     // The 1-based ply counter, for ActionSelector temperature logic
     // (temperature_ply_cutoff). Matches ply_count in data_generator.cpp.
     virtual int ply_count() const = 0;
+
+    // Optional: time budget for OUR side's search this turn. Fixed-depth
+    // sessions (default) return nullopt -- GameWorker then uses the agent's
+    // built-in fixed search budget. Timed sessions override to return the
+    // current TimeBudget based on tracked clock state.
+    virtual std::optional<TimeBudget> our_time_budget() const { return std::nullopt; }
 
     // ---- the three things that actually differ ----
 

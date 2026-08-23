@@ -20,6 +20,34 @@ struct ModelConfig {
     int policy_moves;
 };
 
+// -----------------------------------------------------------------------------
+// Pool sizing knobs. Fed from YAML block `pool_sizing` in both train.yaml
+// and play_uci.yaml. Set on MCTSEngine post-construction (like early_stop_*).
+// -----------------------------------------------------------------------------
+struct PoolSizingConfig {
+    // Average legal moves per position -- ~35 for chess. Used as the
+    // per-node edge multiplier when translating "predicted sims" into
+    // "predicted edges".
+    double avg_branching = 35.0;
+
+    // Multiplicative slack over the predicted count. Node factor typically
+    // 1.5 (accounts for lazy materialisation touching some children more
+    // than once via re-descent); edge factor 1.2 (expansion is one-shot).
+    double node_safety_factor = 1.5;
+    double edge_safety_factor = 1.2;
+
+    // Absolute per-worker ceilings in bytes. predict_pool_needs converts
+    // to element counts via sizeof(MCTSNode) / sizeof(MCTSEdge). These are
+    // the "run away NPS estimate can't OOM the box" backstop.
+    size_t node_hard_cap_bytes = 100ull * 1024 * 1024;
+    size_t edge_hard_cap_bytes = 100ull * 1024 * 1024;
+};
+
+struct PoolTargets {
+    size_t node_target;
+    size_t edge_target;
+};
+
 template <typename T>
 class ThreadSafeQueue {
 private:
@@ -67,29 +95,62 @@ private:
     size_t next_idx = 0;
 
 public:
-    NodePool(size_t capacity) {
-        pool.resize(capacity);
+    explicit NodePool(size_t capacity) { pool.resize(capacity); }
+
+    void reset() { next_idx = 0; }
+
+    // Grow the underlying storage. ONLY SAFE when no external pointers into
+    // pool are live -- callers must invoke this only inside reset(), between
+    // reset()-ing next_idx and re-allocating root. std::vector::resize can
+    // move the storage, invalidating every MCTSNode* the tree holds.
+    void grow_to_at_least(size_t n) {
+        if (n > pool.size()) pool.resize(n);
     }
 
-    void reset() {
-        next_idx = 0;
-    }
-
-    MCTSNode* allocate(MCTSNode* parent = nullptr, chess::Move move = chess::Move::NO_MOVE) {
+    MCTSNode* allocate(MCTSNode* parent = nullptr) {
         if (next_idx >= pool.size()) {
             throw std::runtime_error("NodePool capacity exceeded! Increase initial capacity.");
         }
         MCTSNode* ptr = &pool[next_idx++];
-        *ptr = MCTSNode(parent, move); 
+        *ptr = MCTSNode(parent);
         return ptr;
     }
 
-    // Cheap pre-check so callers can bail cleanly instead of throwing from
-    // allocate(). Used by _queue_leaf_for_inference to decide whether an
-    // expansion is safe.
     bool   has_capacity(size_t n) const { return next_idx + n <= pool.size(); }
     size_t remaining()             const { return pool.size() - next_idx; }
     size_t capacity()              const { return pool.size(); }
+    size_t used()                  const { return next_idx; }
+};
+
+class EdgePool {
+private:
+    std::vector<MCTSEdge> pool;
+    size_t next_idx = 0;
+
+public:
+    explicit EdgePool(size_t capacity) { pool.resize(capacity); }
+
+    void reset() { next_idx = 0; }
+
+    // Same safety contract as NodePool::grow_to_at_least.
+    void grow_to_at_least(size_t n) {
+        if (n > pool.size()) pool.resize(n);
+    }
+
+    MCTSEdge* allocate_block(size_t n) {
+        if (next_idx + n > pool.size()) {
+            throw std::runtime_error("EdgePool capacity exceeded! Increase initial capacity.");
+        }
+        MCTSEdge* ptr = &pool[next_idx];
+        for (size_t i = 0; i < n; ++i) ptr[i] = MCTSEdge{};
+        next_idx += n;
+        return ptr;
+    }
+
+    bool   has_capacity(size_t n) const { return next_idx + n <= pool.size(); }
+    size_t remaining()             const { return pool.size() - next_idx; }
+    size_t capacity()              const { return pool.size(); }
+    size_t used()                  const { return next_idx; }
 };
 
 class MCTSEngine {
@@ -106,8 +167,6 @@ public:
     int inference_sent;
     int inference_received;
 
-    // Deepest ply reached by _select this search. Reset in reset(); updated
-    // at the end of _select. Reported as "depth" in UCI info lines.
     int max_selection_depth = 0;
     double gumbel_c_visit;
     double gumbel_c_scale;
@@ -122,11 +181,36 @@ public:
     double time_misc = 0.0;
     double time_wait_for_inference = 0.0;
 
+    // ---- Diagnostic sub-buckets. Collected only when logger.get_level() <= 20
+    // (INFO). Zero cost when info is off: guarded by a locally-cached bool at
+    // the top of each profiled function. Sums approximate their parent bucket
+    // minus a small chrono-call overhead; interpret as ratios, not absolutes.
+    //
+    // _select breakdown:
+    double time_select_gscore  = 0.0;   // MCTSEdge::calculate_gumbel_score loop
+    double time_select_softmax = 0.0;   // std::exp for score and prior softmax
+    double time_select_other   = 0.0;   // visit-stat scan + deficit argmax + makeMove
+
+    // _backpropagate breakdown:
+    double time_backprop_stat_update = 0.0;   // visits/w_sum/d_sum/l_sum increments
+    double time_backprop_minimax     = 0.0;   // _backpropagate_minimax calls
+    double time_backprop_other       = 0.0;   // terminal setup / virtual_loss / unmark / perspective flip
+
+    // _retrieve_inference breakdown (expansion/backprop have their own outer
+    // counters and are NOT counted here to avoid double-counting):
+    double time_retrieve_pop     = 0.0;   // pop_wait / try_pop on result_queue
+    double time_retrieve_process = 0.0;   // data_ptr + wdl read + policy writeback + free-slot push
+
     chess::Board root_board;
     std::vector<chess::Board> base_history;
     MCTSNode* root;
     NodePool node_pool;
+    EdgePool edge_pool;
     Logger& logger;
+
+    // Pool sizing config. Set post-construction from YAML. Used by
+    // predict_pool_needs() / predict_pool_needs_for_time().
+    PoolSizingConfig pool_sizing_cfg;
 
     moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue;
     ThreadSafeQueue<std::vector<int>>& result_queue;
@@ -142,49 +226,29 @@ public:
     torch::DeviceType device;
     torch::ScalarType policy_logits_dtype;
 
-    // ---- UCI stop signalling ---------------------------------------------
-    // UCI `stop` fires from the stdin thread while the search thread is
-    // inside run_simulations_*. Both timed and fixed paths OR this into their
-    // periodic exit check; effect is the same as hitting the hard deadline
-    // (drain in-flight, return with tree queryable). Cleared at the top of
-    // each run_simulations_* call so a stale request can't leak into the
-    // next search.
     std::atomic<bool> stop_requested{false};
     void request_stop() { stop_requested.store(true, std::memory_order_relaxed); }
     void clear_stop()   { stop_requested.store(false, std::memory_order_relaxed); }
-    // ----------------------------------------------------------------------
 
-    // ---- Early stoppage (phase-boundary check, inference only) ------------
-    // If > 0, at each phase boundary we compare the top-two candidates by
-    // raw Q; if best - second >= early_stop_q_gap, break out early. 0 (the
-    // default) disables the check, so training's data_generator -- which
-    // never sets this -- runs the full schedule as before. main_uci sets
-    // this from play_uci.yaml.
     double early_stop_q_gap = 0.0;
     int early_stop_min_visits = 0;
     bool early_return_on_forced_win = false;
-    // ----------------------------------------------------------------------
 
-    // ---- Off-node gumbel noise (was per-MCTSNode) ------------------------
-    // Sized in _build_candidates to root->num_children. Only root's direct
-    // children have meaningful noise; interior nodes always pass 0 to
-    // calculate_gumbel_score. Lookup by index: root_gumbel_noise[child - root->first_child].
     std::vector<float> root_gumbel_noise;
-
-    // ---- Pool exhaustion guard -------------------------------------------
-    // Set by _queue_leaf_for_inference when the pool can't fit another
-    // expansion. Both run_simulations paths check this in the outer loop,
-    // same shape as stop_requested. Cleared in reset(). Atomic so the search
-    // worker can set from any thread context (in practice only its own).
     std::atomic<bool> pool_exhausted{false};
-    // ----------------------------------------------------------------------
 
     std::atomic<int>* core_wait_count;
     int workers_per_core;
     bool use_tablebase;
 
+    // Constructor takes INITIAL pool capacities. Under the pool_sizing
+    // scheme these should be sized for the expected first search (or set
+    // to any minimum >= 1 and let the first reset() grow them). See
+    // predict_pool_needs() below and the call sites in data_generator /
+    // main_uci for the intended usage.
     MCTSEngine(
-        int node_pool_capacity, 
+        int node_pool_capacity,
+        int edge_pool_capacity,
         int worker_batch_size, 
         moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue,
         ThreadSafeQueue<std::vector<int>>& result_queue, 
@@ -209,76 +273,86 @@ public:
         bool use_tablebase = false
     );
 
-    void reset(const chess::Board& board, const std::vector<chess::Board>& history);
+    // Reset with optional pool sizing. If node_target > current node_pool
+    // capacity, node_pool is grown to that size (never shrunk). Same for
+    // edge_target / edge_pool. Passing 0 for either target leaves that
+    // pool's capacity unchanged. Grow-only: peak-across-lifetime is the
+    // committed RAM per worker.
+    void reset(const chess::Board& board,
+               const std::vector<chess::Board>& history,
+               size_t node_target = 0,
+               size_t edge_target = 0);
 
-    // Self-play / fixed-budget path. Runs the full sequential-halving schedule
-    // to completion. Body is UNCHANGED from the original run_simulations.
     int run_simulations_fixed(int search_depth, int max_m);
-
-    // Clocked path. Plans the schedule from the trailing NPS estimate, stops at
-    // the soft deadline (phase boundary) or hard deadline (mid-phase, with drain).
-    // Deadlines are steady_clock (monotonic). max_nodes is the pool-safety cap.
     int run_simulations_timed(int max_m,
                               std::chrono::steady_clock::time_point soft_deadline,
                               std::chrono::steady_clock::time_point hard_deadline);
 
-    // Trailing nodes/sec estimate (EWMA). 0.0 == no data yet. Survives reset();
-    // cleared per game via reset_nps_history().
     double estimated_nps() const { return nps_ewma_; }
     void   reset_nps_history(double e) { nps_ewma_ = e; }
-    void   set_nps_alpha(double a) { nps_alpha_ = a; }   // wired from time_control.nps_ewma_alpha
+    void   set_nps_alpha(double a) { nps_alpha_ = a; }
+
+    // ---- Pool sizing helpers ---------------------------------------------
+    //
+    // Convert a predicted simulation count into pool sizes. Applies safety
+    // factors, then clamps to the byte caps in pool_sizing_cfg. Floors
+    // predicted_sims at 1 internally so a bogus 0 estimate can never zero
+    // the pool.
+    PoolTargets predict_pool_needs(int predicted_sims) const {
+        return predict_pool_needs_static(predicted_sims, pool_sizing_cfg);
+    }
+    static PoolTargets predict_pool_needs_static(int predicted_sims,
+                                                 const PoolSizingConfig& cfg);
+
+    // Convenience for the timed path. Predicts sims from
+    //   sims = estimated_nps() * time_s * safety_multiplier
+    // then delegates. safety_multiplier is typically time_control.hard_multiplier
+    // so we budget enough for a hard-deadline overrun. Callers MUST have
+    // primed estimated_nps() via reset_nps_history(default) at least once
+    // before the first search (main_uci does this at construction).
+    PoolTargets predict_pool_needs_for_time(double time_s,
+                                            double safety_multiplier) const;
+    // ----------------------------------------------------------------------
 
 private:
     void _wait_for_inference();
-    MCTSNode* _select(MCTSNode* start_node, std::vector<MCTSNode*>& simulation_path);
+    MCTSNode* _select(MCTSNode* start_node, std::vector<MCTSEdge*>& simulation_path);
     void _backpropagate_minimax(MCTSNode* node);
     void _backpropagate(MCTSNode* node, double w, double d, double l, bool is_terminal);
     void _virtual_loss(MCTSNode* node, bool is_applying);
 
-    // Returns true iff the top-two candidates by raw Q differ by at least
-    // early_stop_q_gap. Only meaningful when the gap knob is > 0.
-    bool _should_early_stop(const std::vector<MCTSNode*>& candidates) const;
+    bool _should_early_stop(const std::vector<MCTSEdge*>& candidates) const;
     
     void _mark_selected(MCTSNode* node);
     void _unmark_selected(MCTSNode* node);
     void _retrieve_inference(bool block);
     void _submit_batch();
     void _handle_terminal_node(MCTSNode* leaf);
-    // Syzygy WDL probe for the current leaf (UCI only). Returns true iff the
-    // leaf was resolved as a proven terminal here; false falls through to NN.
     bool _try_tablebase(MCTSNode* leaf);
-    void _queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCTSNode*>& simulation_path); 
-    // Returns true iff one simulation was actually performed (a leaf was
-    // queued for inference, or a terminal node was handled). Returns false
-    // on the no-op exit path (candidate subtree unavailable / no free buffer
-    // slots, with nothing in flight for this worker). Callers must only
-    // charge search budget when this returns true.
-    bool _run_single_async_simulation(MCTSNode* start_node);
-    
-    void _log_tournament_results(const std::vector<MCTSNode*>& candidates,
+    void _queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCTSEdge*>& simulation_path);
+    bool _run_single_async_simulation(MCTSEdge* start_edge);
+
+    void _log_tournament_results(const std::vector<MCTSEdge*>& candidates,
                                 const std::string& phase_name,
                                 int remaining_search_depth = -1,
                                 int phase_budget = -1,
                                 int sims_completed = -1);
-    // Debug: navigate from root following a UCI move path and dump the target
-    // node's RAW network value plus its children. For "why is this node's Q
-    // wrong" questions -- the raw value tells you if the value head is blind.
     void _log_node_by_path(const std::vector<std::string>& uci_path, int top_n);
+    // End-of-search summary: timing breakdown + pool occupancy. Self-gated
+    // on INFO log level (no need for caller to guard). Called from both
+    // run_simulations_fixed and run_simulations_timed.
+    void _log_system_stats();
 
-    // Shared sequential-halving building blocks (used by both _fixed and _timed).
     void _expand_root();
-    int  _build_candidates(int max_m, std::vector<MCTSNode*>& all_nodes,
-                           std::vector<MCTSNode*>& active_candidates);
-    void _run_round0(std::vector<MCTSNode*>& active_candidates, int& remaining_search_depth);
-    // _rescore removed: no gumbel_score cache to refresh. Sites that needed
-    // fresh scores now compute inline via calculate_gumbel_score(...).
-    void _halve(std::vector<MCTSNode*>& active_candidates);
+    int  _build_candidates(int max_m, std::vector<MCTSEdge*>& all_edges,
+                           std::vector<MCTSEdge*>& active_candidates);
+    void _run_round0(std::vector<MCTSEdge*>& active_candidates, int& remaining_search_depth);
+    void _halve(std::vector<MCTSEdge*>& active_candidates);
     void _flush_inflight();
 
-    // Fold one completed search's (sims, seconds) into the trailing NPS EWMA.
     void _record_nps(int sims, double seconds);
-    double nps_ewma_;   // trailing nodes/sec; NOT touched by reset()
-    double nps_alpha_;   // EWMA smoothing; default preserves prior behaviour, override via set_nps_alpha()
+    double nps_ewma_;
+    double nps_alpha_;
 
     template <typename Predicate, typename WorkFn>
     void _spin_wait(Predicate should_keep_waiting, WorkFn work_fn);

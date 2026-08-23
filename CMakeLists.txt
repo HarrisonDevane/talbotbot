@@ -23,6 +23,7 @@ set(SHARED_SOURCES
     src/core/mcts_node.cpp
     src/core/inference_batcher.cpp
     src/core/board_utils.cpp
+    src/core/pgn_writer.cpp
     "${FATHOM_DIR}/src/tbprobe.c"
 )
 
@@ -51,6 +52,16 @@ add_executable(talbot_trt_compile
     src/tools/trt_builder.cpp
 )
 
+add_executable(talbot_tournament
+    ${SHARED_SOURCES}
+    src/play/tournament/main_tournament.cpp
+    src/play/tournament/self_play_session.cpp
+    src/play/shared/time_control.cpp
+    src/play/shared/opening_book.cpp
+    src/play/shared/game_worker.cpp
+)
+
+
 # 4. SETUP INCLUDES
 set(INCLUDE_DIRS
     "./src"
@@ -73,6 +84,7 @@ set(INCLUDE_DIRS
 
 target_include_directories(talbot_engine PRIVATE ${INCLUDE_DIRS})
 target_include_directories(talbot_uci    PRIVATE ${INCLUDE_DIRS})
+target_include_directories(talbot_tournament    PRIVATE ${INCLUDE_DIRS})
 
 # Lean include set for the compile tool
 target_include_directories(talbot_trt_compile PRIVATE
@@ -94,6 +106,9 @@ if(MSVC)
     target_compile_definitions(talbot_trt_compile PRIVATE NOMINMAX)
     target_compile_options(talbot_trt_compile PRIVATE ${MSVC_FLAGS})
 
+    target_compile_definitions(talbot_tournament PRIVATE NOMINMAX)
+    target_compile_options(talbot_tournament PRIVATE ${MSVC_FLAGS})
+
     # Fathom's tbprobe.c uses C11 <stdatomic.h>; MSVC requires /std:c11 or c17.
     set_source_files_properties(
         "${FATHOM_DIR}/src/tbprobe.c"
@@ -112,6 +127,7 @@ set(LINK_DIRS
 
 target_link_directories(talbot_engine PRIVATE ${LINK_DIRS})
 target_link_directories(talbot_uci    PRIVATE ${LINK_DIRS})
+target_link_directories(talbot_tournament    PRIVATE ${LINK_DIRS})
 
 set(LIBS
     torch torch_cpu c10 c10_cuda torch_cuda
@@ -124,6 +140,7 @@ set(LIBS
 
 target_link_libraries(talbot_engine PRIVATE ${LIBS})
 target_link_libraries(talbot_uci    PRIVATE ${LIBS})
+target_link_libraries(talbot_tournament    PRIVATE ${LIBS})
 
 # Compile tool: lean link.
 target_link_directories(talbot_trt_compile PRIVATE
@@ -140,6 +157,7 @@ target_link_libraries(talbot_trt_compile PRIVATE
 set(LINK_OPTS "/INCLUDE:?warp_size@cuda@at@@YAHXZ /OPT:NOREF /RELEASE")
 set_target_properties(talbot_engine PROPERTIES LINK_FLAGS ${LINK_OPTS})
 set_target_properties(talbot_uci    PROPERTIES LINK_FLAGS ${LINK_OPTS})
+set_target_properties(talbot_tournament    PROPERTIES LINK_FLAGS ${LINK_OPTS})
 
 # 7. POST-BUILD: AUTOMATED DLL DEPLOYMENT
 function(deploy_dlls target_name)
@@ -181,6 +199,7 @@ endfunction()
 
 deploy_dlls(talbot_engine)
 deploy_dlls(talbot_uci)
+deploy_dlls(talbot_tournament)
 
 # Ship play_uci.yaml AND model.yaml next to talbot_uci.exe. Both are required
 # at startup; keeping the copies live-synced avoids the "edited config in repo

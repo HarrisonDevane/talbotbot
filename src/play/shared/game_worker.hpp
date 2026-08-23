@@ -24,6 +24,13 @@
 //   or by await_opponent_move() returning game_continues=false (opponent
 //   resigns / aborts / disconnects).
 //
+// TIMED vs FIXED SEARCH:
+//   GameWorker asks the session for a time budget (session.our_time_budget())
+//   before each of OUR moves. If the session returns a budget, we pass it
+//   through to think() and MCTS runs its timed search. If it returns nullopt,
+//   the agent's built-in fixed search_budget is used. This is how one worker
+//   loop handles both tournament modes -- the session decides, not the worker.
+//
 // WHAT GameWorker DOES NOT DO:
 //   * It does not know which model the opponent uses. For self-play, the
 //     SelfPlaySession internally owns the opponent's SearchAgent and runs it
@@ -37,26 +44,40 @@
 
 #include <vector>
 #include <string>
+#include <optional>
 #include "chess.hpp"
 #include "mcts_engine.hpp"
 #include "action_selector.hpp"
 #include "logger.hpp"
 #include "game_session.hpp"
+#include "time_control.hpp"
 
 // -----------------------------------------------------------------------------
 // SearchAgent: one model's ability to choose a move = (engine, selector, budget).
 // References are non-owning; the host keeps the real objects alive.
+//
+// think() dispatches between fixed-depth and timed search based on whether the
+// caller supplies a TimeBudget. This keeps the two search paths behind one
+// entry point so callers don't have to branch.
 // -----------------------------------------------------------------------------
 struct SearchAgent {
     MCTSEngine&     engine;
     ActionSelector& selector;
-    int             search_budget;   // node budget per move (gumbel_search_depth)
+    int             search_budget;   // node budget per move when unbudgeted (fixed mode)
     int             gumbel_m;        // sequential-halving m
 
     // reset -> run_simulations -> select_move. ply is 1-based.
+    //
+    // budget == nullopt: fixed-depth search using this agent's search_budget.
+    //                    Pool is sized for exactly that sim count.
+    // budget != nullopt: timed search. Soft/hard deadlines are computed from
+    //                    the budget's durations at the start of the call.
+    //                    Pool is sized for the estimated sim count at
+    //                    estimated_nps * hard_limit_ms.
     SelectionResult think(const chess::Board& board,
                           const std::vector<chess::Board>& history,
-                          int ply);
+                          int ply,
+                          std::optional<TimeBudget> budget = std::nullopt);
 };
 
 class GameWorker {

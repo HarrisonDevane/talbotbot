@@ -4,6 +4,7 @@
 
 #include "self_play_session.hpp"
 #include <sstream>
+#include <algorithm>
 
 // -----------------------------------------------------------------------------
 SelfPlaySession::SelfPlaySession(SearchAgent white_agent,
@@ -11,19 +12,26 @@ SelfPlaySession::SelfPlaySession(SearchAgent white_agent,
                                  chess::Color our_side,
                                  const Opening& opening,
                                  int max_ply,
-                                 Logger& logger)
+                                 Logger& logger,
+                                 std::optional<TimedGameSetup>     timed,
+                                 std::optional<PgnFileSink>        pgn_sink,
+                                 std::optional<SessionPgnMetadata> pgn_meta_in)
     : agent_white(white_agent),
       agent_black(black_agent),
       our_side(our_side),
       opening(opening),
       max_ply(max_ply),
-      logger(logger) {
+      logger(logger),
+      timed_setup(timed),
+      pgn_sink(pgn_sink),
+      pgn_meta(pgn_meta_in.value_or(SessionPgnMetadata{})) {
     board.setFen(chess::constants::STARTPOS);
+    if (timed_setup) {
+        clock_white_ms = timed_setup->initial_time_ms;
+        clock_black_ms = timed_setup->initial_time_ms;
+    }
 }
 
-// -----------------------------------------------------------------------------
-// advance: apply a move, maintain history (most-recent-first, capped 4) and the
-// ply counter. Single choke point so our-move and opponent-move stay identical.
 // -----------------------------------------------------------------------------
 void SelfPlaySession::advance(chess::Move move) {
     hist.insert(hist.begin(), board);
@@ -34,9 +42,33 @@ void SelfPlaySession::advance(chess::Move move) {
 }
 
 // -----------------------------------------------------------------------------
-// on_game_start: build the starting position by replaying the opening's SAN
-// moves. parseSan throws on malformed/ambiguous SAN -- if that happens the
-// opening is unusable, so we latch setup_failed and the game ends ABORTED.
+TimeBudget SelfPlaySession::budget_for_side(chess::Color side) const {
+    ClockState cs;
+    cs.time_left_ms = (side == chess::Color::WHITE) ? clock_white_ms : clock_black_ms;
+    cs.increment_ms = timed_setup->increment_ms;
+    cs.moves_to_go  = 0;
+    cs.ply          = ply;
+    return timed_setup->time_ctrl->allocate(cs);
+}
+
+// -----------------------------------------------------------------------------
+bool SelfPlaySession::deduct_and_check_flag(chess::Color side, int64_t elapsed_ms) {
+    int64_t& clock = (side == chess::Color::WHITE) ? clock_white_ms : clock_black_ms;
+    clock -= elapsed_ms;
+    const bool flagged = (clock <= 0);
+    if (!flagged) {
+        clock += timed_setup->increment_ms;
+    }
+    return flagged;
+}
+
+// -----------------------------------------------------------------------------
+std::optional<TimeBudget> SelfPlaySession::our_time_budget() const {
+    if (!timed_setup) return std::nullopt;
+    our_turn_start_ = std::chrono::steady_clock::now();
+    return budget_for_side(our_side);
+}
+
 // -----------------------------------------------------------------------------
 void SelfPlaySession::on_game_start() {
     board.setFen(chess::constants::STARTPOS);
@@ -46,6 +78,10 @@ void SelfPlaySession::on_game_start() {
     ply = 1;
     finished = false;
     setup_failed = false;
+    if (timed_setup) {
+        clock_white_ms = timed_setup->initial_time_ms;
+        clock_black_ms = timed_setup->initial_time_ms;
+    }
 
     for (const std::string& san : opening.san_moves) {
         chess::Move mv;
@@ -76,15 +112,12 @@ void SelfPlaySession::on_game_start() {
         return;
     }
 
-    // The opening itself may already be a finished position (rare, but a long
-    // forced line could mate or hit a draw rule). Check before play begins.
     SessionResult r;
     if (detect_board_termination(r)) {
         finished = true;
         final_result = r;
     }
 
-    // Log the opening explicitly: ECO plus the opening line in UCI moves.
     std::string opening_line;
     for (int i = 0; i < opening_move_count; ++i) {
         if (i) opening_line += " ";
@@ -93,34 +126,29 @@ void SelfPlaySession::on_game_start() {
     logger.log("INFO",
         "Game start: opening ECO " + opening.eco + " | " +
         std::to_string(opening_move_count) + " opening plies | moves: " +
-        opening_line);
+        opening_line +
+        (timed_setup
+            ? (" | timed " + std::to_string(timed_setup->initial_time_ms) +
+               "ms + " + std::to_string(timed_setup->increment_ms) + "ms")
+            : std::string(" | fixed-depth")));
 }
 
 // -----------------------------------------------------------------------------
-// detect_board_termination: classify the CURRENT board.
-//   * isGameOver() -> mate or a draw rule (stalemate / 50-move / insufficient /
-//     repetition, depending on chess.hpp's implementation).
-//   * ply limit    -> scored as a draw, matching data_generator.cpp.
-// white_value is always from White's perspective.
-// -----------------------------------------------------------------------------
 bool SelfPlaySession::detect_board_termination(SessionResult& result) const {
-    auto over = board.isGameOver();   // {GameResultReason, GameResult}
+    auto over = board.isGameOver();
 
     if (over.second != chess::GameResult::NONE) {
         if (over.second == chess::GameResult::LOSE) {
-            // The side to move has been mated -> the OTHER side won.
             chess::Color loser = board.sideToMove();
             result.reason      = SessionEndReason::CHECKMATE;
             result.white_value = (loser == chess::Color::WHITE) ? -1.0 : 1.0;
         } else {
-            // DRAW (stalemate, 50-move, repetition, insufficient material).
             result.reason      = SessionEndReason::DRAW_RULES;
             result.white_value = 0.0;
         }
         return true;
     }
 
-    // Hard ply cap -> forced draw.
     if (ply > max_ply) {
         result.reason      = SessionEndReason::PLY_LIMIT;
         result.white_value = 0.0;
@@ -131,9 +159,6 @@ bool SelfPlaySession::detect_board_termination(SessionResult& result) const {
 }
 
 // -----------------------------------------------------------------------------
-// is_over: the game is over if (a) it has been latched finished, or (b) the
-// current board is terminal. GameWorker calls this at the top of its loop.
-// -----------------------------------------------------------------------------
 bool SelfPlaySession::is_over(SessionResult& result) const {
     if (finished) {
         result = final_result;
@@ -143,11 +168,26 @@ bool SelfPlaySession::is_over(SessionResult& result) const {
 }
 
 // -----------------------------------------------------------------------------
-// submit_our_move: GameWorker chose a move with its `primary` agent. Apply it,
-// then check whether OUR move just ended the game (mate / draw) so the latched
-// result is ready for the next is_over() call.
-// -----------------------------------------------------------------------------
 void SelfPlaySession::submit_our_move(chess::Move move) {
+    if (timed_setup) {
+        const auto now = std::chrono::steady_clock::now();
+        const int64_t elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - our_turn_start_).count();
+
+        const chess::Color us = our_side;
+        const bool flagged = deduct_and_check_flag(us, elapsed_ms);
+        if (flagged) {
+            finished = true;
+            final_result.reason      = SessionEndReason::TIME_LOSS;
+            final_result.white_value = (us == chess::Color::WHITE) ? -1.0 : 1.0;
+            logger.log("INFO",
+                "Our side (" + std::string(us == chess::Color::WHITE ? "White" : "Black") +
+                ") flagged at ply " + std::to_string(ply) +
+                " (elapsed=" + std::to_string(elapsed_ms) + "ms)");
+            return;
+        }
+    }
+
     advance(move);
 
     SessionResult r;
@@ -158,34 +198,43 @@ void SelfPlaySession::submit_our_move(chess::Move move) {
 }
 
 // -----------------------------------------------------------------------------
-// await_opponent_move -- THE A/B ROUTING.
-//
-// It is the opponent's turn. The opponent is whichever agent is assigned the
-// side NOT equal to our_side. We run THAT agent's MCTS search here, internally.
-// GameWorker never touches the opponent agent -- this is the only place the
-// second engine is used.
-//
-// After the opponent's move we must detect termination ourselves: GameWorker
-// checks is_over() only at loop top, so a game ended by the opponent's move
-// has to come back as game_continues = false here.
-//
-// Opponent resignation: if the opponent agent's ActionSelector resigns, the
-// opponent loses. We surface that as a finished game, not a normal move.
-// -----------------------------------------------------------------------------
 MoveOutcome SelfPlaySession::await_opponent_move() {
     MoveOutcome outcome;
 
-    // Pick the agent for the side to move (always the opponent here, since
-    // GameWorker only calls this when !our_turn()).
     chess::Color mover = board.sideToMove();
     SearchAgent& opp = (mover == chess::Color::WHITE) ? agent_white : agent_black;
 
-    SelectionResult choice = opp.think(board, hist, ply);
+    std::optional<TimeBudget> budget;
+    std::chrono::steady_clock::time_point start;
+    if (timed_setup) {
+        budget = budget_for_side(mover);
+        start = std::chrono::steady_clock::now();
+    }
 
-    // Opponent resigned -> opponent (the side to move) loses.
+    SelectionResult choice = opp.think(board, hist, ply, budget);
+
+    if (timed_setup) {
+        const auto now = std::chrono::steady_clock::now();
+        const int64_t elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+        const bool flagged = deduct_and_check_flag(mover, elapsed_ms);
+        if (flagged) {
+            outcome.game_continues     = false;
+            outcome.result.reason      = SessionEndReason::TIME_LOSS;
+            outcome.result.white_value = (mover == chess::Color::WHITE) ? -1.0 : 1.0;
+            finished = true;
+            final_result = outcome.result;
+            logger.log("INFO",
+                "Opponent (" + std::string(mover == chess::Color::WHITE ? "White" : "Black") +
+                ") flagged at ply " + std::to_string(ply) +
+                " (elapsed=" + std::to_string(elapsed_ms) + "ms)");
+            return outcome;
+        }
+    }
+
     if (choice.resigned || choice.best_move == chess::Move::NO_MOVE) {
-        outcome.game_continues   = false;
-        outcome.result.reason    = SessionEndReason::RESIGNATION;
+        outcome.game_continues     = false;
+        outcome.result.reason      = SessionEndReason::RESIGNATION;
         outcome.result.white_value = (mover == chess::Color::WHITE) ? -1.0 : 1.0;
         finished = true;
         final_result = outcome.result;
@@ -199,7 +248,6 @@ MoveOutcome SelfPlaySession::await_opponent_move() {
     logger.log("DEBUG",
         "Opponent move: " + chess::uci::moveToUci(choice.best_move));
 
-    // Did the opponent's move end the game?
     SessionResult r;
     if (detect_board_termination(r)) {
         outcome.game_continues = false;
@@ -215,6 +263,11 @@ MoveOutcome SelfPlaySession::await_opponent_move() {
 }
 
 // -----------------------------------------------------------------------------
+// on_game_end: log the summary line, then build the PGN via pgn_writer and
+// ship it to both sinks. The session fills in the game-derived fields
+// (result_str, ECO, opening_plies, termination, time_control); the host
+// pre-loaded the rest (event, site, player names, round, config).
+// -----------------------------------------------------------------------------
 void SelfPlaySession::on_game_end(const SessionResult& result) {
     const char* reason = "?";
     switch (result.reason) {
@@ -222,29 +275,25 @@ void SelfPlaySession::on_game_end(const SessionResult& result) {
         case SessionEndReason::DRAW_RULES:  reason = "draw";        break;
         case SessionEndReason::RESIGNATION: reason = "resignation"; break;
         case SessionEndReason::PLY_LIMIT:   reason = "ply limit";   break;
+        case SessionEndReason::TIME_LOSS:   reason = "time loss";   break;
         case SessionEndReason::ABORTED:     reason = "aborted";     break;
         default:                            reason = "not over";    break;
     }
     logger.log("INFO",
         "Game end: ECO " + opening.eco + " | reason=" + reason +
         " | white_value=" + std::to_string(result.white_value) +
-        " | plies=" + std::to_string(ply - 1));
+        " | plies=" + std::to_string(ply - 1) +
+        (timed_setup
+            ? (" | clocks W=" + std::to_string(clock_white_ms) +
+               "ms B=" + std::to_string(clock_black_ms) + "ms")
+            : std::string()));
 
-    log_pgn(result);
-}
-
-// -----------------------------------------------------------------------------
-// log_pgn: emit the whole game as a PGN at CRITICAL level, mirroring
-// DataGenerator::_generate_pgn. Opening moves and played moves are all in
-// game_moves; replaying them through a fresh board gives correct SAN.
-// -----------------------------------------------------------------------------
-void SelfPlaySession::log_pgn(const SessionResult& result) {
+    // Determine result string from reason + white_value.
     std::string result_str;
     switch (result.reason) {
         case SessionEndReason::CHECKMATE:
-            result_str = (result.white_value > 0.0) ? "1-0" : "0-1";
-            break;
         case SessionEndReason::RESIGNATION:
+        case SessionEndReason::TIME_LOSS:
             result_str = (result.white_value > 0.0) ? "1-0" : "0-1";
             break;
         case SessionEndReason::DRAW_RULES:
@@ -256,23 +305,44 @@ void SelfPlaySession::log_pgn(const SessionResult& result) {
             break;
     }
 
-    std::stringstream pgn;
-    pgn << "[Event \"Tournament Self-Play\"]\n";
-    pgn << "[Site \"Talbot C++ Engine\"]\n";
-    pgn << "[Result \"" << result_str << "\"]\n";
-    pgn << "[Eco \"" << opening.eco << "\"]\n";
-    pgn << "[OpeningPlies \"" << opening_move_count << "\"]\n\n";
+    // Assemble PgnHeader: host-provided metadata + session-derived fields.
+    PgnHeader hdr;
+    hdr.event         = pgn_meta.event;
+    hdr.site          = pgn_meta.site;
+    hdr.round         = pgn_meta.round;
+    hdr.white         = pgn_meta.white_name;
+    hdr.black         = pgn_meta.black_name;
+    hdr.eco           = opening.eco;
+    hdr.opening_plies = opening_move_count;
 
-    chess::Board temp_board;
-    temp_board.setFen(chess::constants::STARTPOS);
-
-    for (size_t i = 0; i < game_moves.size(); ++i) {
-        if (i % 12 == 0 && i != 0) pgn << "\n";
-        if (i % 2 == 0) pgn << (i / 2 + 1) << ". ";
-        pgn << chess::uci::moveToSan(temp_board, game_moves[i]) << " ";
-        temp_board.makeMove(game_moves[i]);
+    if (timed_setup) {
+        // cutechess format: "<seconds>+<increment_seconds>"
+        const int64_t base_s = timed_setup->initial_time_ms / 1000;
+        const int64_t inc_s  = timed_setup->increment_ms / 1000;
+        hdr.time_control = std::to_string(base_s) + "+" + std::to_string(inc_s);
     }
 
-    pgn << result_str << "\n";
-    logger.log("CRITICAL", "Game PGN:\n" + pgn.str());
+    if (result.reason == SessionEndReason::TIME_LOSS) {
+        hdr.termination = "Time forfeit";
+    } else if (result.reason == SessionEndReason::CHECKMATE ||
+               result.reason == SessionEndReason::DRAW_RULES) {
+        hdr.termination = "Normal";
+    } else if (result.reason == SessionEndReason::PLY_LIMIT) {
+        hdr.termination = "Adjudication";
+    } else if (result.reason == SessionEndReason::RESIGNATION) {
+        hdr.termination = "Normal";
+    }
+
+    // No per-move annotations yet -- populating those requires extending
+    // SelectionResult with eval/depth/elapsed and having the session capture
+    // them per move. When that lands, populate a std::vector<PgnMoveAnnotation>
+    // parallel to game_moves and pass it here instead of {}.
+    const std::string pgn = build_pgn(hdr, game_moves, {}, result_str, pgn_meta.config);
+
+    logger.log("CRITICAL", "Game PGN:\n" + pgn);
+    if (pgn_sink && pgn_sink->out && pgn_sink->mutex) {
+        std::lock_guard<std::mutex> lock(*pgn_sink->mutex);
+        (*pgn_sink->out) << pgn;
+        pgn_sink->out->flush();
+    }
 }
