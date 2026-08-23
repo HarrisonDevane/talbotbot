@@ -18,7 +18,7 @@ mcts:
   worker_minibatch_size: 128                                       # Max positions sent to batcher at once
   virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored
   contempt: 0.0                                                   # Contempt for playing drawing positions
-  deficit_eps: 0.2
+  deficit_eps: 0.05
   two_fold_repetition: true
   early_stop_q_gap: 0.2
   early_stop_min_visits: 1000

@@ -169,28 +169,23 @@ PoolTargets MCTSEngine::predict_pool_needs_for_time(double time_s,
 // -----------------------------------------------------------------------------
 // Selection descent -- fused-pass rewrite.
 //
-// Previous structure was 4 passes over the edge array, each touching the child
-// node's heap fields:
-//   P1  visit scan (find max_visits, sum_visits)
-//   P2  gscore computation (divides through expected_value)
-//   P3  softmax exp (score + prior, unconditionally)
-//   P4  deficit argmax (visits/visits ratio, unconditionally uses prior)
-//
-// New structure is 1 heap pass + 3 stack-only passes:
+// Structure: 1 heap pass + 3 stack-only passes.
 //   H   snapshot: fetch every edge/child ptr, cache visits + raw_logit, find
-//       max/sum. This is the only pass that walks child pointers.
+//       max/sum visits, count active edges.
 //   S1  gscore: reads child->cached_q directly (no divide -- backprop keeps
-//       it coherent), writes score_cache[]. Finds max_score_logit;
-//       max_raw_logit only if prior softmax is enabled.
-//   S2  softmax exp: two variants, chosen by `use_prior = (deficit_eps > 0)`.
-//       When false, only the score softmax is computed -- prior loop is dead
-//       code. Training runs with eps=0 skip ~half the exp calls.
-//   S3  deficit argmax: same eps branch. When false, pi_prime = exp/sum_exp.
+//       it coherent), writes score_cache[]. Finds max_score_logit.
+//   S2  softmax exp: single score softmax. No prior softmax -- exploration
+//       floor uses uniform 1/num_active instead of raw prior.
+//   S3  deficit argmax: pi' = (1-eps)*score_softmax + eps*(1/num_active),
+//       then argmax(pi' - N/(1+sumN)). The eps=0 case reduces cleanly
+//       (uniform term zeroes out) so training runs pay no branch cost.
 //
-// Expected savings vs the old structure (from prior profiling: 7.53s select):
-//   -- gscore: 1.23s -> ~0.15s   (divide eliminated via cached_q)
-//   -- softmax: 2.85s -> 2.85s UCI (eps=0.5), ~1.4s training (eps=0)
-//   -- other:  2.56s -> ~1.5s    (three passes over stack cache instead of heap)
+// Rationale for uniform floor over prior floor:
+//   -- The pathology being fixed is score-softmax collapsing to one-hot on the
+//      Q leader once sigma_scale grows. Mixing back the raw prior only helps
+//      moves that already had non-trivial prior; mixing uniform floors every
+//      legal move at eps/num_active regardless of prior. Also rescues good
+//      moves the policy net assigned near-zero prior.
 //
 // Correctness contract for cached_q:
 //   -- All mutation sites (_virtual_loss, _backpropagate) must call
@@ -207,7 +202,6 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSEdge*>& simu
 
     // Stack caches -- outer scope so they're allocated once per _select call,
     // not once per descent step. 256 slots covers chess (max legal moves ~218).
-    // Total ~14 KB stack; fits comfortably in L1.
     MCTSEdge* edge_cache[256];
     MCTSNode* child_cache[256];
     int       visits_cache[256];
@@ -215,7 +209,6 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSEdge*>& simu
     bool      active_cache[256];
     double    score_cache[256];
     double    exp_cache[256];
-    double    prior_cache[256];
 
     while (true) {
         auto other_start = profile ? NOW() : start_time;
@@ -224,11 +217,11 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSEdge*>& simu
             break;
         }
 
-        const int  num_edges = node->num_children;
-        const bool use_prior = (deficit_eps > 0.0);
+        const int num_edges = node->num_children;
 
         double max_visits = 0.0;
         double sum_visits = 0.0;
+        int    num_active = 0;
 
         // ===== H: snapshot pass (only pass that touches child heap) =====
         for (int i = 0; i < num_edges; ++i) {
@@ -242,6 +235,7 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSEdge*>& simu
                 // Unmaterialised: selectable, treated as 0 visits.
                 active_cache[i] = true;
                 visits_cache[i] = 0;
+                ++num_active;
                 continue;
             }
             if (child->has_forced_outcome() || child->is_unavailable()) {
@@ -250,6 +244,7 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSEdge*>& simu
                 continue;
             }
             active_cache[i] = true;
+            ++num_active;
             const int v = child->visits;
             visits_cache[i] = v;
             if (v > max_visits) max_visits = v;
@@ -263,11 +258,10 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSEdge*>& simu
         // ===== S1: gscore per active edge (stack-only, cached_q direct read) =====
         auto gscore_start = profile ? NOW() : start_time;
         double max_score_logit = -1e20;
-        double max_raw_logit   = -1e20;
         for (int i = 0; i < num_edges; ++i) {
             if (!active_cache[i]) continue;
             // q from child: cached_q was written from child's perspective in
-            // backprop, so negate for the parent-selection perspective. Fresh
+            // backprop, so negate for parent-selection perspective. Fresh
             // 0-visit nodes use v_mix, same as pre-refactor.
             const double q = (visits_cache[i] > 0)
                            ? -static_cast<double>(child_cache[i]->cached_q)
@@ -276,76 +270,42 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSEdge*>& simu
             const double score = raw_logit_cache[i] + sigma_scale * q_norm;
             score_cache[i] = score;
             if (score > max_score_logit) max_score_logit = score;
-            if (use_prior && raw_logit_cache[i] > max_raw_logit) {
-                max_raw_logit = raw_logit_cache[i];
-            }
         }
         if (profile) time_select_gscore += ELAPSED(gscore_start, NOW());
 
-        // ===== S2: softmax exp (skip prior branch entirely when eps == 0) =====
+        // ===== S2: softmax exp (single branch; uniform floor handles eps>0) =====
         auto softmax_start = profile ? NOW() : start_time;
         double sum_score_exp = 0.0;
-        double sum_prior_exp = 0.0;
-        if (use_prior) {
-            for (int i = 0; i < num_edges; ++i) {
-                if (!active_cache[i]) {
-                    exp_cache[i]   = 0.0;
-                    prior_cache[i] = 0.0;
-                    continue;
-                }
-                const double e = std::exp(score_cache[i] - max_score_logit);
-                exp_cache[i]    = e;
-                sum_score_exp  += e;
-                const double p = std::exp(raw_logit_cache[i] - max_raw_logit);
-                prior_cache[i]  = p;
-                sum_prior_exp  += p;
+        for (int i = 0; i < num_edges; ++i) {
+            if (!active_cache[i]) {
+                exp_cache[i] = 0.0;
+                continue;
             }
-        } else {
-            // eps == 0: prior softmax is multiplied by 0 downstream; skip it.
-            for (int i = 0; i < num_edges; ++i) {
-                if (!active_cache[i]) {
-                    exp_cache[i] = 0.0;
-                    continue;
-                }
-                const double e = std::exp(score_cache[i] - max_score_logit);
-                exp_cache[i]   = e;
-                sum_score_exp += e;
-            }
+            const double e = std::exp(score_cache[i] - max_score_logit);
+            exp_cache[i]   = e;
+            sum_score_exp += e;
         }
         if (profile) time_select_softmax += ELAPSED(softmax_start, NOW());
 
-        // ===== S3: deficit argmax =====
+        // ===== S3: deficit argmax with uniform exploration floor =====
         auto other2_start = profile ? NOW() : start_time;
         const double inv_sum_visits    = 1.0 / (1.0 + sum_visits);
         const double inv_sum_score_exp = (sum_score_exp > 0.0) ? (1.0 / sum_score_exp) : 0.0;
+        const double uniform_p         = (num_active > 0) ? (1.0 / num_active) : 0.0;
+        const double one_minus_eps     = 1.0 - deficit_eps;
 
         double best_deficit = -1e20;
         int    best_i       = -1;
 
-        if (use_prior) {
-            const double inv_sum_prior_exp = (sum_prior_exp > 0.0) ? (1.0 / sum_prior_exp) : 0.0;
-            const double one_minus_eps     = 1.0 - deficit_eps;
-            for (int i = 0; i < num_edges; ++i) {
-                if (!active_cache[i]) continue;
-                const double pi_prime = one_minus_eps * (exp_cache[i]   * inv_sum_score_exp)
-                                      +  deficit_eps  * (prior_cache[i] * inv_sum_prior_exp);
-                const double child_n_norm = static_cast<double>(visits_cache[i]) * inv_sum_visits;
-                const double deficit      = pi_prime - child_n_norm;
-                if (deficit > best_deficit) {
-                    best_deficit = deficit;
-                    best_i       = i;
-                }
-            }
-        } else {
-            for (int i = 0; i < num_edges; ++i) {
-                if (!active_cache[i]) continue;
-                const double pi_prime     = exp_cache[i] * inv_sum_score_exp;
-                const double child_n_norm = static_cast<double>(visits_cache[i]) * inv_sum_visits;
-                const double deficit      = pi_prime - child_n_norm;
-                if (deficit > best_deficit) {
-                    best_deficit = deficit;
-                    best_i       = i;
-                }
+        for (int i = 0; i < num_edges; ++i) {
+            if (!active_cache[i]) continue;
+            const double pi_prime     = one_minus_eps * (exp_cache[i] * inv_sum_score_exp)
+                                      + deficit_eps   * uniform_p;
+            const double child_n_norm = static_cast<double>(visits_cache[i]) * inv_sum_visits;
+            const double deficit      = pi_prime - child_n_norm;
+            if (deficit > best_deficit) {
+                best_deficit = deficit;
+                best_i       = i;
             }
         }
 

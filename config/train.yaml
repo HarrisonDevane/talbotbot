@@ -1,5 +1,5 @@
 global:
-  total_training_steps: 110000                                    # Total gradient updates to perform
+  total_training_steps: 100000                                    # Total gradient updates to perform
   logging_rotation_steps: 1000                                    # How often to make a new log folder
   min_buffer_size: 2000000                                        # Minimum replay buffer size
   max_buffer_size: 40000000                                       # Max buffer size
