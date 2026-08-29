@@ -267,7 +267,7 @@ static TournamentConfig load_config(const std::string& yaml_path) {
     s.virtual_loss           = mcts_n["virtual_loss"].as<double>();
     s.contempt               = mcts_n["contempt"].as<double>();
     s.deficit_eps            = mcts_n["deficit_eps"].as<double>();
-    s.two_fold_repetition    = mcts_n["two_fold_repetition"].as<bool>();
+    s.policy_softmax_temp    = mcts_n["policy_softmax_temp"].as<double>();
     s.gumbel_c_visit         = mcts_n["gumbel_c_visit"].as<double>();
     s.gumbel_c_scale         = mcts_n["gumbel_c_scale"].as<double>();
     s.gumbel_noise           = mcts_n["gumbel_noise"].as<double>();
@@ -436,6 +436,7 @@ static std::unique_ptr<MCTSEngine> build_engine(
         result_queue,
         worker_id,
         cfg.selector.deficit_eps,
+        cfg.selector.policy_softmax_temp,
         cfg.selector.virtual_loss,
         cfg.selector.contempt,
         cfg.selector.draw_cutoff,
@@ -449,7 +450,6 @@ static std::unique_ptr<MCTSEngine> build_engine(
         free_slots,
         core_wait_count,
         cfg.workers_per_core,
-        cfg.selector.two_fold_repetition,
         tb_ready
     );
 

@@ -157,9 +157,9 @@ class MCTSEngine {
 public:
     int worker_batch_size;
     int worker_id;
-    bool two_fold_repetition;
     bool early_terminal_return;
     double deficit_eps;
+    double policy_softmax_temp;
     double virtual_loss;
     double contempt;
     double draw_cutoff;
@@ -206,6 +206,8 @@ public:
     MCTSNode* root;
     NodePool node_pool;
     EdgePool edge_pool;
+    NodePool scratch_node_pool;
+    EdgePool scratch_edge_pool;
     Logger& logger;
 
     // Pool sizing config. Set post-construction from YAML. Used by
@@ -254,6 +256,7 @@ public:
         ThreadSafeQueue<std::vector<int>>& result_queue, 
         int worker_id, 
         double deficit_eps,
+        double policy_softmax_temp,
         double virtual_loss,
         double contempt,
         double draw_cutoff, 
@@ -269,7 +272,6 @@ public:
         ThreadSafeQueue<int>& buffer_free_slots,
         std::atomic<int>* core_wait_count,
         int workers_per_core,
-        bool two_fold_repetition,
         bool use_tablebase = false
     );
 
@@ -283,10 +285,48 @@ public:
                size_t node_target = 0,
                size_t edge_target = 0);
 
+    // Try to reuse the subtree under `played_move`, promoting it to root.
+    //
+    //   Returns true  -> reuse succeeded. Engine ready to search from
+    //                    new_board. root->visits and children are preserved
+    //                    from the prior search (no state reset for them).
+    //   Returns false -> no matching edge, or matched edge's child was
+    //                    never materialised / expanded. Engine state
+    //                    UNCHANGED. Caller should follow up with reset().
+    //
+    // Implementation copies the live subtree from active pool into the
+    // scratch pool, then swaps them, so old dead siblings are freed.
+    // Pool memory is bounded at 2 * live-subtree size. Copy is O(N) in
+    // subtree size (~microseconds per 1k nodes -- negligible vs search
+    // wall time).
+    //
+    // node_target / edge_target: same meaning as reset(). Grow the scratch
+    // pool to at least that size before copying. Pass 0 to auto-size from
+    // current active pool's used count.
+    //
+    // MUST NOT be called from training paths.
+    bool reset_reuse(const chess::Board& new_board,
+                     const std::vector<chess::Board>& new_history,
+                     chess::Move played_move,
+                     size_t node_target = 0,
+                     size_t edge_target = 0);
+
     int run_simulations_fixed(int search_depth, int max_m);
     int run_simulations_timed(int max_m,
                               std::chrono::steady_clock::time_point soft_deadline,
                               std::chrono::steady_clock::time_point hard_deadline);
+
+    // ---- INFERENCE-ONLY variants -----------------------------------------
+    // Deficit-selection uniformly at every level (including root). No
+    // sequential halving, no phase machinery. Enables tree reuse. MUST NOT
+    // be called from training: SH-based policy target generation depends on
+    // the phase-structured visit distribution these variants do not produce.
+    //
+    // Timed variant stops at soft_deadline (target budget). hard_deadline
+    // is accepted for signature symmetry but not consulted.
+    // ----------------------------------------------------------------------
+    int run_simulations_fixed_inference(int search_depth);
+    int run_simulations_timed_inference(std::chrono::steady_clock::time_point target);
 
     double estimated_nps() const { return nps_ewma_; }
     void   reset_nps_history(double e) { nps_ewma_ = e; }
@@ -317,6 +357,12 @@ public:
 private:
     void _wait_for_inference();
     MCTSNode* _select(MCTSNode* start_node, std::vector<MCTSEdge*>& simulation_path);
+
+    // Recursively copy the subtree rooted at old_node into (np, ep), fixing
+    // parent + first_edge pointers to point inside the destination pools.
+    // Returns the newly-allocated root in (np). Called by reset_reuse.
+    MCTSNode* _copy_subtree(MCTSNode* old_node, MCTSNode* new_parent,
+                            NodePool& np, EdgePool& ep);
     void _backpropagate_minimax(MCTSNode* node);
     void _backpropagate(MCTSNode* node, double w, double d, double l, bool is_terminal);
     void _virtual_loss(MCTSNode* node, bool is_applying);
@@ -325,13 +371,26 @@ private:
     
     void _mark_selected(MCTSNode* node);
     void _unmark_selected(MCTSNode* node);
+    // Cascade unavailability upward from `node`: marks node unavailable, then
+    // walks up decrementing each ancestor's num_available_children, cascading
+    // further whenever a counter hits zero. Shared by _mark_selected (leaf
+    // about to be queued) and _backpropagate_minimax (newly-proven node).
+    void _propagate_unavailability_upward(MCTSNode* node);
+    // Dispatch a selected leaf to the right handler (terminal, TB, interior
+    // skip, or inference queue), then unwind the descent moves on root_board.
+    // Shared between the two inference-only sim loops.
+    void _dispatch_selected_leaf(MCTSNode* leaf,
+                                 std::vector<MCTSEdge*>& simulation_path);
+    // End-of-search drain: submit any pending batch and block on
+    // _retrieve_inference until every sent inference has returned.
+    void _drain_pending_inference();
     void _retrieve_inference(bool block);
     void _submit_batch();
     void _handle_terminal_node(MCTSNode* leaf);
     bool _try_tablebase(MCTSNode* leaf);
     void _queue_leaf_for_inference(MCTSNode* leaf, const std::vector<MCTSEdge*>& simulation_path);
     bool _run_single_async_simulation(MCTSEdge* start_edge);
-
+    int _count_selectable_recursive(MCTSNode* n);
     void _log_tournament_results(const std::vector<MCTSEdge*>& candidates,
                                 const std::string& phase_name,
                                 int remaining_search_depth = -1,

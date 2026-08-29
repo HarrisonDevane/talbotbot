@@ -272,7 +272,7 @@ static UciConfig load_config(const std::string& config_file_path,
     s.virtual_loss           = mcts_n["virtual_loss"].as<double>();
     s.contempt               = mcts_n["contempt"].as<double>();
     s.deficit_eps            = mcts_n["deficit_eps"].as<double>();
-    s.two_fold_repetition    = mcts_n["two_fold_repetition"].as<bool>();
+    s.policy_softmax_temp    = mcts_n["policy_softmax_temp"].as<double>();
     s.draw_cutoff            = sel_n["draw_cutoff"].as<double>();
     s.gumbel_c_visit         = mcts_n["gumbel_c_visit"].as<double>();
     s.gumbel_c_scale         = mcts_n["gumbel_c_scale"].as<double>();
@@ -360,6 +360,15 @@ struct SearchWorker {
     int ply_count    = 1;
     std::chrono::steady_clock::time_point soft_deadline;
     std::chrono::steady_clock::time_point hard_deadline;
+
+    // Tree reuse plan. If reuse_moves is non-empty, worker walks it from
+    // reuse_start_board / reuse_start_history calling reset_reuse for each
+    // move. If any call fails, worker falls back to full reset(board, history).
+    // Main leaves reuse_moves empty to force a full reset (ucinewgame, first
+    // search of a session, FEN change, opponent-played-outside-top-m case).
+    std::vector<chess::Move> reuse_moves;
+    chess::Board reuse_start_board;
+    std::vector<chess::Board> reuse_start_history;
 
     // Shared references (bound once by main after construction).
     MCTSEngine*     mcts  = nullptr;
@@ -623,6 +632,24 @@ int main(int argc, char* argv[]) {
     board.setFen(chess::constants::STARTPOS);
     std::vector<chess::Board> history;
 
+    // ---- Tree reuse tracking. All updated during position/ucinewgame; read
+    // (and prior_* updated) in the go handler when computing the delta.
+    // - current_base_fen: "" for startpos, else the FEN string. Used to detect
+    //   base-position changes that force a full reset.
+    // - current_moves: full move sequence from the current position command.
+    // - prior_*: mirror of the state at the last search-triggering go. Only
+    //   valid when has_prior_tree is true.
+    // We only attempt reuse when the current base matches the prior base and
+    // current_moves is a strict extension of prior_moves by 1-4 plies.
+    std::string current_base_fen;
+    std::vector<chess::Move> current_moves;
+
+    std::string prior_base_fen;
+    std::vector<chess::Move> prior_moves;
+    chess::Board prior_board;
+    std::vector<chess::Board> prior_history;
+    bool has_prior_tree = false;
+
     std::atomic<int> wait_count{0};
 
     // Prime pool sizing for engine construction. We size the initial pool
@@ -637,11 +664,12 @@ int main(int argc, char* argv[]) {
         static_cast<int>(initial.edge_target),
         cfg.selector.batch_size_per_worker,
         inference_queue, result_queues[0], 0,
-        cfg.selector.deficit_eps, cfg.selector.virtual_loss, cfg.selector.contempt, cfg.selector.draw_cutoff,
+        cfg.selector.deficit_eps, cfg.selector.policy_softmax_temp, cfg.selector.virtual_loss, 
+        cfg.selector.contempt, cfg.selector.draw_cutoff,
         cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
         cfg.selector.gumbel_noise, board, history, main_logger,
         buf.input, buf.policy, buf.value,
-        buffer_free_slots, &wait_count, 1, cfg.selector.two_fold_repetition, tb_ready);
+        buffer_free_slots, &wait_count, 1, tb_ready);
 
     mcts_engine->pool_sizing_cfg = cfg.pool_sizing;
     mcts_engine->set_nps_alpha(cfg.time_control.nps_ewma_alpha);
@@ -685,6 +713,9 @@ int main(int argc, char* argv[]) {
             const int  ply_snapshot = worker->ply_count;
             const auto soft_dl = worker->soft_deadline;
             const auto hard_dl = worker->hard_deadline;
+            std::vector<chess::Move> reuse_moves = worker->reuse_moves;
+            chess::Board reuse_start_board = worker->reuse_start_board;
+            std::vector<chess::Board> reuse_start_history = worker->reuse_start_history;
             lock.unlock();
 
             // Predict pool needs BEFORE reset(). For the timed path, we size
@@ -700,7 +731,40 @@ int main(int argc, char* argv[]) {
             } else {
                 pt = worker->mcts->predict_pool_needs(search_nodes);
             }
-            worker->mcts->reset(board, history, pt.node_target, pt.edge_target);
+
+            // ---- Tree reuse or full reset -----------------------------------
+            // If main provided a reuse plan, walk it via reset_reuse (one
+            // call per delta ply, reconstructing intermediate boards). Any
+            // failure -> fall back to a full reset() from the final position.
+            bool reused = false;
+            if (!reuse_moves.empty()) {
+                chess::Board walk_board = reuse_start_board;
+                std::vector<chess::Board> walk_history = reuse_start_history;
+                bool all_ok = true;
+                for (chess::Move mv : reuse_moves) {
+                    chess::Board next_board = walk_board;
+                    next_board.makeMove(mv);
+                    std::vector<chess::Board> next_history = walk_history;
+                    next_history.insert(next_history.begin(), walk_board);
+                    if (next_history.size() > 4) next_history.pop_back();
+
+                    if (!worker->mcts->reset_reuse(next_board, next_history, mv,
+                                                   pt.node_target, pt.edge_target)) {
+                        all_ok = false;
+                        break;
+                    }
+                    walk_board   = next_board;
+                    walk_history = next_history;
+                }
+                reused = all_ok;
+                if (!reused) {
+                    worker->logger->log("INFO",
+                        "Tree reuse aborted mid-walk; falling back to full reset.");
+                }
+            }
+            if (!reused) {
+                worker->mcts->reset(board, history, pt.node_target, pt.edge_target);
+            }
 
             // ---- info emission (sub-thread) --------------------------------
             // Ticks ~1Hz; polls the search_active flag every 50ms so it exits
@@ -758,9 +822,9 @@ int main(int argc, char* argv[]) {
             // -----------------------------------------------------------------
 
             if (timed) {
-                worker->mcts->run_simulations_timed(gumbel_m, soft_dl, hard_dl);
+                worker->mcts->run_simulations_timed_inference( soft_dl);
             } else {
-                worker->mcts->run_simulations_fixed(search_nodes, gumbel_m);
+                worker->mcts->run_simulations_fixed_inference(search_nodes);
             }
 
             // Signal info thread to exit and join it before touching root
@@ -867,9 +931,18 @@ int main(int argc, char* argv[]) {
             agent.reset_for_new_game();
             mcts_engine->reset_nps_history(cfg.time_control.nps_ewma);
             ply_count = 1;
+
+            // Fresh game -> no tree to reuse across the boundary.
+            has_prior_tree = false;
+            prior_moves.clear();
+            prior_history.clear();
+            prior_base_fen.clear();
+            current_moves.clear();
+            current_base_fen.clear();
         }
         else if (command == "position") {
             history.clear();
+            current_moves.clear();
             size_t moves_idx = tokens.size();
             for (size_t i = 1; i < tokens.size(); ++i) {
                 if (tokens[i] == "moves") { moves_idx = i; break; }
@@ -877,18 +950,21 @@ int main(int argc, char* argv[]) {
             if (tokens.size() > 1 && tokens[1] == "startpos") {
                 board.setFen(chess::constants::STARTPOS);
                 ply_count = 1;
+                current_base_fen = "";  // sentinel for startpos
             } else if (tokens.size() > 2 && tokens[1] == "fen") {
                 std::string fen;
                 for (size_t i = 2; i < moves_idx; ++i)
                     fen += tokens[i] + (i == moves_idx - 1 ? "" : " ");
                 board.setFen(fen);
                 ply_count = ((board.fullMoveNumber() - 1) * 2) + (board.sideToMove() == chess::Color::BLACK ? 2 : 1);
+                current_base_fen = fen;
             }
 
             for (size_t i = moves_idx + 1; i < tokens.size(); ++i) {
                 history.insert(history.begin(), board);
                 if (history.size() > 4) history.pop_back();
                 chess::Move move = chess::uci::uciToMove(board, tokens[i]);
+                current_moves.push_back(move);
                 board.makeMove(move);
                 ply_count++;
             }
@@ -996,9 +1072,43 @@ int main(int argc, char* argv[]) {
                 } else {
                     search_worker.search_nodes = total_search_nodes;
                 }
+
+                // ---- Tree reuse plan --------------------------------------
+                // Reuse is possible iff we have a prior tree, the current
+                // base position matches the prior base, and current_moves is
+                // a strict extension of prior_moves by 1-4 plies. The 4-ply
+                // cap is defensive: very long descents cost more than a
+                // fresh reset by the time you've walked that many levels,
+                // and it also indicates something unusual happened (GUI
+                // resynced from a saved game etc).
+                search_worker.reuse_moves.clear();
+                if (has_prior_tree
+                    && current_base_fen == prior_base_fen
+                    && current_moves.size() > prior_moves.size()
+                    && (current_moves.size() - prior_moves.size()) <= 4
+                    && std::equal(prior_moves.begin(), prior_moves.end(),
+                                  current_moves.begin())) {
+                    search_worker.reuse_start_board   = prior_board;
+                    search_worker.reuse_start_history = prior_history;
+                    for (size_t i = prior_moves.size(); i < current_moves.size(); ++i) {
+                        search_worker.reuse_moves.push_back(current_moves[i]);
+                    }
+                }
+
                 search_worker.done_flag  = false;
                 search_worker.start_flag = true;
             }
+
+            // Save state as the new prior for the NEXT go. We store what we
+            // are about to search from; the worker's reuse plan (built above)
+            // uses the OLD prior_* which we've now overwritten -- correct
+            // because the worker already snapshot reuse_* into the struct.
+            prior_base_fen = current_base_fen;
+            prior_moves    = current_moves;
+            prior_board    = board;
+            prior_history  = history;
+            has_prior_tree = true;
+
             search_worker.cv_start.notify_one();
             // NB: no wait. Main returns to stdin loop so `stop` / `isready` /
             // `quit` can be received during the search. bestmove is emitted

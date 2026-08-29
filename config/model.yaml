@@ -1,6 +1,6 @@
 model:
-  filters: 64
-  resblocks: 6
+  filters: 128
+  resblocks: 10
   se_channels: 32
   value_channels: 32
   value_fc_hidden: 128

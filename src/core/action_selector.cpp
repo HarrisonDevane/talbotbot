@@ -26,61 +26,49 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSE
     int num_children = root->num_children;
     if (num_children == 0) return result;
 
-    // Under the edge/node split, the movable+priored thing is MCTSEdge;
-    // MCTSNode (accessed via edge->child) is nullable for unvisited edges.
     std::vector<MCTSEdge*> all_edges;
     all_edges.reserve(num_children);
     for(int i = 0; i < num_children; ++i) {
         all_edges.push_back(root->first_edge + i);
     }
 
-    std::vector<MCTSEdge*> winning_edges, losing_edges, draw_edges, non_forced_visited;
+    std::vector<MCTSEdge*> winning_edges, losing_edges, draw_edges, mhd_edges, non_forced_visited;
     for (MCTSEdge* edge : all_edges) {
         MCTSNode* child = edge->child;
 
-        // Unmaterialised child -> was never selected during search. Treated
-        // the same as a materialised-but-visits==0 child under the old scheme:
-        // it can't be a forced outcome, it can't be visited. Falls off the
-        // decision set entirely.
         if (child == nullptr) continue;
 
         if (child->has_forced_outcome()) {
             if      (child->forced_outcome == -1) winning_edges.push_back(edge);
             else if (child->forced_outcome ==  1) losing_edges.push_back(edge);
             else                                  draw_edges.push_back(edge);
-        } else {
-            // Practical-draw detection: if the opponent's best reply is a
-            // forced draw, this move's true value is a draw regardless of
-            // its Q. Walk the grandchild edges; skip unmaterialised ones
-            // (equivalent to old "visits == 0" skip since a nullptr grandchild
-            // has never been searched).
-            bool is_practical_draw = false;
-            if (child->is_expanded() && child->num_children > 0) {
-                MCTSNode* best_grandchild = nullptr;
-                double best_gq = -2.0;
-                for (int i = 0; i < child->num_children; ++i) {
-                    MCTSEdge* ge = child->first_edge + i;
-                    MCTSNode* gc = ge->child;
-                    if (gc == nullptr) continue;
-                    // Skip grandchildren that are proven wins for us (opponent avoids them)
-                    if (gc->has_forced_outcome() && gc->forced_outcome == -1) continue;
-                    if (gc->visits == 0) continue;
-                    double gq = -gc->expected_value(config.contempt);  // opponent's perspective
-                    if (gq > best_gq) { best_gq = gq; best_grandchild = gc; }
-                }
-                if (best_grandchild != nullptr &&
-                    best_grandchild->has_forced_outcome() &&
-                    best_grandchild->forced_outcome == 0) {
-                    is_practical_draw = true;
-                }
-            }
+        } else if (child->mover_has_draw()) {
+            // Not proven, but PV / no-escape says this child's mover heads to
+            // a draw. Treat as draw-like for selection (Rule C), independent
+            // of visit count. Excluded from non_forced_visited so temperature
+            // sampling can't pick it.
+            mhd_edges.push_back(edge);
+        } else if (child->visits > 0) {
+            non_forced_visited.push_back(edge);
+        }
+    }
 
-            if (is_practical_draw) {
-                draw_edges.push_back(edge);
-                logger.log("INFO", "Practical draw detected: " + chess::uci::moveToUci(edge->move)
-                    + " (opponent's best response is a forced draw)");
-            } else if (child->visits > 0) {
-                non_forced_visited.push_back(edge);
+    // Log any child carrying mover_has_draw for post-mortem verification.
+    // Distinguishes proven-draw (fo=0) sources from PV/no-escape sources.
+    if (logger.get_level() <= 20) {
+        for (MCTSEdge* edge : all_edges) {
+            MCTSNode* c = edge->child;
+            if (c != nullptr && c->mover_has_draw()) {
+                const char* origin =
+                    c->has_forced_outcome() && c->forced_outcome == 0 ? "proven-draw"
+                  : c->has_forced_outcome()                            ? "forced-non-draw(!)"
+                  :                                                      "PV/no-escape";
+                char line[256];
+                snprintf(line, sizeof(line),
+                    "mover_has_draw set on %s (%s, visits=%d, cached_q=%.4f)",
+                    chess::uci::moveToUci(edge->move).c_str(),
+                    origin, c->visits, static_cast<double>(c->cached_q));
+                logger.log("INFO", line);
             }
         }
     }
@@ -88,9 +76,6 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSE
     MCTSEdge* top_edge = nullptr;
     double best_q = -2.0;
 
-    // gumbel_score cache was dropped from MCTSNode -- recompute inline via
-    // MCTSEdge::calculate_gumbel_score with noise from engine->root_gumbel_noise.
-    // max_visits/v_mix computed once over the candidate set.
     auto gscore = [&](MCTSEdge* e, double mv, double vm) -> double {
         int idx = static_cast<int>(e - root->first_edge);
         double noise = (idx >= 0 && idx < (int)engine->root_gumbel_noise.size())
@@ -125,19 +110,28 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSE
         std::uniform_int_distribution<> dist(0, (int)best_moves.size() - 1);
         result.best_move = best_moves[dist(rng)];
 
-    // Rule B: Draw
+    // Rule B: Proven Draw
     } else if (!draw_edges.empty() && best_q <= config.draw_cutoff) {
         std::uniform_int_distribution<> dist(0, (int)draw_edges.size() - 1);
         result.best_move = draw_edges[dist(rng)]->move;
 
-    // Rule C: Resign if below threshold
+    // Rule C: Mover-Has-Draw (PV / no-escape draw preference, not proven)
+    // Same trigger as Rule B: best non-forced option is at-or-below the draw
+    // cutoff, so the flagged draw-heading line is preferable to letting the
+    // NN's noisy positive estimate on non-forced children win. Checked after
+    // Rule B so a proven draw always beats a preference-only draw.
+    } else if (!mhd_edges.empty() && best_q <= config.draw_cutoff) {
+        std::uniform_int_distribution<> dist(0, (int)mhd_edges.size() - 1);
+        result.best_move = mhd_edges[dist(rng)]->move;
+
+    // Rule D: Resign if below threshold
     } else if (use_resignation && !non_forced_visited.empty() && best_q < config.resignation_cutoff) {
         // Check for !non_forced_visited.empty() means if a forced loss is found, it will be played out to mate
         logger.log("INFO", "Best Value (" + std::to_string(best_q) + ") is below cutoff. Triggering Resignation.");
         result.resigned = true;
         result.best_move = chess::Move::NO_MOVE;
 
-    // Rule D: Temperature / Deterministic
+    // Rule E: Temperature / Deterministic
     } else if (!non_forced_visited.empty()) {
         if (ply_count <= config.temperature_ply_cutoff) {
             // q̃(a) = Q(a) − σ(a)/√visits(a),  σ² from search-averaged WDL
@@ -238,7 +232,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSE
             result.best_move = (gscore(e1, mv, vm) > gscore(e2, mv, vm)) ? e1->move : e2->move;
         }
         
-    // Rule E: Delay Mate
+    // Rule F: Delay Mate
     } else {
         // Delay mate
         if (!losing_edges.empty()) {

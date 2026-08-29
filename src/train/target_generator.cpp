@@ -66,20 +66,23 @@ TargetResult TargetGenerator::generate_targets(
         MCTSNode* c = e->child;
 
         double q;
-        if (c != nullptr && c->has_forced_outcome()) {
-            // Proven subtree: exact value, no shrinkage, visits irrelevant.
-            // forced_outcome is from the child's perspective; negate for ours.
+        if (c == nullptr || c->visits == 0) {
+            q = v_mix;
+        } else if (c->has_forced_outcome()) {
+            // Proven subtree: exact value, no shrinkage.
+            // forced_outcome is from child's perspective; negate for ours.
             int fo = c->forced_outcome;
             if      (fo == -1) q =  1.0;              // proven win for us
             else if (fo ==  1) q = -1.0;              // proven loss
             else               q =  config.contempt;  // proven draw
-        } else if (c == nullptr || c->visits == 0) {
-            // Unmaterialised or materialised-but-never-visited: fall back to
-            // v_mix (matches pre-split behaviour where every child existed
-            // but might have visits==0).
-            q = v_mix;
+        } else if (c->mover_has_draw()) {
+            // Non-monotonic draw preference: treat same as proven draw for target.
+            q = config.contempt;
         } else {
-            q = (c->visits * -c->expected_value(config.contempt) + target_shrinkage_k * v_mix) / (c->visits + target_shrinkage_k);
+            // Unresolved: visit-weighted shrinkage toward v_mix.
+            q = (c->visits * -c->expected_value(config.contempt)
+                + target_shrinkage_k * v_mix)
+                / (c->visits + target_shrinkage_k);
         }
 
         double q_norm = (q + 1.0) / 2.0;

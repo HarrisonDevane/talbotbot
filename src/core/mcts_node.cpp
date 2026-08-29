@@ -11,6 +11,19 @@ MCTSEdge* MCTSNode::get_edge(chess::Move m) const {
 }
 
 double MCTSNode::expected_value(double contempt) const {
+    // Proven outcomes dominate: forced_outcome is a proof, contempt does
+    // not apply. Perspective is this node's mover.
+    if (has_forced_outcome()) {
+        if (forced_outcome == -1) return -1.0;
+        if (forced_outcome ==  0) return  0.0;
+        return 1.0;   // forced_outcome == 1
+    }
+    // Mover-has-draw override: mhd asserts this node's mover realizes
+    // exactly 0 (via PV preference to draw or no-escape). Contempt does
+    // not apply -- the flag says the drawn value IS the realized value,
+    // not an unresolved estimate to bias.
+    if (mover_has_draw()) return 0.0;
+    // Unresolved: NN-averaged Q, with contempt bias on the draw fraction.
     if (visits == 0) return (raw_w - raw_l()) + (contempt * raw_d);
     return (w_sum - l_sum + (contempt * d_sum)) / visits;
 }

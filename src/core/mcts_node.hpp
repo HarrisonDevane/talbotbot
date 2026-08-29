@@ -122,6 +122,7 @@ struct MCTSNode {
     static constexpr uint8_t FLAG_UNAVAILABLE = 0x2;
 
     explicit MCTSNode(MCTSNode* p = nullptr);
+    static constexpr uint8_t FLAG_MOVER_HAS_DRAW = 0x4;
 
     // Derived WDL loss probability. NN outputs sum to 1 by construction, so
     // this is exact within float precision.
@@ -151,6 +152,11 @@ struct MCTSNode {
 
     // Value from this node's own perspective. Behaviour unchanged.
     double expected_value(double contempt) const;
+    bool mover_has_draw() const { return (flags & FLAG_MOVER_HAS_DRAW) != 0; }
+    void set_mover_has_draw(bool v) {
+        flags = static_cast<uint8_t>(v ? (flags |  FLAG_MOVER_HAS_DRAW)
+                                    : (flags & ~FLAG_MOVER_HAS_DRAW));
+    }
 
     // Recompute cached_q. MUST be called after any mutation to visits/w_sum/
     // d_sum/l_sum -- inlined into _virtual_loss and _backpropagate for that

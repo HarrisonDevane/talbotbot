@@ -16,6 +16,7 @@ struct ActionSelectorConfig {
 
     double contempt;
     double deficit_eps;
+    double policy_softmax_temp;
     double virtual_loss;
     double draw_cutoff;
     double gumbel_c_visit;
@@ -30,7 +31,6 @@ struct ActionSelectorConfig {
     double resignation_probability;
     double resignation_cutoff;
     int batch_size_per_worker;
-    bool two_fold_repetition;
 };
 
 struct SelectionResult {
