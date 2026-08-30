@@ -52,8 +52,8 @@
 #include "inference_batcher.hpp"
 #include "logger.hpp"
 #include "time_control.hpp"
-
 #include "tbprobe.h"   // Fathom Syzygy probing (tb_init / tb_free / TB_LARGEST)
+#include "build_info.hpp"
 
 namespace fs = std::filesystem;
 
@@ -200,7 +200,11 @@ struct UciConfig {
     int board_dim;
     int policy_moves;
 
-    // mcts / selection (single struct; ActionSelector reads what it needs)
+    // Split search config. Loaded together via load_configs() so their shared
+    // contempt/draw_cutoff fields cannot drift.
+    //   mcts     -- fed to MCTSEngine (construction, pool sizing, sim budget)
+    //   selector -- fed to ActionSelector (rules A-F in select_move)
+    MctsConfig           mcts;
     ActionSelectorConfig selector;
 
     // time control
@@ -265,25 +269,14 @@ static UciConfig load_config(const std::string& config_file_path,
     // Tablebase: no yaml block. TB probing is off at startup; the GUI enables
     // it by sending `setoption name SyzygyPath value <path>`.
 
-    ActionSelectorConfig& s = cfg.selector;
-    // node_pool_size dropped from YAML in stage 3 -- pool is sized per-reset
-    // from pool_sizing knobs against NPS x time (see worker thread below).
-    // The ActionSelectorConfig field itself is retained (unused) until stage 5.
-    s.virtual_loss           = mcts_n["virtual_loss"].as<double>();
-    s.contempt               = mcts_n["contempt"].as<double>();
-    s.deficit_eps            = mcts_n["deficit_eps"].as<double>();
-    s.policy_softmax_temp    = mcts_n["policy_softmax_temp"].as<double>();
-    s.draw_cutoff            = sel_n["draw_cutoff"].as<double>();
-    s.gumbel_c_visit         = mcts_n["gumbel_c_visit"].as<double>();
-    s.gumbel_c_scale         = mcts_n["gumbel_c_scale"].as<double>();
-    s.gumbel_noise           = mcts_n["gumbel_noise"].as<double>();
-    s.gumbel_search_depth    = mcts_n["gumbel_search_depth"].as<double>();
-    s.gumbel_m               = mcts_n["gumbel_m"].as<double>();
-    s.batch_size_per_worker  = mcts_n["worker_minibatch_size"].as<int>();
-    s.temperature_ply_cutoff = sel_n["temperature_ply_cutoff"].as<int>();
-    s.temperature_q_decay    = sel_n["temperature_q_decay"].as<double>();
-    s.resignation_probability= sel_n["resignation_probability"].as<double>();
-    s.resignation_cutoff     = sel_n["resignation_cutoff"].as<double>();
+    // Shared loader with the training binary (see action_selector.cpp). Adding
+    // a new mcts or selection knob means editing load_configs() only -- both
+    // binaries pick it up. Pre-refactor this block was a hand-maintained copy
+    // of the one in data_generator.cpp; they had already drifted on .as<int>
+    // vs .as<double> for the gumbel_* fields.
+    LoadedConfigs loaded = load_configs(mcts_n, sel_n, /*require_gumbel_m=*/false);
+    cfg.mcts     = loaded.mcts;
+    cfg.selector = loaded.selector;
 
     // Optional: inference early-stop threshold. Missing = disabled (0.0).
     if (mcts_n["early_stop_q_gap"]) {
@@ -355,7 +348,6 @@ struct SearchWorker {
     chess::Board board;
     std::vector<chess::Board> history;
     int search_nodes = 0;
-    int gumbel_m     = 0;
     bool timed       = false;
     int ply_count    = 1;
     std::chrono::steady_clock::time_point soft_deadline;
@@ -513,6 +505,8 @@ static std::string get_exe_dir() {
 
 // =============================================================================
 int main(int argc, char* argv[]) {
+    std::cerr << "Talbot [git " << talbot::GIT_COMMIT
+            << "] built " << talbot::BUILD_TIME << "\n";
     // A GUI launches us with no args and expects UCI on stdio. Do not add flags.
 
     const std::string exe_dir = get_exe_dir();
@@ -545,23 +539,49 @@ int main(int argc, char* argv[]) {
     }
 
     // CLI Override: --cores <comma_separated_ints>
+    // Legacy single-set override: applied to both main + game_worker cores.
+    // Batcher unchanged (stays on config value).
+    //
+    // Newer per-role overrides for concurrent-instance affinity pinning:
+    //   --worker-cores <csv>   -> main_cores and game_worker_cores
+    //   --batcher-cores <csv>  -> inference_worker_cores
+    // Both/either can be passed; per-role overrides win over --cores if given.
+    auto parse_cores = [](const char* csv, std::vector<int>& out) -> bool {
+        std::stringstream ss(csv);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            try { out.push_back(std::stoi(token)); }
+            catch (...) {
+                std::cerr << "Fatal: Invalid core integer: " << token << "\n";
+                return false;
+            }
+        }
+        return true;
+    };
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--cores" && i + 1 < argc) {
             std::vector<int> override_cores;
-            std::stringstream ss(argv[++i]);
-            std::string token;
-            while (std::getline(ss, token, ',')) {
-                try {
-                    override_cores.push_back(std::stoi(token));
-                } catch (...) {
-                    std::cerr << "Fatal: Invalid core integer: " << token << "\n";
-                    return 1;
-                }
-            }
+            if (!parse_cores(argv[++i], override_cores)) return 1;
             if (!override_cores.empty()) {
                 cfg.main_cores = override_cores;
                 cfg.game_worker_cores = override_cores;
+            }
+        }
+        else if (arg == "--worker-cores" && i + 1 < argc) {
+            std::vector<int> override_cores;
+            if (!parse_cores(argv[++i], override_cores)) return 1;
+            if (!override_cores.empty()) {
+                cfg.main_cores = override_cores;
+                cfg.game_worker_cores = override_cores;
+            }
+        }
+        else if (arg == "--batcher-cores" && i + 1 < argc) {
+            std::vector<int> override_cores;
+            if (!parse_cores(argv[++i], override_cores)) return 1;
+            if (!override_cores.empty()) {
+                cfg.inference_worker_cores = override_cores;
             }
         }
     }
@@ -597,6 +617,20 @@ int main(int argc, char* argv[]) {
     if (!cfg.main_cores.empty()) {
         DWORD_PTR m = mask_from_cores(cfg.main_cores);
         if (m != 0) SetThreadAffinityMask(GetCurrentThread(), m);
+    }
+
+    {
+        auto join_ints = [](const std::vector<int>& v) {
+            std::string s;
+            for (size_t i = 0; i < v.size(); ++i) {
+                if (i) s += ",";
+                s += std::to_string(v[i]);
+            }
+            return s.empty() ? "<unset>" : s;
+        };
+        main_logger.log("INFO", "Affinity: main_cores=[" + join_ints(cfg.main_cores)
+            + "] game_worker_cores=[" + join_ints(cfg.game_worker_cores)
+            + "] inference_worker_cores=[" + join_ints(cfg.inference_worker_cores) + "]");
     }
 
     // (engine_path existence already validated pre-logger.)
@@ -660,14 +694,11 @@ int main(int argc, char* argv[]) {
         static_cast<int>(cfg.time_control.nps_ewma * 5.0), cfg.pool_sizing);
 
     auto mcts_engine = std::make_unique<MCTSEngine>(
+        cfg.mcts,
         static_cast<int>(initial.node_target),
         static_cast<int>(initial.edge_target),
-        cfg.selector.batch_size_per_worker,
         inference_queue, result_queues[0], 0,
-        cfg.selector.deficit_eps, cfg.selector.policy_softmax_temp, cfg.selector.virtual_loss, 
-        cfg.selector.contempt, cfg.selector.draw_cutoff,
-        cfg.selector.gumbel_c_visit, cfg.selector.gumbel_c_scale,
-        cfg.selector.gumbel_noise, board, history, main_logger,
+        board, history, main_logger,
         buf.input, buf.policy, buf.value,
         buffer_free_slots, &wait_count, 1, tb_ready);
 
@@ -692,6 +723,10 @@ int main(int argc, char* argv[]) {
     search_worker.mcts     = mcts_engine.get();
     search_worker.agent    = &agent;
     search_worker.logger   = &main_logger;
+    // contempt is shared -- either cfg.mcts.contempt or cfg.selector.contempt
+    // works since load_configs guarantees they're equal. Pick selector since
+    // search_worker.contempt feeds ActionSelector.select_move (via q_to_cp /
+    // best_child_q) at the end of the search.
     search_worker.contempt = cfg.selector.contempt;
     search_worker.core_mask = mask_from_cores(cfg.game_worker_cores);
 
@@ -708,7 +743,6 @@ int main(int argc, char* argv[]) {
             chess::Board board = worker->board;
             std::vector<chess::Board> history = worker->history;
             const bool timed = worker->timed;
-            const int  gumbel_m     = worker->gumbel_m;
             const int  search_nodes = worker->search_nodes;
             const int  ply_snapshot = worker->ply_count;
             const auto soft_dl = worker->soft_deadline;
@@ -992,7 +1026,7 @@ int main(int argc, char* argv[]) {
             // Parse the subset of UCI `go` params we support.
             int64_t wtime = -1, btime = -1, winc = 0, binc = 0, movetime = -1;
             int movestogo = 0;
-            int total_search_nodes = static_cast<int>(cfg.selector.gumbel_search_depth);
+            int total_search_nodes = cfg.mcts.gumbel_search_depth;
             for (size_t i = 1; i + 1 < tokens.size(); ++i) {
                 if      (tokens[i] == "nodes")     total_search_nodes = std::stoi(tokens[i + 1]);
                 else if (tokens[i] == "wtime")     wtime     = std::stoll(tokens[i + 1]);
@@ -1012,7 +1046,7 @@ int main(int argc, char* argv[]) {
                 // is stale from the previous game (or zero) and the trainer's
                 // budget is a reasonable proxy.
                 timed = false;
-                total_search_nodes = static_cast<int>(cfg.selector.gumbel_search_depth);
+                total_search_nodes = cfg.mcts.gumbel_search_depth;
                 main_logger.log("INFO", "Opening ply " + std::to_string(ply_count) + " detected. Forcing fixed-node search.");
             } else if (movetime >= 0) {
                 // Fixed per-move time: spend (almost) all of it, no soft target.
@@ -1063,7 +1097,6 @@ int main(int argc, char* argv[]) {
                 std::lock_guard<std::mutex> lock(search_worker.mtx);
                 search_worker.board     = board;
                 search_worker.history   = history;
-                search_worker.gumbel_m  = static_cast<int>(cfg.selector.gumbel_m);
                 search_worker.timed     = timed;
                 search_worker.ply_count = ply_count;
                 if (timed) {

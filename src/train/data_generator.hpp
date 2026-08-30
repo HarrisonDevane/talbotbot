@@ -20,7 +20,11 @@ struct DataGenConfig {
     int workers_per_core; 
     int total_workers;
     std::vector<int> core_ids;
-    int max_ply_length;
+    int adjudication_max_ply_length;
+    double adjudication_draw_threshold;
+    int adjudication_draw_plies; 
+    int adjudication_draw_min_move;
+    double adjudication_draw_probability;
     int worker_logging_level;
     int rotation_interval;
     double target_shrinkage_k;
@@ -77,11 +81,9 @@ public:
 
 private:
     DataGenConfig config;
+    MctsConfig mcts_config;
     ActionSelectorConfig selector_config;
     ModelConfig model_config;
-    // Parsed from global_cfg["pool_sizing"] in the ctor. Copied onto each
-    // per-worker MCTSEngine after construction (mcts.pool_sizing_cfg = ...)
-    // and used by worker_main to compute pool targets before every reset().
     PoolSizingConfig pool_sizing_cfg;
 
     Logger& main_logger; 

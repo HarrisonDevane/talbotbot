@@ -9,6 +9,7 @@
 #include <sstream>
 #include <windows.h> 
 #include <cmath>
+#include <random>
 
 DataGenerator::DataGenerator(
     const YAML::Node& pool_cfg,
@@ -31,7 +32,11 @@ DataGenerator::DataGenerator(
     for (const auto& core : data_gen_cfg["game_worker_cores"]) {
         config.core_ids.push_back(core.as<int>());
     }
-    config.max_ply_length = data_gen_cfg["max_ply_length"].as<int>();
+    config.adjudication_max_ply_length = data_gen_cfg["adjudication_max_ply_length"].as<int>();
+    config.adjudication_draw_threshold = data_gen_cfg["adjudication_draw_threshold"].as<double>();
+    config.adjudication_draw_plies     = data_gen_cfg["adjudication_draw_plies"].as<int>();
+    config.adjudication_draw_min_move  = data_gen_cfg["adjudication_draw_min_move"].as<int>();
+    config.adjudication_draw_probability    = data_gen_cfg["adjudication_draw_probability"].as<double>();
     config.worker_logging_level = data_gen_cfg["worker_logging_level"].as<int>();
     config.target_shrinkage_k = data_gen_cfg["target_shrinkage_k"].as<double>();
     config.rl_dir = rl_dir_in;
@@ -45,24 +50,12 @@ DataGenerator::DataGenerator(
     model_config.board_dim = model_cfg["model"]["board_dim"].as<int>();
     model_config.policy_moves = model_cfg["model"]["total_policy_moves"].as<int>();
 
-    // node_pool_size is no longer read from YAML -- pool is sized per-reset
-    // from pool_sizing knobs against gumbel_search_depth. See predict_pool_needs.
-    // The field on ActionSelectorConfig is left unused until stage 5.
-    selector_config.batch_size_per_worker = mcts_cfg["worker_minibatch_size"].as<int>();
-    selector_config.virtual_loss = mcts_cfg["virtual_loss"].as<double>();
-    selector_config.contempt = mcts_cfg["contempt"].as<double>();
-    selector_config.deficit_eps = mcts_cfg["deficit_eps"].as<double>();
-    selector_config.policy_softmax_temp = mcts_cfg["policy_softmax_temp"].as<double>();
-    selector_config.gumbel_c_visit = mcts_cfg["gumbel_c_visit"].as<double>();
-    selector_config.gumbel_c_scale = mcts_cfg["gumbel_c_scale"].as<double>();
-    selector_config.gumbel_noise = mcts_cfg["gumbel_noise"].as<double>();
-    selector_config.gumbel_search_depth = mcts_cfg["gumbel_search_depth"].as<int>();
-    selector_config.gumbel_m = mcts_cfg["gumbel_m"].as<int>();
-    selector_config.temperature_ply_cutoff = sel_cfg["temperature_ply_cutoff"].as<int>();
-    selector_config.temperature_q_decay = sel_cfg["temperature_q_decay"].as<double>();
-    selector_config.draw_cutoff = sel_cfg["draw_cutoff"].as<double>();
-    selector_config.resignation_probability = sel_cfg["resignation_probability"].as<double>();
-    selector_config.resignation_cutoff = sel_cfg["resignation_cutoff"].as<double>();
+    // Single loader populates both configs. Shared contempt/draw_cutoff
+    // fields cannot drift; adding a new mcts or selection knob is a one-line
+    // change in load_configs() that both training and UCI pick up.
+    LoadedConfigs loaded = load_configs(mcts_cfg, sel_cfg, /*require_gumbel_m=*/true);
+    mcts_config     = loaded.mcts;
+    selector_config = loaded.selector;
 
     // --- Pool sizing block (required) ---------------------------------------
     // Fed to MCTSEngine::pool_sizing_cfg post-construction. Same 5 knobs
@@ -116,22 +109,26 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
     // (gumbel_search_depth). Size the initial pools for that -- the first
     // reset() then finds capacity already sufficient and doesn't grow.
     PoolTargets initial_targets = MCTSEngine::predict_pool_needs_static(
-        selector_config.gumbel_search_depth, pool_sizing_cfg);
+        mcts_config.gumbel_search_depth, pool_sizing_cfg);
 
     MCTSEngine mcts(
+        mcts_config,
         static_cast<int>(initial_targets.node_target),
         static_cast<int>(initial_targets.edge_target),
-        selector_config.batch_size_per_worker,
         inference_queue, result_queues[logical_idx], logical_idx,
-        selector_config.deficit_eps, selector_config.policy_softmax_temp, selector_config.virtual_loss, selector_config.contempt,
-        selector_config.draw_cutoff, selector_config.gumbel_c_visit, selector_config.gumbel_c_scale, 
-        selector_config.gumbel_noise, dummy, std::vector<chess::Board>(), logger,
+        dummy, std::vector<chess::Board>(), logger,
         shared_input_buffer, shared_policy_buffer, shared_value_buffer,
         buffer_free_slots, core_wait_count, config.workers_per_core, false
     );
     mcts.pool_sizing_cfg = pool_sizing_cfg;
 
     ActionSelector agent("worker_" + std::to_string(worker_id), logical_idx, selector_config, logger);
+
+    // Per-worker RNG for adjudication-enable roll (once per game, matching the
+    // resignation-probability pattern). Seeded from worker_id so runs are
+    // reproducible per worker while workers get different sequences.
+    std::mt19937 adj_rng(static_cast<uint32_t>(worker_id) * 2654435761u);
+    std::uniform_real_distribution<double> adj_dist(0.0, 1.0);
 
     while (!stop_event.load()) {
         local_step_cache = current_step.load(std::memory_order_relaxed);
@@ -154,9 +151,20 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
         double final_game_value = 0.0;
         double game_entropy_sum = 0.0;
         std::string pgn_result = "*";
+        // Draw adjudication windowed counter: consecutive plies where both
+        // (a) move number >= min, (b) move was quiet (no capture, no pawn),
+        // (c) root D probability >= threshold. Resets on any failure.
+        int consecutive_draw_plies = 0;
+        // Per-game adjudication-enable roll. Matches the resignation-probability
+        // pattern -- some fraction of games act as calibration samples that
+        // play out fully even when adjudication criteria are met, preventing
+        // the feedback-loop bias where an increasingly-confident net adjudicates
+        // more aggressively and never sees positions play out.
+        const bool adjudication_enabled_this_game =
+            adj_dist(adj_rng) < config.adjudication_draw_probability;
         
         std::vector<GameTransition> raw_training_data;
-        raw_training_data.reserve(config.max_ply_length); // FIX: Pre-allocate capacity to stop heap shredding
+        raw_training_data.reserve(config.adjudication_max_ply_length); // FIX: Pre-allocate capacity to stop heap shredding
 
         std::vector<chess::Board> history; 
         int total_input_size = model_config.input_planes * model_config.board_dim * model_config.board_dim;
@@ -174,14 +182,14 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
             // 1. Search
             //   Pool targets from the exact-known sim budget. After move 1
             //   this is a no-op grow (capacity already sufficient).
-            PoolTargets pt = mcts.predict_pool_needs(selector_config.gumbel_search_depth);
+            PoolTargets pt = mcts.predict_pool_needs(mcts_config.gumbel_search_depth);
             mcts.reset(board, history, pt.node_target, pt.edge_target);
-            int sim_count = mcts.run_simulations_fixed(selector_config.gumbel_search_depth, selector_config.gumbel_m);
-            double root_v_mix = mcts.root->calculate_v_mix(selector_config.contempt);
+            int sim_count = mcts.run_simulations_fixed(mcts_config.gumbel_search_depth, mcts_config.gumbel_m);
+            double root_v_mix = mcts.root->calculate_v_mix(mcts_config.contempt);
 
             // 2. Generate Targets
             TargetResult targets = TargetGenerator::generate_targets(
-                mcts.root, board, selector_config, model_config, config.target_shrinkage_k, logger
+                mcts.root, board, mcts_config, model_config, config.target_shrinkage_k, logger
             );
 
             // 3. Select Action
@@ -202,6 +210,43 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
                 game_over = true;
                 logger.log("INFO", "Game ended by resignation.");
                 break;
+            }
+
+            // --- Draw adjudication (windowed root-D check) ---
+            // The selected move hasn't been played yet, so isCapture / piece-type
+            // reads are against the current pre-move board. Root D-probability
+            // comes from the search that just completed for this position.
+            {
+                double root_d = 0.0;
+                if (mcts.root->visits > 0) {
+                    root_d = static_cast<double>(mcts.root->d_sum) / mcts.root->visits;
+                }
+                const bool is_quiet =
+                    !board.isCapture(move_result.best_move)
+                    && board.at(move_result.best_move.from()).type() != chess::PieceType::PAWN;
+
+                if (move_number >= config.adjudication_draw_min_move
+                    && is_quiet
+                    && root_d >= config.adjudication_draw_threshold) {
+                    consecutive_draw_plies++;
+                } else {
+                    consecutive_draw_plies = 0;
+                }
+
+                if (consecutive_draw_plies >= config.adjudication_draw_plies
+                    && adjudication_enabled_this_game) {
+                    game_over = true;
+                    final_game_value = 0.0;
+                    pgn_result = "1/2-1/2";
+                    char buf[192];
+                    snprintf(buf, sizeof(buf),
+                        "Game adjudicated as draw: root_d=%.3f threshold=%.3f "
+                        "plies=%d move=%d",
+                        root_d, config.adjudication_draw_threshold,
+                        consecutive_draw_plies, move_number);
+                    logger.log("INFO", buf);
+                    break;
+                }
             }
 
             logger.log("INFO", "Selected move: " + chess::uci::moveToUci(move_result.best_move));
@@ -242,7 +287,7 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
                     final_game_value = 0.0;
                     pgn_result = "1/2-1/2";
                 }
-            } else if (ply_count >= config.max_ply_length) {
+            } else if (ply_count >= config.adjudication_max_ply_length) {
                 game_over = true;
                 final_game_value = 0.0;
                 pgn_result = "1/2-1/2";

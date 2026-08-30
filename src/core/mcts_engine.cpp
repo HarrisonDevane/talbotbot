@@ -25,17 +25,20 @@ static chess::Move _incoming_move(const MCTSNode* n) {
 }
 
 MCTSEngine::MCTSEngine(
-    int node_pool_capacity, int edge_pool_capacity, int worker_batch_size,
+    const MctsConfig& cfg,
+    int node_pool_capacity, int edge_pool_capacity,
     moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue,
-    ThreadSafeQueue<std::vector<int>>& result_queue, int worker_id, double deficit_eps, double policy_softmax_temp, double virtual_loss, double contempt,
-    double draw_cutoff, double gumbel_c_visit, double gumbel_c_scale, double gumbel_noise,
+    ThreadSafeQueue<std::vector<int>>& result_queue,
+    int worker_id,
     const chess::Board& board, const std::vector<chess::Board>& base_history, Logger& logger,
     std::vector<torch::Tensor>& shared_input_buffer, std::vector<torch::Tensor>& shared_policy_buffer, std::vector<torch::Tensor>& shared_value_buffer,
     ThreadSafeQueue<int>& buffer_free_slots, std::atomic<int>* core_wait_count, int workers_per_core, bool use_tablebase
 
-) : worker_batch_size(worker_batch_size), worker_id(worker_id), virtual_loss(virtual_loss), deficit_eps(deficit_eps), policy_softmax_temp(policy_softmax_temp),
-    contempt(contempt), draw_cutoff(draw_cutoff), gumbel_c_visit(gumbel_c_visit), gumbel_c_scale(gumbel_c_scale),
-    gumbel_noise(gumbel_noise), root_board(board), base_history(base_history),
+) : worker_batch_size(cfg.batch_size_per_worker), worker_id(worker_id),
+    deficit_eps(cfg.deficit_eps), policy_softmax_temp(cfg.policy_softmax_temp),
+    virtual_loss(cfg.virtual_loss), contempt(cfg.contempt), draw_cutoff(cfg.draw_cutoff),
+    gumbel_c_visit(cfg.gumbel_c_visit), gumbel_c_scale(cfg.gumbel_c_scale),
+    gumbel_noise(cfg.gumbel_noise), root_board(board), base_history(base_history),
     node_pool(node_pool_capacity), edge_pool(edge_pool_capacity),
     scratch_node_pool(1), scratch_edge_pool(1), logger(logger),
     inference_queue(inference_queue), result_queue(result_queue),
@@ -173,14 +176,6 @@ bool MCTSEngine::reset_reuse(const chess::Board& new_board,
     MCTSNode* old_subtree_root = matched_edge->child;
     if (old_subtree_root == nullptr) return false;
 
-    // Reject reuse for any child that can't function as a fresh root.
-    // Unexpanded: no children, no NN eval -- caller must reset() to re-eval.
-    // Forced outcome or unavailable: flags were set from the parent's decision
-    // perspective in the old tree; as the new root, this node needs fresh
-    // evaluation, and clearing every flag correctly is fragile.
-    // num_children == 0: defensive -- catches the anomalous "expanded with no
-    // children" case (e.g. late-search race, stalemate/checkmate not caught
-    // by terminal handler, or copy artefact).
     if (!old_subtree_root->is_expanded()
         || old_subtree_root->has_forced_outcome()
         || old_subtree_root->is_unavailable()
@@ -372,40 +367,7 @@ PoolTargets MCTSEngine::predict_pool_needs_for_time(double time_s,
     return predict_pool_needs(sims);
 }
 
-// -----------------------------------------------------------------------------
-// Selection descent -- fused-pass rewrite.
-//
-// Previous structure was 4 passes over the edge array, each touching the child
-// node's heap fields:
-//   P1  visit scan (find max_visits, sum_visits)
-//   P2  gscore computation (divides through expected_value)
-//   P3  softmax exp (score + prior, unconditionally)
-//   P4  deficit argmax (visits/visits ratio, unconditionally uses prior)
-//
-// New structure is 1 heap pass + 3 stack-only passes:
-//   H   snapshot: fetch every edge/child ptr, cache visits + raw_logit, find
-//       max/sum. This is the only pass that walks child pointers.
-//   S1  gscore: reads child->cached_q directly (no divide -- backprop keeps
-//       it coherent), writes score_cache[]. Finds max_score_logit;
-//       max_raw_logit only if prior softmax is enabled.
-//   S2  softmax exp: two variants, chosen by `use_prior = (deficit_eps > 0)`.
-//       When false, only the score softmax is computed -- prior loop is dead
-//       code. Training runs with eps=0 skip ~half the exp calls.
-//   S3  deficit argmax: same eps branch. When false, pi_prime = exp/sum_exp.
-//
-// Expected savings vs the old structure (from prior profiling: 7.53s select):
-//   -- gscore: 1.23s -> ~0.15s   (divide eliminated via cached_q)
-//   -- softmax: 2.85s -> 2.85s UCI (eps=0.5), ~1.4s training (eps=0)
-//   -- other:  2.56s -> ~1.5s    (three passes over stack cache instead of heap)
-//
-// Correctness contract for cached_q:
-//   -- All mutation sites (_virtual_loss, _backpropagate) must call
-//      update_cached_q(contempt) after mutating visits/w_sum/d_sum/l_sum.
-//   -- Contempt must be fixed for the engine lifetime (it is; loaded from YAML
-//      at construction).
-//   -- Reader (this function) only reads cached_q when visits > 0. For
-//      visits == 0 we fall back to v_mix, matching the pre-refactor path.
-// -----------------------------------------------------------------------------
+
 MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSEdge*>& simulation_path) {
     const bool profile = logger.get_level() <= 20;
     auto start_time = NOW();
@@ -628,16 +590,6 @@ void MCTSEngine::_unmark_selected(MCTSNode* node) {
     }
 }
 
-// -----------------------------------------------------------------------------
-// _dispatch_selected_leaf: hand off a _select()-returned leaf to the correct
-// handler and unwind the descent on root_board. Cases:
-//   - Terminal by rule (checkmate / repetition / 50-move) -> _handle_terminal_node
-//   - Tablebase hit                                        -> _try_tablebase
-//   - Already-expanded interior (dead subtree, H-pass filtered every child)
-//                                                          -> log & skip
-//   - Unexpanded frontier                                  -> _queue_leaf_for_inference
-// The unwind loop is always run; simulation_path is left empty on return.
-// -----------------------------------------------------------------------------
 void MCTSEngine::_dispatch_selected_leaf(MCTSNode* leaf,
                                         std::vector<MCTSEdge*>& simulation_path) {
     if (root_board.isGameOver().second != chess::GameResult::NONE
@@ -1490,16 +1442,18 @@ bool MCTSEngine::_should_early_stop(const std::vector<MCTSEdge*>& candidates) co
 
     double best_q   = -2.0;
     double second_q = -2.0;
+    MCTSNode* best_c = nullptr;
     int    visited  = 0;
     for (MCTSEdge* e : candidates) {
         MCTSNode* c = e->child;
         if (c == nullptr || c->visits <= early_stop_min_visits) continue;
         ++visited;
         double q = -c->expected_value(contempt);
-        if (q > best_q) { second_q = best_q; best_q = q; }
+        if (q > best_q) { second_q = best_q; best_q = q; best_c = c; }
         else if (q > second_q) { second_q = q; }
     }
     if (visited < 2) return false;
+    if (best_c != nullptr && best_c->mover_has_draw()) return false;
 
     return (best_q - second_q) >= early_stop_q_gap;
 }

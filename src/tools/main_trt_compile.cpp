@@ -38,6 +38,7 @@
 #include <cstdlib>
 
 #include "trt_builder.hpp"
+#include "build_info.hpp"
 
 namespace fs = std::filesystem;
 
@@ -119,6 +120,9 @@ bool engine_is_up_to_date(const std::string& onnx, const std::string& engine) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    std::cerr << "Talbot [git " << talbot::GIT_COMMIT
+            << "] built " << talbot::BUILD_TIME << "\n";
+
     Args args;
     if (!parse_args(argc, argv, args)) {
         std::cerr << "\n";

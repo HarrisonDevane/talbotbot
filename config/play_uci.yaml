@@ -3,11 +3,11 @@ engine:
   log_level: 20                                                   # 10=DEBUG 20=INFO 30=WARNING 40=ERROR 50=CRITICAL
 
 evaluation:
-  main_cores: [3]                                                 # Dedicated CPU cores for the main C++ orchestrator
-  game_worker_cores: [5]                                          # Dedicated CPU cores for games
+  main_cores: []                                                 # Dedicated CPU cores for the main C++ orchestrator
+  game_worker_cores: []                                          # Dedicated CPU cores for games
 
 inference:
-  inference_worker_cores: [13, 14, 15]                            # Dedicated CPU cores for the Batching Process
+  inference_worker_cores: []                            # Dedicated CPU cores for the Batching Process
   batch_size: 128                                                 # Max batch size during inference
   batch_size_factor: 32                                           # Multiplier for batch size to determine max slots
   batch_timeout_ms: 10                                            # How long the GPU batcher waits
@@ -18,8 +18,8 @@ mcts:
   worker_minibatch_size: 128                                       # Max positions sent to batcher at once
   virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored
   contempt: 0.0                                                   # Contempt for playing drawing positions
-  deficit_eps: 0.1
-  policy_softmax_temp: 1.0
+  deficit_eps: 0.2
+  policy_softmax_temp: 2.0
   early_stop_q_gap: 0.2
   early_stop_min_visits: 100000
   early_return_on_forced_win: true
@@ -33,8 +33,8 @@ pool_sizing:
   avg_branching: 35.0                                             # Avg legal moves per chess position
   node_safety_factor: 4.0                                         # Slack over predicted sims for node count
   edge_safety_factor: 4.0                                         # Slack over (sims * branching) for edge count
-  node_hard_cap_mb: 4000                                           # Per-worker MCTSNode pool ceiling (~10.4M nodes @ 48B)
-  edge_hard_cap_mb: 4000                                           # Per-worker MCTSEdge pool ceiling (~98M edges @ 16B)
+  node_hard_cap_mb: 1000                                           # Per-worker MCTSNode pool ceiling (~10.4M nodes @ 48B)
+  edge_hard_cap_mb: 1000                                           # Per-worker MCTSEdge pool ceiling (~98M edges @ 16B)
 
 selection:
   temperature_ply_cutoff: 0                                       # Sample proportional to visit count for first moves

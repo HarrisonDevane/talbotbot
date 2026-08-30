@@ -24,7 +24,7 @@ private:
     std::string rl_dir;
     int logging_level;
     std::vector<int> core_ids;
-    std::string logger_name;   // name for this batcher's log file (distinguishes A vs B)
+    std::string logger_name;
     
     int rotation_interval;
     std::atomic<uint64_t>& current_global_step;
@@ -44,7 +44,6 @@ private:
     std::vector<uint8_t> pending_engine_data;
     std::mutex reload_mutex;
 
-    // NEW: Refit request (fast path)
     std::atomic<bool> pending_refit{false};
     std::string pending_onnx_path;
     std::mutex refit_mutex;

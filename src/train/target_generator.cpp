@@ -5,7 +5,7 @@
 
 TargetResult TargetGenerator::generate_targets(
     MCTSNode* root, const chess::Board& board,
-    const ActionSelectorConfig& config, const ModelConfig& model_config, const double target_shrinkage_k, Logger& logger) 
+    const MctsConfig& config, const ModelConfig& model_config, const double target_shrinkage_k, Logger& logger) 
 {
     TargetResult result;
     result.policy_vector.resize(model_config.policy_moves, 0.0f);

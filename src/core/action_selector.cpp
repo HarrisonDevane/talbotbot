@@ -1,5 +1,7 @@
 #include "action_selector.hpp"
+#include <yaml-cpp/yaml.h>
 #include <iostream>
+#include <stdexcept>
 #include <cmath>
 #include <numeric>
 #include <algorithm>
@@ -76,6 +78,10 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSE
     MCTSEdge* top_edge = nullptr;
     double best_q = -2.0;
 
+    // gscore reads gumbel_c_visit/gumbel_c_scale from the engine directly --
+    // ActionSelectorConfig no longer carries those fields after the split.
+    // (They lived on the old catch-all config but were never read via
+    // config.*; the engine has always been the source of truth here.)
     auto gscore = [&](MCTSEdge* e, double mv, double vm) -> double {
         int idx = static_cast<int>(e - root->first_edge);
         double noise = (idx >= 0 && idx < (int)engine->root_gumbel_noise.size())
@@ -250,4 +256,59 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSE
 
     logger.log("INFO", "Move selected: " + chess::uci::moveToUci(result.best_move));
     return result;
+}
+
+// -----------------------------------------------------------------------------
+// Shared YAML loader for MctsConfig + ActionSelectorConfig.
+//
+// Single source of truth; called from both DataGenerator (training) and
+// load_config in main_uci.cpp (inference). Adding a new MCTS or selection
+// knob means editing this function only -- both binaries pick it up.
+//
+// contempt and draw_cutoff live in both structs by design; each YAML key is
+// read exactly once here and mirrored into both, so drift between the two
+// fields is impossible by construction.
+//
+// require_gumbel_m: see header. Training passes true (missing key -> throw);
+// UCI passes false (missing key -> default 0, field is not consumed at
+// inference anyway).
+// -----------------------------------------------------------------------------
+LoadedConfigs load_configs(const YAML::Node& mcts_n, const YAML::Node& sel_n,
+                           bool require_gumbel_m) {
+    LoadedConfigs out;
+
+    // Shared fields: read once, mirror into both structs.
+    const double contempt    = mcts_n["contempt"].as<double>();
+    const double draw_cutoff = sel_n["draw_cutoff"].as<double>();
+
+    MctsConfig& m = out.mcts;
+    m.contempt              = contempt;
+    m.draw_cutoff           = draw_cutoff;
+    m.deficit_eps           = mcts_n["deficit_eps"].as<double>();
+    m.policy_softmax_temp   = mcts_n["policy_softmax_temp"].as<double>();
+    m.virtual_loss          = mcts_n["virtual_loss"].as<double>();
+    m.gumbel_c_visit        = mcts_n["gumbel_c_visit"].as<double>();
+    m.gumbel_c_scale        = mcts_n["gumbel_c_scale"].as<double>();
+    m.gumbel_noise          = mcts_n["gumbel_noise"].as<double>();
+    m.gumbel_search_depth   = mcts_n["gumbel_search_depth"].as<int>();
+    m.batch_size_per_worker = mcts_n["worker_minibatch_size"].as<int>();
+
+    // gumbel_m: required for training, optional for UCI. Explicit throw with
+    // a named field beats yaml-cpp's generic "key not found" when training
+    // yamls lose the key by accident.
+    if (require_gumbel_m && !mcts_n["gumbel_m"]) {
+        throw std::runtime_error(
+            "load_configs: mcts.gumbel_m is required (training) but missing");
+    }
+    m.gumbel_m = mcts_n["gumbel_m"] ? mcts_n["gumbel_m"].as<double>() : 0.0;
+
+    ActionSelectorConfig& s = out.selector;
+    s.contempt                = contempt;
+    s.draw_cutoff             = draw_cutoff;
+    s.temperature_ply_cutoff  = sel_n["temperature_ply_cutoff"].as<int>();
+    s.temperature_q_decay     = sel_n["temperature_q_decay"].as<double>();
+    s.resignation_probability = sel_n["resignation_probability"].as<double>();
+    s.resignation_cutoff      = sel_n["resignation_cutoff"].as<double>();
+
+    return out;
 }

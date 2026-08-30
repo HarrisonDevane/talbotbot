@@ -3,7 +3,6 @@
 #include <vector>
 #include "chess.hpp"
 #include "mcts_engine.hpp"
-#include "action_selector.hpp"
 #include "logger.hpp"
 
 struct TargetResult {
@@ -13,12 +12,11 @@ struct TargetResult {
 
 class TargetGenerator {
 public:
-    // Pure stateless mathematical observer
     static TargetResult generate_targets(
-        MCTSNode* root, 
+        MCTSNode* root,
         const chess::Board& board,
-        const ActionSelectorConfig& config, 
-        const ModelConfig& model_config, 
+        const MctsConfig& config,
+        const ModelConfig& model_config,
         const double target_shrinkage_k,
         Logger& logger
     );

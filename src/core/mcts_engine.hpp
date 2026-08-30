@@ -48,6 +48,23 @@ struct PoolTargets {
     size_t edge_target;
 };
 
+struct MctsConfig {
+    // Shared with ActionSelectorConfig (mirrored by load_configs).
+    double contempt;
+    double draw_cutoff;
+
+    // Engine-only.
+    double deficit_eps;
+    double policy_softmax_temp;
+    double virtual_loss;
+    double gumbel_c_visit;
+    double gumbel_c_scale;
+    double gumbel_noise;
+    int    gumbel_search_depth;
+    int    gumbel_m;
+    int    batch_size_per_worker;
+};
+
 template <typename T>
 class ThreadSafeQueue {
 private:
@@ -248,27 +265,23 @@ public:
     // to any minimum >= 1 and let the first reset() grow them). See
     // predict_pool_needs() below and the call sites in data_generator /
     // main_uci for the intended usage.
+    //
+    // cfg is copied by value into the engine's public members at
+    // construction. Mutating cfg after construction does NOT propagate --
+    // the engine has its own copies.
     MCTSEngine(
+        const MctsConfig& cfg,
         int node_pool_capacity,
         int edge_pool_capacity,
-        int worker_batch_size, 
         moodycamel::ConcurrentQueue<std::pair<int, int>>& inference_queue,
-        ThreadSafeQueue<std::vector<int>>& result_queue, 
-        int worker_id, 
-        double deficit_eps,
-        double policy_softmax_temp,
-        double virtual_loss,
-        double contempt,
-        double draw_cutoff, 
-        double gumbel_c_visit, 
-        double gumbel_c_scale, 
-        double gumbel_noise,
-        const chess::Board& board, 
+        ThreadSafeQueue<std::vector<int>>& result_queue,
+        int worker_id,
+        const chess::Board& board,
         const std::vector<chess::Board>& base_history,
-        Logger& logger, 
-        std::vector<torch::Tensor>& shared_input_buffer, 
-        std::vector<torch::Tensor>& shared_policy_buffer, 
-        std::vector<torch::Tensor>& shared_value_buffer, 
+        Logger& logger,
+        std::vector<torch::Tensor>& shared_input_buffer,
+        std::vector<torch::Tensor>& shared_policy_buffer,
+        std::vector<torch::Tensor>& shared_value_buffer,
         ThreadSafeQueue<int>& buffer_free_slots,
         std::atomic<int>* core_wait_count,
         int workers_per_core,

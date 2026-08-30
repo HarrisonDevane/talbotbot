@@ -8,30 +8,26 @@
 #include "mcts_engine.hpp"
 #include "logger.hpp"
 
-struct ActionSelectorConfig {
-    // Unused since stage 3 -- kept only so any callers still populating this
-    // field don't fail to compile. Pool sizing lives on MCTSEngine::pool_sizing_cfg
-    // now; nothing here reads it.
-    int node_pool_size = 0;
+namespace YAML { class Node; }
 
+struct ActionSelectorConfig {
+    // Shared with MctsConfig
     double contempt;
-    double deficit_eps;
-    double policy_softmax_temp;
-    double virtual_loss;
     double draw_cutoff;
-    double gumbel_c_visit;
-    double gumbel_c_scale;
-    double gumbel_noise;
-    double gumbel_search_depth;
-    double gumbel_m;
-    
-    int temperature_ply_cutoff;
+
+    // Selection-only.
+    int    temperature_ply_cutoff;
     double temperature_q_decay;
-    
     double resignation_probability;
     double resignation_cutoff;
-    int batch_size_per_worker;
 };
+
+struct LoadedConfigs {
+    MctsConfig mcts;
+    ActionSelectorConfig selector;
+};
+LoadedConfigs load_configs(const YAML::Node& mcts_n, const YAML::Node& sel_n,
+                           bool require_gumbel_m);
 
 struct SelectionResult {
     chess::Move best_move = chess::Move::NO_MOVE;
@@ -44,12 +40,12 @@ private:
     int worker_id;
     ActionSelectorConfig config;
     bool use_resignation;
-    Logger& logger; 
-    std::mt19937 rng; 
+    Logger& logger;
+    std::mt19937 rng;
 
 public:
     ActionSelector(std::string name, int worker_id, ActionSelectorConfig config, Logger& logger);
-    
+
     void reset_for_new_game();
     void set_name(const std::string& new_name) { name = new_name; }
 

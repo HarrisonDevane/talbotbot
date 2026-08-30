@@ -62,7 +62,7 @@
 #include "game_worker.hpp"
 #include "self_play_session.hpp"
 #include "opening_book.hpp"
-
+#include "build_info.hpp"
 #include "tbprobe.h"
 
 namespace fs = std::filesystem;
@@ -204,7 +204,11 @@ struct TournamentConfig {
     int board_dim                 = 0;
     int policy_moves              = 0;
 
-    // selection / mcts
+    // Split search config. Loaded together via load_configs() so their
+    // shared contempt/draw_cutoff values cannot drift.
+    //   mcts     -- fed to MCTSEngine + SearchAgent (search budget, m)
+    //   selector -- fed to ActionSelector (rules A-F in select_move)
+    MctsConfig           mcts;
     ActionSelectorConfig selector;
     PoolSizingConfig pool_sizing;
 
@@ -263,24 +267,15 @@ static TournamentConfig load_config(const std::string& yaml_path) {
 
     YAML::Node mcts_n = root["mcts"];
     if (!mcts_n) throw std::runtime_error(yaml_path + " missing 'mcts:' block");
-    ActionSelectorConfig& s = cfg.selector;
-    s.virtual_loss           = mcts_n["virtual_loss"].as<double>();
-    s.contempt               = mcts_n["contempt"].as<double>();
-    s.deficit_eps            = mcts_n["deficit_eps"].as<double>();
-    s.policy_softmax_temp    = mcts_n["policy_softmax_temp"].as<double>();
-    s.gumbel_c_visit         = mcts_n["gumbel_c_visit"].as<double>();
-    s.gumbel_c_scale         = mcts_n["gumbel_c_scale"].as<double>();
-    s.gumbel_noise           = mcts_n["gumbel_noise"].as<double>();
-    s.gumbel_search_depth    = mcts_n["gumbel_search_depth"].as<double>();
-    s.gumbel_m               = mcts_n["gumbel_m"].as<double>();
-    s.batch_size_per_worker  = mcts_n["worker_minibatch_size"].as<int>();
-
     YAML::Node sel_n = root["selection"];
-    s.draw_cutoff            = sel_n["draw_cutoff"].as<double>();
-    s.temperature_ply_cutoff = sel_n["temperature_ply_cutoff"].as<int>();
-    s.temperature_q_decay    = sel_n["temperature_q_decay"].as<double>();
-    s.resignation_probability= sel_n["resignation_probability"].as<double>();
-    s.resignation_cutoff     = sel_n["resignation_cutoff"].as<double>();
+    if (!sel_n) throw std::runtime_error(yaml_path + " missing 'selection:' block");
+
+    // Shared loader with training + UCI (see action_selector.cpp). Tournament
+    // consumes gumbel_m via SearchAgent construction, so pass true -- a
+    // missing key is a config error, not a soft-default case.
+    LoadedConfigs loaded = load_configs(mcts_n, sel_n, /*require_gumbel_m=*/true);
+    cfg.mcts     = loaded.mcts;
+    cfg.selector = loaded.selector;
 
     if (mcts_n["early_stop_q_gap"])            cfg.early_stop_q_gap = mcts_n["early_stop_q_gap"].as<double>();
     if (mcts_n["early_stop_min_visits"])       cfg.early_stop_min_visits = mcts_n["early_stop_min_visits"].as<int>();
@@ -425,24 +420,16 @@ static std::unique_ptr<MCTSEngine> build_engine(
 {
     const int initial_sims = (cfg.mode == TournamentConfig::Mode::TIMED)
         ? (int)(cfg.time_control.nps_ewma * 5.0)
-        : (int)cfg.selector.gumbel_search_depth;
+        : cfg.mcts.gumbel_search_depth;
     const PoolTargets initial = MCTSEngine::predict_pool_needs_static(initial_sims, cfg.pool_sizing);
 
     auto engine = std::make_unique<MCTSEngine>(
+        cfg.mcts,
         (int)initial.node_target,
         (int)initial.edge_target,
-        cfg.selector.batch_size_per_worker,
         inf_queue,
         result_queue,
         worker_id,
-        cfg.selector.deficit_eps,
-        cfg.selector.policy_softmax_temp,
-        cfg.selector.virtual_loss,
-        cfg.selector.contempt,
-        cfg.selector.draw_cutoff,
-        cfg.selector.gumbel_c_visit,
-        cfg.selector.gumbel_c_scale,
-        cfg.selector.gumbel_noise,
         dummy_board,
         std::vector<chess::Board>(),
         logger,
@@ -466,6 +453,9 @@ static std::unique_ptr<MCTSEngine> build_engine(
 // MAIN
 // =============================================================================
 int main(int argc, char* argv[]) {
+    std::cerr << "Talbot [git " << talbot::GIT_COMMIT
+            << "] built " << talbot::BUILD_TIME << "\n";
+
     CliArgs args;
     if (!parse_args(argc, argv, args)) return 1;
 
@@ -682,13 +672,13 @@ int main(int argc, char* argv[]) {
 
             SearchAgent agent_a{
                 *ws.engine_a, *ws.selector_a,
-                (int)cfg.selector.gumbel_search_depth,
-                (int)cfg.selector.gumbel_m
+                cfg.mcts.gumbel_search_depth,
+                (int)cfg.mcts.gumbel_m
             };
             SearchAgent agent_b{
                 *ws.engine_b, *ws.selector_b,
-                (int)cfg.selector.gumbel_search_depth,
-                (int)cfg.selector.gumbel_m
+                cfg.mcts.gumbel_search_depth,
+                (int)cfg.mcts.gumbel_m
             };
 
             for (const GameSpec& spec : worker_specs[w]) {
