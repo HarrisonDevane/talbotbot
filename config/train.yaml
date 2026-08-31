@@ -46,9 +46,9 @@ mcts:
 pool_sizing:
   avg_branching: 35.0                                             # Average legal moves per position (~35 for chess)
   node_safety_factor: 1.2                                         # Multiplicative safety over predicted node count
-  edge_safety_factor: 5.0                                         # Multiplicative safety over predicted edge count (higher: expansion is one-shot)
-  node_hard_cap_mb: 50                                            # Per-worker RAM ceiling for MCTSNode pool (~1M nodes @ 48B)
-  edge_hard_cap_mb: 100                                           # Per-worker RAM ceiling for MCTSEdge pool (~6M edges @ 16B)
+  edge_safety_factor: 5.0                                         # Multiplicative safety over predicted edge count
+  node_hard_cap_mb: 50                                            # Per-worker RAM ceiling for MCTSNode pool
+  edge_hard_cap_mb: 100                                           # Per-worker RAM ceiling for MCTSEdge pool
 
 selection:
   temperature_ply_cutoff: 30                                      # Temperature sampling applies for first N plies; deterministic after
@@ -73,6 +73,6 @@ training:
   lr_high_steps: 30000                                            # Duration of high-LR phase
   lr_mid: 2e-2                                                    # LR held for lr_mid_steps after high phase
   lr_mid_steps: 60000                                             # Duration of mid-LR phase
-  lr_low: 2e-3                                                    # LR held for remainder of total_training_steps (NOTE: same as lr_mid)
+  lr_low: 2e-3                                                    # LR held for remainder of total_training_steps
   momentum_rate: 0.9                                              # SGD momentum coefficient
   logging_level: 20                                               # Training loop log level
