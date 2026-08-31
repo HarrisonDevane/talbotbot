@@ -19,6 +19,7 @@ choix
 chess
 
 # Infrastructure & Monitoring
+nvidia-ml-py
 psutil
 py-spy
 tqdm

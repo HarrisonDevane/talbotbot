@@ -10,7 +10,7 @@ global:
 
 inference:
   inference_worker_cores: [13, 14, 15]                            # Dedicated cores for batcher filler/dispatcher/collector threads
-  batch_size: 256                                                 # Target GPU batch size; batcher flushes at this size OR after batch_timeout_ms
+  batch_size: 512                                                 # Target GPU batch size; batcher flushes at this size OR after batch_timeout_ms
   batch_size_factor: 32                                           # Shared-RAM slot count = batch_size * this (8192 slots total)
   batch_timeout_ms: 10                                            # If batch not full after this long, dispatch anyway (avoid starving workers)
   logging_interval_sec: 10                                        # Batcher stats interval (throughput, batch fullness, wait times)
@@ -19,7 +19,7 @@ inference:
 data_generation:
   data_generator_cores: [16]                                      # Main orchestrator thread (data generator loop, LMDB coordinator)
   io_write_cores: [16]                                            # LMDB writer thread; shares core 16 (both I/O-light, no contention)
-  game_worker_cores: [22, 23, 24, 25, 26, 27, 28, 29, 30, 31]     # Self-play worker cores; total workers = len * workers_per_core = 160
+  game_worker_cores: [17,18,19,20,21,22, 23, 24, 25, 26, 27, 28, 29, 30, 31]     # Self-play worker cores; total workers = len * workers_per_core = 160
   workers_per_core: 16                                            # Self-play workers per core
   adjudication_max_ply_length: 400                                # Hard ply cap; any game reaching this ply is force-drawn
   adjudication_draw_threshold: 0.9                                # Root D-probability required to count a ply toward adjudication

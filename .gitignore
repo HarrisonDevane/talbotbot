@@ -70,4 +70,5 @@ train_dir/*
 backup_dir/*
 python/plot_rl_metrics.py
 python/plot_tournament_metrics.py
+python/performance_metrics.py
 env/dev.env
