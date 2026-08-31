@@ -1,78 +1,78 @@
 global:
-  total_training_steps: 120000                                    # Total gradient updates to perform
-  logging_rotation_steps: 1000                                    # How often to make a new log folder
-  min_buffer_size: 2000000                                        # Minimum replay buffer size
-  max_buffer_size: 40000000                                       # Max buffer size
-  buffer_ramp_steps: 40000                                        # Steps to reach max buffer size (linear)
-  buffer_size_gb: 32                                              # Size of LMDB on disk
-  build_steps: 500                                                # Steps for a new engine build
-  train_dir: 'train_dir'                                          # Path to model base name
+  total_training_steps: 100000                                    # Total gradient updates before training halts
+  logging_rotation_steps: 1000                                    # Roll to a fresh log folder every N steps
+  min_buffer_size: 2000000                                        # Positions required before first gradient update
+  max_buffer_size: 40000000                                       # Steady-state replay buffer size (~500K games)
+  buffer_ramp_steps: 40000                                        # Linear ramp from min -> max buffer size over N steps
+  buffer_size_gb: 32                                              # LMDB file size on disk (fixed allocation)
+  build_steps: 500                                                # Rebuild TensorRT engine every N steps (self-play pauses during rebuild)
+  train_dir: 'train_dir'                                          # Output root: checkpoints, ONNX exports, .engine files
 
 inference:
-  inference_worker_cores: [13, 14, 15]                            # Dedicated CPU cores for the Batching Process (dispatcher, collector, filler)
-  batch_size: 256                                                 # Max batch size during inference
-  batch_size_factor: 32                                           # Multiplier for batch size to determine max slots available in RAM
-  batch_timeout_ms: 10                                            # How long the GPU batcher waits for more data before running partial batch
-  logging_interval_sec: 10                                        # Interval for system metrics logging
-  logging_level: 20                                               # Logging level for the Batcher Diagnostics
+  inference_worker_cores: [13, 14, 15]                            # Dedicated cores for batcher filler/dispatcher/collector threads
+  batch_size: 256                                                 # Target GPU batch size; batcher flushes at this size OR after batch_timeout_ms
+  batch_size_factor: 32                                           # Shared-RAM slot count = batch_size * this (8192 slots total)
+  batch_timeout_ms: 10                                            # If batch not full after this long, dispatch anyway (avoid starving workers)
+  logging_interval_sec: 10                                        # Batcher stats interval (throughput, batch fullness, wait times)
+  logging_level: 20                                               # 20=INFO, 30=WARNING, 40=ERROR, 50=CRITICAL
 
 data_generation:
-  data_generator_cores: [16]                                      # Dedicated CPU cores for the main C++ orchestrator and data generator task
-  io_write_cores: [16]                                            # Dedicated CPU cores LMDB writing
-  game_worker_cores: [22, 23, 24, 25, 26, 27, 28, 29, 30, 31]     # Dedicated CPU cores for games
-  workers_per_core: 16                                            # Number of game workers to pin to each core
-  adjudication_max_ply_length: 400                                # Hard cutoff to force a draw
-  adjudication_draw_threshold: 0.9
-  adjudication_draw_plies: 6
-  adjudication_draw_min_move: 40
-  adjudication_draw_probability: 0.9
-  target_shrinkage_k: 2.0                                         # Shrink factor for visited nodes towards v_mix
-  main_logging_level: 20                                          # Logging level for the UCI Orchestrator
-  worker_logging_level: 30                                        # Logging level for MCTS game worker: 20 = per move analysis, 50 = only PGN
-  io_logging_level: 20                                            # Logging level for IO operations
+  data_generator_cores: [16]                                      # Main orchestrator thread (data generator loop, LMDB coordinator)
+  io_write_cores: [16]                                            # LMDB writer thread; shares core 16 (both I/O-light, no contention)
+  game_worker_cores: [22, 23, 24, 25, 26, 27, 28, 29, 30, 31]     # Self-play worker cores; total workers = len * workers_per_core = 160
+  workers_per_core: 16                                            # Self-play workers per core
+  adjudication_max_ply_length: 400                                # Hard ply cap; any game reaching this ply is force-drawn
+  adjudication_draw_threshold: 0.9                                # Root D-probability required to count a ply toward adjudication
+  adjudication_draw_plies: 6                                      # Consecutive quiet plies above threshold to trigger adjudication
+  adjudication_draw_min_move: 40                                  # No adjudication before this move number
+  adjudication_draw_probability: 0.9                              # Per-game probability adjudication is enabled (10% play out for calibration)
+  target_shrinkage_k: 2.0                                         # k in completed-Q shrinkage: completedQ = (N*q + k*v_mix) / (N + k)
+  main_logging_level: 20                                          # Main data-generator orchestrator log level
+  worker_logging_level: 30                                        # Per-worker log level: 20=per-move analysis, 30=warnings only, 50=PGN only
+  io_logging_level: 20                                            # LMDB writer log level
 
 mcts:
-  worker_minibatch_size: 16                                       # Max positions a single worker sends at once
-  virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored (prevents threads flocking)
-  contempt: 0.0                                                   # Contempt for playing drawing positions
-  deficit_eps: 0.2                                                # Weight for blending uniform prior during non-root action selection (0 = deterministic)
-  policy_softmax_temp: 1.0
-  gumbel_c_visit: 50.0                                            # Sigma used for gumbel score calculation
-  gumbel_c_scale: 1.0                                             # Scale for sigma with visit count
-  gumbel_noise: 1.0                                               # Gumbel noise value
-  gumbel_search_depth: 256                                        # Search depth budget
-  gumbel_m: 16                                                    # m value for sequential halving (top m moves sampled)
+  worker_minibatch_size: 16                                       # Max positions a single worker sends to the batcher per submission
+  virtual_loss: 0.3                                               # Penalty on in-flight leaf's ancestors; acts as regulariser in single-worker-per-tree design
+  contempt: 0.0                                                   # Draw value from side-to-move's perspective (0 = neutral)
+  deficit_eps: 0.0                                                # Non-root selection floor against RAW PRIOR (not uniform); 0 = pure deficit rule
+  policy_softmax_temp: 1.0                                        # Softens/sharpens raw policy logits before use in selection (1.0 = no change)
+  gumbel_c_visit: 50.0                                            # Sigma offset: sigma = (c_visit + max_visits) * c_scale
+  gumbel_c_scale: 1.0                                             # Sigma multiplicative gain
+  gumbel_noise: 1.0                                               # Scale of Gumbel noise added to raw prior logits at root
+  gumbel_search_depth: 128                                        # Total MCTS simulations per move (split across log2(gumbel_m) phases)
+  gumbel_m: 16                                                    # Top-m root candidates selected by perturbed prior for sequential halving
 
 pool_sizing:
-  avg_branching: 35.0                                             # Avg legal moves per chess position
-  node_safety_factor: 1.2                                         # Slack over predicted sims for node count
-  edge_safety_factor: 5.0                                         # Slack over (sims * branching) for edge count
-  node_hard_cap_mb: 50                                            # Per-worker MCTSNode pool ceiling (~1M nodes @ 48B)
-  edge_hard_cap_mb: 100                                           # Per-worker MCTSEdge pool ceiling (~3M edges @ 16B)
+  avg_branching: 35.0                                             # Average legal moves per position (~35 for chess)
+  node_safety_factor: 1.2                                         # Multiplicative safety over predicted node count
+  edge_safety_factor: 5.0                                         # Multiplicative safety over predicted edge count (higher: expansion is one-shot)
+  node_hard_cap_mb: 50                                            # Per-worker RAM ceiling for MCTSNode pool (~1M nodes @ 48B)
+  edge_hard_cap_mb: 100                                           # Per-worker RAM ceiling for MCTSEdge pool (~6M edges @ 16B)
 
 selection:
-  temperature_ply_cutoff: 30                                      # Sample proportional to visit count for first moves
-  temperature_q_decay: 0.1                                        # Absolute Q value [-1, 1] Boltzmann temperature decay
-  draw_cutoff: 0.0                                                # Value threshold to consider a game a draw
-  resignation_probability: 0.9                                    # Chance the bot checks for resignation allowed
-  resignation_cutoff: -0.80                                       # Value head cutoff for resignation
+  temperature_ply_cutoff: 30                                      # Temperature sampling applies for first N plies; deterministic after
+  temperature_q_decay: 0.1                                        # T in LCB-filtered visit sampling: weight = visits * exp(-q_drop / T)
+  draw_cutoff: 0.0                                                # If best non-forced Q <= this AND draw available, take the draw
+  resignation_probability: 0.9                                    # Per-game probability resignation is enabled (10% play losses to mate for calibration)
+  resignation_cutoff: -0.80                                       # Q threshold below which resignation-enabled game gives up
 
 training:
-  training_cores: [10]                                            # Dedicated CPU cores for python tasks (main_train.py and trainer.py)
-  io_read_cores: [11, 12]                                         # Dedicated CPU cores for batch prefetching
-  prefetch_workers: 8                                             # How many workers in async read process to query lmdb
-  seed: 42                                                        # Seed for initialisation
-  batch_size: 4096                                                # Positions per Gradient Update
-  sampling_ratio: 1.0                                             # Train on x the amount of data generated
-  policy_loss_weight: 1.0                                         # Weight for Move Prediction loss
-  value_loss_weight: 1.0                                          # Weight for Win/Loss Prediction loss
-  weight_decay: 1e-4                                              # L2 Regularization
-  lr_warmup: 2e-3                                                 # LR at step 0 (ramps to learning_rate over warmup_steps)
-  lr_warmup_steps: 1000
-  lr_high: 2e-1
-  lr_high_steps: 30000
-  lr_mid: 2e-2
-  lr_mid_steps: 60000
-  lr_low: 2e-2
-  momentum_rate: 0.9                                              # SGD Momentum
-  logging_level: 20                                               # Logging level for training operations
+  training_cores: [10]                                            # Python trainer thread (main_train.py + trainer loop)
+  io_read_cores: [11, 12]                                         # Prefetch worker cores for async LMDB reads
+  prefetch_workers: 8                                             # Async LMDB read workers assembling training batches
+  seed: 42                                                        # RNG seed for model init
+  batch_size: 4096                                                # Positions per gradient update
+  sampling_ratio: 1.0                                             # Gradient updates per position generated (1.0 = strict 1:1 enforced by IO writer)
+  policy_loss_weight: 1.0                                         # Policy CE loss weight
+  value_loss_weight: 1.0                                          # Value CE loss weight
+  weight_decay: 1e-4                                              # L2 regularisation coefficient
+  lr_warmup: 2e-3                                                 # LR at step 0 (linear ramp to lr_high over lr_warmup_steps)
+  lr_warmup_steps: 1000                                           # Warmup duration
+  lr_high: 2e-1                                                   # LR held for lr_high_steps after warmup
+  lr_high_steps: 30000                                            # Duration of high-LR phase
+  lr_mid: 2e-2                                                    # LR held for lr_mid_steps after high phase
+  lr_mid_steps: 60000                                             # Duration of mid-LR phase
+  lr_low: 2e-3                                                    # LR held for remainder of total_training_steps (NOTE: same as lr_mid)
+  momentum_rate: 0.9                                              # SGD momentum coefficient
+  logging_level: 20                                               # Training loop log level

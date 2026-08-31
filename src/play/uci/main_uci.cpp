@@ -153,6 +153,49 @@ static std::vector<std::string> extract_pv(MCTSNode* root, MCTSEngine* engine, d
     return pv;
 }
 
+// Locate the root edge corresponding to a specific move. Returns nullptr if
+// no matching edge is found (shouldn't happen for a move selected from the
+// current root, but guarded for safety).
+static MCTSEdge* find_root_edge(MCTSNode* root, chess::Move move) {
+    if (!root) return nullptr;
+    for (int i = 0; i < root->num_children; ++i) {
+        MCTSEdge* e = root->first_edge + i;
+        if (e->move == move) return e;
+    }
+    return nullptr;
+}
+
+// PV rooted at a specific edge (the move about to be played). Guarantees
+// pv[0] == that move's UCI string. Used for the FINAL info line so the PV
+// and the following bestmove line agree, which is what UCI GUIs expect.
+static std::vector<std::string> extract_pv_from(MCTSEdge* root_edge, int max_depth = 32) {
+    std::vector<std::string> pv;
+    if (!root_edge) return pv;
+
+    pv.push_back(chess::uci::moveToUci(root_edge->move));
+
+    // Subtree walk: identical to extract_pv's continuation logic. If the
+    // played edge has no materialised child (e.g. picked from a mover-has-
+    // draw candidate with zero visits), we return just the move itself.
+    MCTSNode* node = root_edge->child;
+    while (node && node->is_expanded() && node->num_children > 0 && (int)pv.size() < max_depth) {
+        MCTSEdge* next_best = nullptr;
+        int max_v = 0;
+        for (int i = 0; i < node->num_children; ++i) {
+            MCTSEdge* e = node->first_edge + i;
+            if (!e->child) continue;
+            if (e->child->visits > max_v) {
+                max_v = e->child->visits;
+                next_best = e;
+            }
+        }
+        if (!next_best || max_v <= 0) break;
+        pv.push_back(chess::uci::moveToUci(next_best->move));
+        node = next_best->child;
+    }
+    return pv;
+}
+
 // -----------------------------------------------------------------------------
 static std::vector<std::string> split(const std::string& s, char delimiter) {
     std::vector<std::string> tokens;

@@ -126,10 +126,13 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSE
     // cutoff, so the flagged draw-heading line is preferable to letting the
     // NN's noisy positive estimate on non-forced children win. Checked after
     // Rule B so a proven draw always beats a preference-only draw.
+    // Take highest visit count (most confident in true draw)
     } else if (!mhd_edges.empty() && best_q <= config.draw_cutoff) {
-        std::uniform_int_distribution<> dist(0, (int)mhd_edges.size() - 1);
-        result.best_move = mhd_edges[dist(rng)]->move;
-
+        MCTSEdge* best = mhd_edges[0];
+        for (MCTSEdge* e : mhd_edges) {
+            if (e->child->visits > best->child->visits) best = e;
+        }
+        result.best_move = best->move;
     // Rule D: Resign if below threshold
     } else if (use_resignation && !non_forced_visited.empty() && best_q < config.resignation_cutoff) {
         // Check for !non_forced_visited.empty() means if a forced loss is found, it will be played out to mate

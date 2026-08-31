@@ -231,7 +231,7 @@ class RLOrchestrator:
         all_cores = list(range(psutil.cpu_count()))
         proc.cpu_affinity(all_cores)
 
-        engine_exe = os.path.abspath(os.path.join(root_dir, "build", "Release", "talbot_engine.exe"))
+        engine_exe = os.path.abspath(os.path.join(root_dir, "build", "Release", "talbot_train.exe"))
         self.logger.info(f"Launching C++ Engine: {engine_exe}")
         cmd = [
             engine_exe,

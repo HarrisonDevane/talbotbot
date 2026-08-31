@@ -172,7 +172,7 @@ endif()
 # -----------------------------------------------------------------------------
 # 5. EXECUTABLES
 # -----------------------------------------------------------------------------
-add_executable(talbot_engine
+add_executable(talbot_train
     ${SHARED_SOURCES}
     src/train/main_train.cpp
     src/train/data_generator.cpp
@@ -208,7 +208,7 @@ if(MSVC)
     set(LINK_OPTS "/INCLUDE:?warp_size@cuda@at@@YAHXZ /OPT:NOREF /RELEASE")
 endif()
 
-foreach(tgt talbot_engine talbot_uci talbot_tournament)
+foreach(tgt talbot_train talbot_uci talbot_tournament)
     target_link_libraries(${tgt} PRIVATE talbot_common)
     if(MSVC)
         set_target_properties(${tgt} PROPERTIES LINK_FLAGS ${LINK_OPTS})
@@ -287,7 +287,7 @@ function(deploy_dlls target_name)
     )
 endfunction()
 
-foreach(tgt talbot_engine talbot_uci talbot_tournament)
+foreach(tgt talbot_train talbot_uci talbot_tournament)
     deploy_dlls(${tgt})
 endforeach()
 
