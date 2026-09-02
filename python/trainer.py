@@ -21,7 +21,7 @@ import ctypes
 from model import ChessAIModel
 
 class AsyncBatchPrefetcher:
-    def __init__(self, db_path, batch_size, input_planes, board_dim, policy_moves, core_ids, prefetch_workers, train_dir, lmdb_size, log_level, rotation_interval):
+    def __init__(self, db_path, batch_size, input_planes, board_dim, policy_moves, core_ids, min_memory, max_memory, prefetch_workers, train_dir, lmdb_size, log_level, rotation_interval):
         self.ready_queue = mp.Queue(maxsize=3) 
         self.free_queue = mp.Queue(maxsize=3)
         for i in range(3):
@@ -33,6 +33,8 @@ class AsyncBatchPrefetcher:
         self.board_dim = board_dim
         self.policy_moves = policy_moves
         self.core_ids = core_ids
+        self.min_memory = min_memory
+        self.max_memory = max_memory
         self.prefetch_workers = prefetch_workers
         self.train_dir = train_dir
         self.log_level = log_level
@@ -81,7 +83,12 @@ class AsyncBatchPrefetcher:
 
             kernel32 = ctypes.windll.kernel32
             handle = kernel32.GetCurrentProcess()
-            kernel32.SetProcessWorkingSetSize(handle, ctypes.c_size_t(4 * 1024 * 1024 * 1024), ctypes.c_size_t(8 * 1024 * 1024 * 1024))
+            kernel32.SetProcessWorkingSetSizeEx(
+                handle,
+                ctypes.c_size_t(self.min_memory * 1024**3),
+                ctypes.c_size_t(self.max_memory * 1024**3),
+                ctypes.c_uint(0x00000004),  # QUOTA_LIMITS_HARDWS_MAX_ENABLE
+            )
 
             env = lmdb.open(
                 self.db_path, 
@@ -101,7 +108,7 @@ class AsyncBatchPrefetcher:
                 if not hasattr(thread_local, "decompressor"):
                     thread_local.decompressor = zstd.ZstdDecompressor()
                 with env.begin(write=False, buffers=True) as txn:
-                    compressed_blob = txn.get(f"{idx}".encode('ascii'))
+                    compressed_blob = txn.get(f"{idx:020d}".encode('ascii'))
                     if compressed_blob is None:
                         return None
                     return thread_local.decompressor.decompress(compressed_blob)
@@ -191,13 +198,15 @@ class AsyncBatchPrefetcher:
             raise
 
 class TrainTask:
-    def __init__(self, model_path: str, model_config: dict, training_config: dict,
-                 state_config: dict, global_config: dict, db_path: str):
-        self.training_config = training_config
+    def __init__(self, model_path: str, model_config: dict, main_train_config: dict,
+                 state_config: dict, db_path: str):
+        self.training_config = main_train_config['training']
+        self.global_config = main_train_config['global']
+        self.memory_config = main_train_config['memory']
+        self.core_pinning = main_train_config['core_pinning']
         self.model_path = model_path
         self.model_config = model_config
         self.state_config = state_config
-        self.global_config = global_config
         
         self.output_dir = None
         self.logger = None
@@ -223,7 +232,9 @@ class TrainTask:
             input_planes=self.input_planes,
             board_dim=self.board_dim,
             policy_moves=self.total_policy_moves,
-            core_ids=self.training_config['io_read_cores'],
+            core_ids=self.core_pinning['io_reader'],
+            min_memory=self.memory_config['prefetch_worker_working_set_min_gb'],
+            max_memory=self.memory_config['prefetch_worker_working_set_max_gb'],
             prefetch_workers=self.training_config['prefetch_workers'],
             train_dir=train_dir,
             lmdb_size=self.global_config['buffer_size_gb'],

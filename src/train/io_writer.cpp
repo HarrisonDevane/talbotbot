@@ -165,11 +165,17 @@ void IOWriter::run() {
                         size_t compressed_size = ZSTD_compress(compressed_buf.data(), compressed_buf.size(), raw_payload.data(), raw_payload.size(), 1);
                         if (ZSTD_isError(compressed_size)) continue; 
                         
-                        std::string key_str = std::to_string(current_head);
+                        char key_buf[21];
+                        snprintf(key_buf, sizeof(key_buf), "%020llu", static_cast<unsigned long long>(current_head));
+                        std::string key_str(key_buf);
                         MDB_val key_val = { key_str.size(), (void*)key_str.data() };
                         MDB_val data_val = { compressed_size, (void*)compressed_buf.data() };
 
-                        mdb_put(txn, dbi, &key_val, &data_val, 0);
+                        int put_rc = mdb_put(txn, dbi, &key_val, &data_val, 0);
+                        if (put_rc != MDB_SUCCESS) {
+                            logger.log("CRITICAL", "mdb_put failed for key " + key_str +
+                                       ": " + std::string(mdb_strerror(put_rc)));
+                        }
 
                         if (current_head + 1 > current_cnt) {
                             current_cnt = current_head + 1;
@@ -213,9 +219,18 @@ void IOWriter::run() {
 
                 MDB_val state_key = { 11, (void*)"__CPP_STATE" };
                 MDB_val state_val = { sizeof(CppState), &state };
-                mdb_put(txn, dbi, &state_key, &state_val, 0);
+                int state_put_rc = mdb_put(txn, dbi, &state_key, &state_val, 0);
+                if (state_put_rc != MDB_SUCCESS) {
+                    logger.log("CRITICAL", "mdb_put failed for __CPP_STATE: " +
+                               std::string(mdb_strerror(state_put_rc)));
+                }
 
-                mdb_txn_commit(txn);
+                int commit_rc = mdb_txn_commit(txn);
+                if (commit_rc != MDB_SUCCESS) {
+                    logger.log("CRITICAL", "mdb_txn_commit failed: " +
+                               std::string(mdb_strerror(commit_rc)) +
+                               " -- this flush's writes (including buffer/state bookkeeping) were lost.");
+                }
 
                 write_head.store(current_head, std::memory_order_relaxed);
                 buffer_count.store(current_cnt, std::memory_order_relaxed);

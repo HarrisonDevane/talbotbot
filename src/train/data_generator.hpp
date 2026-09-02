@@ -58,6 +58,7 @@ public:
         const YAML::Node& pool_cfg,
         const YAML::Node& data_gen_cfg,
         const YAML::Node& mcts_cfg,
+        const YAML::Node& core_cfg,
         const YAML::Node& sel_cfg,
         const YAML::Node& model_cfg,
         const std::string& rl_dir,

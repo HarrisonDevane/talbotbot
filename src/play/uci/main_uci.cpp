@@ -275,7 +275,7 @@ static UciConfig load_config(const std::string& config_file_path,
 
     YAML::Node root    = YAML::LoadFile(config_file_path);
     YAML::Node engine  = root["engine"];        // renamed from "global"
-    YAML::Node eval_n  = root["evaluation"];
+    YAML::Node cores_n = root["core"];
     YAML::Node infer_n = root["inference"];
     YAML::Node mcts_n  = root["mcts"];
     YAML::Node sel_n   = root["selection"];
@@ -286,13 +286,14 @@ static UciConfig load_config(const std::string& config_file_path,
     cfg.base_log_dir       = engine["log_dir"] ? engine["log_dir"].as<std::string>() : std::string();
     cfg.main_logging_level = engine["log_level"] ? engine["log_level"].as<int>() : 20;
 
-    if (eval_n && eval_n["main_cores"])
-        for (const auto& c : eval_n["main_cores"]) cfg.main_cores.push_back(c.as<int>());
-    if (eval_n && eval_n["game_worker_cores"])
-        for (const auto& c : eval_n["game_worker_cores"]) cfg.game_worker_cores.push_back(c.as<int>());
+    if (cores_n["main"])
+        for (const auto& c : cores_n["main"]) cfg.main_cores.push_back(c.as<int>());
+        
+    if (cores_n["game_worker"])
+        for (const auto& c : cores_n["game_worker"]) cfg.game_worker_cores.push_back(c.as<int>());
 
-    if (infer_n["inference_worker_cores"])
-        for (const auto& c : infer_n["inference_worker_cores"]) cfg.inference_worker_cores.push_back(c.as<int>());
+    if (cores_n["inference_worker"])
+        for (const auto& c : cores_n["inference_worker"]) cfg.inference_worker_cores.push_back(c.as<int>());
 
     cfg.inference_batch_size  = infer_n["batch_size"].as<int>();
     cfg.max_batch_size        = cfg.inference_batch_size * infer_n["batch_size_factor"].as<int>();

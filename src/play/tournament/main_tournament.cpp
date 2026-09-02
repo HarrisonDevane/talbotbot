@@ -251,14 +251,14 @@ static TournamentConfig load_config(const std::string& yaml_path) {
     cfg.board_dim    = model["model"]["board_dim"].as<int>();
     cfg.policy_moves = model["model"]["total_policy_moves"].as<int>();
 
-    YAML::Node eval_n = root["evaluation"];
-    if (eval_n && eval_n["main_cores"])
-        for (const auto& c : eval_n["main_cores"]) cfg.main_cores.push_back(c.as<int>());
+    YAML::Node cores_n = root["core_pinning"];
+    if (cores_n["main"])
+        for (const auto& c : cores_n["main"]) cfg.main_cores.push_back(c.as<int>());
 
     YAML::Node infer_n = root["inference"];
     if (!infer_n) throw std::runtime_error(yaml_path + " missing 'inference:' block");
-    for (const auto& c : infer_n["batcher_a_cores"]) cfg.batcher_a_cores.push_back(c.as<int>());
-    for (const auto& c : infer_n["batcher_b_cores"]) cfg.batcher_b_cores.push_back(c.as<int>());
+    for (const auto& c : cores_n["batcher_a"]) cfg.batcher_a_cores.push_back(c.as<int>());
+    for (const auto& c : cores_n["batcher_b"]) cfg.batcher_b_cores.push_back(c.as<int>());
     cfg.inference_batch_size  = infer_n["batch_size"].as<int>();
     cfg.max_batch_size        = cfg.inference_batch_size * infer_n["batch_size_factor"].as<int>();
     cfg.batch_timeout_ms      = infer_n["batch_timeout_ms"].as<int>();
@@ -310,7 +310,7 @@ static TournamentConfig load_config(const std::string& yaml_path) {
 
     YAML::Node t_n = root["tournament"];
     if (!t_n) throw std::runtime_error(yaml_path + " missing 'tournament:' block");
-    for (const auto& c : t_n["game_worker_cores"]) cfg.game_worker_cores.push_back(c.as<int>());
+    for (const auto& c : cores_n["game_worker"]) cfg.game_worker_cores.push_back(c.as<int>());
     cfg.workers_per_core   = t_n["workers_per_core"].as<int>();
     cfg.num_workers        = (int)cfg.game_worker_cores.size() * cfg.workers_per_core;
     cfg.games_per_match    = t_n["games_per_match"].as<int>();

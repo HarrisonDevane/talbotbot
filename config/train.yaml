@@ -4,12 +4,11 @@ global:
   min_buffer_size: 2000000                                        # Positions required before first gradient update
   max_buffer_size: 40000000                                       # Steady-state replay buffer size (~500K games)
   buffer_ramp_steps: 40000                                        # Linear ramp from min -> max buffer size over N steps
-  buffer_size_gb: 32                                              # LMDB file size on disk (fixed allocation)
+  buffer_size_gb: 24                                              # LMDB file size on disk (fixed allocation)
   build_steps: 500                                                # Rebuild TensorRT engine every N steps (self-play pauses during rebuild)
   train_dir: 'train_dir'                                          # Output root: checkpoints, ONNX exports, .engine files
 
 inference:
-  inference_worker_cores: [13, 14, 15]                            # Dedicated cores for batcher filler/dispatcher/collector threads
   batch_size: 512                                                 # Target GPU batch size; batcher flushes at this size OR after batch_timeout_ms
   batch_size_factor: 32                                           # Shared-RAM slot count = batch_size * this (8192 slots total)
   batch_timeout_ms: 10                                            # If batch not full after this long, dispatch anyway (avoid starving workers)
@@ -17,9 +16,6 @@ inference:
   logging_level: 20                                               # 20=INFO, 30=WARNING, 40=ERROR, 50=CRITICAL
 
 data_generation:
-  data_generator_cores: [16]                                      # Main orchestrator thread (data generator loop, LMDB coordinator)
-  io_write_cores: [16]                                            # LMDB writer thread; shares core 16 (both I/O-light, no contention)
-  game_worker_cores: [17,18,19,20,21,22, 23, 24, 25, 26, 27, 28, 29, 30, 31]     # Self-play worker cores; total workers = len * workers_per_core = 160
   workers_per_core: 16                                            # Self-play workers per core
   adjudication_max_ply_length: 400                                # Hard ply cap; any game reaching this ply is force-drawn
   adjudication_draw_threshold: 0.9                                # Root D-probability required to count a ply toward adjudication
@@ -45,7 +41,7 @@ mcts:
 
 pool_sizing:
   avg_branching: 35.0                                             # Average legal moves per position (~35 for chess)
-  node_safety_factor: 1.2                                         # Multiplicative safety over predicted node count
+  node_safety_factor: 1.5                                         # Multiplicative safety over predicted node count
   edge_safety_factor: 5.0                                         # Multiplicative safety over predicted edge count
   node_hard_cap_mb: 50                                            # Per-worker RAM ceiling for MCTSNode pool
   edge_hard_cap_mb: 100                                           # Per-worker RAM ceiling for MCTSEdge pool
@@ -58,8 +54,6 @@ selection:
   resignation_cutoff: -0.80                                       # Q threshold below which resignation-enabled game gives up
 
 training:
-  training_cores: [10]                                            # Python trainer thread (main_train.py + trainer loop)
-  io_read_cores: [11, 12]                                         # Prefetch worker cores for async LMDB reads
   prefetch_workers: 8                                             # Async LMDB read workers assembling training batches
   seed: 42                                                        # RNG seed for model init
   batch_size: 4096                                                # Positions per gradient update
@@ -76,3 +70,19 @@ training:
   lr_low: 2e-3                                                    # LR held for remainder of total_training_steps
   momentum_rate: 0.9                                              # SGD momentum coefficient
   logging_level: 20                                               # Training loop log level
+
+memory:
+  engine_working_set_min_gb: 4                                    # talbot_train.exe: writer + MCTS ram
+  engine_working_set_max_gb: 8
+  trainer_working_set_min_gb: 2                                   # main_train.py orchestrator process
+  trainer_working_set_max_gb: 4
+  prefetch_worker_working_set_min_gb: 4                           # AsyncBatchPrefetcher subprocess (random-read heavy, needs more headroom)
+  prefetch_worker_working_set_max_gb: 8
+
+core_pinning:
+  inference_worker: [10,11,12,13,14,15]                           # Dedicated cores for batcher filler/dispatcher/collector threads
+  game_worker: [16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]  # Self-play worker cores; total workers = len * workers_per_core
+  data_generator: [9]                                             # Main orchestrator thread (data generator loop, LMDB coordinator)
+  io_writer: [8]                                                  # LMDB writer thread
+  io_reader: [6, 7]                                               # Prefetch worker cores for async LMDB reads
+  training: [4,5]                                                 # Python trainer thread (main_train.py + trainer loop)

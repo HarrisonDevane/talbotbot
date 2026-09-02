@@ -3,11 +3,8 @@ engine:
   log_level: 20                                                   # 10=DEBUG 20=INFO 30=WARNING 40=ERROR 50=CRITICAL
 
 evaluation:
-  main_cores: []                                                 # Dedicated CPU cores for the main C++ orchestrator
-  game_worker_cores: []                                          # Dedicated CPU cores for games
 
 inference:
-  inference_worker_cores: []                            # Dedicated CPU cores for the Batching Process
   batch_size: 128                                                 # Max batch size during inference
   batch_size_factor: 32                                           # Multiplier for batch size to determine max slots
   batch_timeout_ms: 10                                            # How long the GPU batcher waits
@@ -53,3 +50,8 @@ time_control:
   min_think_ms: 10                                                # Floor so we never emit a 0ms move in time scramble
   nps_ewma_alpha: 0.40                                            # Smoothing for trailing nodes/sec estimate
   nps_ewma_default: 20000                                         # Default NPS for first move in non-starting positions
+
+core_pinning:
+  inference_worker: []                                            # Dedicated CPU cores for the Batching Process
+  main: []                                                        # Dedicated CPU cores for the main C++ orchestrator
+  game_worker: []                                                 # Dedicated CPU cores for games

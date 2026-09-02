@@ -205,7 +205,7 @@ int main(int argc, char* argv[]) {
     
     main_logger.log("INFO", "[MAIN] Booting up C++ Engine...");
 
-    auto orch_cores = config["data_generation"]["data_generator_cores"];
+    auto orch_cores = config["core_pinning"]["data_generator"];
     int num_orch_threads = orch_cores.size();
     at::set_num_threads(num_orch_threads); 
 
@@ -214,9 +214,13 @@ int main(int argc, char* argv[]) {
         mainMask |= (static_cast<DWORD_PTR>(1) << core.as<int>());
     }
     SetThreadAffinityMask(GetCurrentThread(), mainMask);
-    SetProcessWorkingSetSize(GetCurrentProcess(),
-    (SIZE_T)8ULL * 1024 * 1024 * 1024,
-    (SIZE_T)16ULL * 1024 * 1024 * 1024);
+    
+    {
+        SIZE_T ws_min = (SIZE_T)config["memory"]["engine_working_set_min_gb"].as<size_t>() * 1024 * 1024 * 1024;
+        SIZE_T ws_max = (SIZE_T)config["memory"]["engine_working_set_max_gb"].as<size_t>() * 1024 * 1024 * 1024;
+        SetProcessWorkingSetSizeEx(GetCurrentProcess(), ws_min, ws_max, QUOTA_LIMITS_HARDWS_MAX_ENABLE);
+    }
+
     
     const double sampling_ratio = config["training"]["sampling_ratio"].as<double>();
     const size_t batch_size = config["training"]["batch_size"].as<size_t>();
@@ -271,7 +275,7 @@ int main(int argc, char* argv[]) {
     main_logger.rotate(init_step, rot_interval);
     main_logger.log("INFO", "=== C++ ORCHESTRATOR STARTED ===");
     
-    int num_cores = config["data_generation"]["game_worker_cores"].size();
+    int num_cores = config["core_pinning"]["game_worker"].size();
     int workers_per_core = config["data_generation"]["workers_per_core"].as<int>();
     int inference_batch_size = config["inference"]["batch_size"].as<int>();
     int batch_factor = config["inference"]["batch_size_factor"].as<int>();
@@ -346,7 +350,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::vector<int> batcher_cores;
-    for (const auto& core : config["inference"]["inference_worker_cores"]) {
+    for (const auto& core : config["core_pinning"]["inference_worker"]) {
         batcher_cores.push_back(core.as<int>());
     }
     
@@ -367,14 +371,14 @@ int main(int argc, char* argv[]) {
 
     main_logger.log("INFO", "[MAIN] Initializing Data Generator Workers...");
     DataGenerator generator(
-        config["pool_sizing"], config["data_generation"], config["mcts"], config["selection"],
+        config["pool_sizing"], config["data_generation"], config["mcts"], config["core_pinning"], config["selection"],
         model, train_dir, rot_interval, main_logger,
         inference_queue, result_queues, shared_input_buffer, shared_policy_buffer, shared_value_buffer,
         buffer_free_slots, completed_games_queue, init_games + 1, current_step
     );
 
     std::vector<int> io_write_cores;
-    for (const auto& core : config["data_generation"]["io_write_cores"]) {
+    for (const auto& core : config["core_pinning"]["io_writer"]) {
         io_write_cores.push_back(core.as<int>());
     }
 

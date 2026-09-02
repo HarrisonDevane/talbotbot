@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import yaml
 import logging
@@ -11,7 +12,7 @@ import struct
 import lmdb
 import warnings
 import json
-import onnx
+import ctypes
 
 from trainer import TrainTask
 from model import ChessAIModel, fuse_bn_for_export
@@ -37,6 +38,16 @@ class RLOrchestrator:
             self.params_config = yaml.safe_load(f)
         with open(MODEL_FILE, 'r') as f:
             self.model_config = yaml.safe_load(f)
+
+        # Limitm memory size
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetCurrentProcess()
+        kernel32.SetProcessWorkingSetSizeEx(
+            handle,
+            ctypes.c_size_t(self.params_config['memory']['trainer_working_set_min_gb'] * 1024**3),
+            ctypes.c_size_t(self.params_config['memory']['trainer_working_set_max_gb'] * 1024**3),
+            ctypes.c_uint(0x00000004),  # QUOTA_LIMITS_HARDWS_MAX_ENABLE
+        )
 
         # Resolve train_dir. Relative paths are anchored at project root so
         # config files remain portable; absolute paths (e.g. a scratch disk)
@@ -104,6 +115,12 @@ class RLOrchestrator:
                 self._create_seed_models()
 
         self._export_to_cpp()
+
+    def _apply_working_set_cap(self):
+        mem_cfg = self.params_config.get('memory', {})
+        min_gb = mem_cfg['']
+        max_gb = mem_cfg['trainer_working_set_max_gb']
+
 
     def _initialize_empty_lmdb(self):
         cpp_blob = struct.pack(CPP_STATE_FMT, 0, 0, 0.0, 0, 0, 0)
@@ -219,7 +236,7 @@ class RLOrchestrator:
         return logger
 
     def run(self):
-        training_cores = self.params_config['training']['training_cores']
+        training_cores = self.params_config['core_pinning']['training']
         num_threads = len(training_cores)
         
         for var in ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"]:
@@ -243,15 +260,22 @@ class RLOrchestrator:
         
         engine_process = subprocess.Popen(cmd)
 
+        metrics_script = os.path.abspath(os.path.join(current_script_dir, "performance_metrics.py"))
+        self.logger.info(f"Launching performance metrics monitor: {metrics_script}")
+        metrics_process = subprocess.Popen(
+            [sys.executable, metrics_script, self.train_dir],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
         self._wait_for_trt_engine()
 
         self.logger.info("Initializing PyTorch TrainTask...")
         self.train_task = TrainTask(
             model_path=self.model_pth,
             model_config=self.model_config,
-            training_config=self.params_config['training'],
+            main_train_config=self.params_config,
             state_config=self.state_config,
-            global_config=self.params_config['global'],
             db_path=self.buffer_file_path 
         )
 
@@ -365,6 +389,11 @@ class RLOrchestrator:
             self.logger.info("Shutting down C++ engine...")
             engine_process.terminate()
             engine_process.wait()
+
+            if 'metrics_process' in locals():
+                self.logger.info("Shutting down performance metrics monitor...")
+                metrics_process.terminate()
+                metrics_process.wait()
             
 
     def _export_to_cpp(self):

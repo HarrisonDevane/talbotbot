@@ -6,11 +6,8 @@ global:
   main_logging_level: 20                                         # Logging level for the Tournament Orchestrator
 
 evaluation:
-  main_cores: [3]                                                # Dedicated CPU cores for the main C++ orchestrator
 
 inference:
-  batcher_a_cores: [13, 14, 15]                                  # Dedicated CPU cores for Model A's TensorRT batcher
-  batcher_b_cores: [16, 17, 18]                                  # Dedicated CPU cores for Model B's TensorRT batcher
   batch_size: 256                                                # Max batch size during inference (per batcher)
   batch_size_factor: 8                                           # Multiplier for batch size to determine max slots
   batch_timeout_ms: 10                                           # How long each GPU batcher waits
@@ -47,7 +44,6 @@ selection:
   resignation_cutoff: 0.0                                        # Value head cutoff for resignation
 
 tournament:
-  game_worker_cores: [6, 7, 8, 9, 10, 11, 12, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]   # Dedicated CPU cores for concurrent game execution
   workers_per_core: 5                                           # Number of game workers to pin to each core
   games_per_match: 100                                          # Total games per pairing (must be even; each opening played twice)
   opening_file: 'D:/Projects/talbot/data/opening_pgn/8moves_v3.pgn'  # Path to the PGN file of opening lines
@@ -65,6 +61,13 @@ time_control:
   min_think_ms: 10                                                # Floor so we never emit a 0ms move in time scramble
   nps_ewma_alpha: 0.40                                            # Smoothing for trailing nodes/sec estimate
   nps_ewma_default: 25000                                         # Default NPS for first move in non-starting positions
+
+core_pinning:
+  main: [3]                                                # Dedicated CPU cores for the main C++ orchestrator
+  batcher_a: [13, 14, 15]                                  # Dedicated CPU cores for Model A's TensorRT batcher
+  batcher_b: [16, 17, 18]                                  # Dedicated CPU cores for Model B's TensorRT batcher
+  game_worker: [6, 7, 8, 9, 10, 11, 12, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]   # Dedicated CPU cores for concurrent game execution
+
 
 tournament_models:
 - step_060000_model.pth

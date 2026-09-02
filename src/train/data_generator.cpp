@@ -13,7 +13,7 @@
 
 DataGenerator::DataGenerator(
     const YAML::Node& pool_cfg,
-    const YAML::Node& data_gen_cfg, const YAML::Node& mcts_cfg, const YAML::Node& sel_cfg, const YAML::Node& model_cfg,
+    const YAML::Node& data_gen_cfg, const YAML::Node& mcts_cfg, const YAML::Node& core_cfg, const YAML::Node& sel_cfg, const YAML::Node& model_cfg,
     const std::string& rl_dir_in, int rot_interval,
     Logger& logger,
     moodycamel::ConcurrentQueue<std::pair<int, int>>& i_queue,
@@ -26,10 +26,10 @@ DataGenerator::DataGenerator(
     buffer_free_slots(free_slots), completed_games_queue(completed_games_queue),
     stop_event(false), game_counter(start_game_id), interval_games(0), interval_samples(0), current_step(step_ref)
 {
-    config.num_cores = data_gen_cfg["game_worker_cores"].size();
+    config.num_cores = core_cfg["game_worker"].size();
     config.workers_per_core = data_gen_cfg["workers_per_core"].as<int>();
     config.total_workers = config.num_cores * config.workers_per_core;
-    for (const auto& core : data_gen_cfg["game_worker_cores"]) {
+    for (const auto& core : core_cfg["game_worker"]) {
         config.core_ids.push_back(core.as<int>());
     }
     config.adjudication_max_ply_length = data_gen_cfg["adjudication_max_ply_length"].as<int>();
