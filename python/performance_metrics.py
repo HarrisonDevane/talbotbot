@@ -27,23 +27,34 @@ CONFIG = {
 
     # RAM
     "RAM_RSS":           True,   # resident set size, sum across tracked processes
+                                  # (cache-inclusive -- see USS note below)
     "RAM_USS":            True,   # unique set size: TRUE private memory, excludes
+                                  # shared/mapped/cached pages. This is the number
+                                  # to use if you want an honest "memory requirement".
     "RAM_RSS_GB":         True,   # RSS also expressed in GB (pure convenience)
     "SYSTEM_RAM":         True,   # system-wide RAM used% and available MB
     "SYSTEM_SWAP":       True,   # system-wide pagefile/swap usage
 
     # Disk
     "DISK_IO":            True,   # cumulative read/write MB, tracked processes
+
+    # Misc
     "PROCESS_COUNT":     True,   # number of processes in the tracked tree
 
     # GPU (auto-disabled if no pynvml / nvidia-smi found)
     "GPU":                 True,
     "GPU_MEM_UTIL":       True,   # memory controller utilization % (distinct from mem used)
     "GPU_PROCESS_MEM":   True,   # GPU memory attributed to tracked PIDs specifically
+                                  # (reliable via NVML; NOT the same as per-process
+                                  # GPU utilization, which NVIDIA does not expose reliably)
     "GPU_TEMP":           True,
     "GPU_POWER":          True,
     "GPU_CLOCKS":         True,
 
+    # Optional: point this at your replay buffer file or directory to track
+    # its size over time (e.g. r"D:/Projects/talbot/train_dir/replay_buffer.bin").
+    # Directory paths are walked recursively -- fine for a handful of files,
+    # could be slow if it's thousands of small files. Leave as None to disable.
     "TRACK_BUFFER_SIZE": False,
     "BUFFER_PATH":         None,
 }
@@ -206,20 +217,8 @@ def get_gpu_process_mem(gpu_mode, gpu_ctx, tracked_pids):
 
 
 # =============================================================================
-# Process discovery / sizing helpers
+# Process sizing helpers
 # =============================================================================
-def find_process_by_name(name_fragment):
-    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-        try:
-            cmdline = proc.info['cmdline']
-            if cmdline and any(name_fragment in arg for arg in cmdline):
-                if 'performance_metrics.py' not in "".join(cmdline):
-                    return proc.pid
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
-    return None
-
-
 def get_path_size_mb(path):
     """Size of a file, or recursive total of a directory, in MB. None on error."""
     try:
@@ -332,33 +331,26 @@ def build_log_message(config, num_gpus, gpu_mode, ctx):
 # =============================================================================
 # Main
 # =============================================================================
-def monitor_process(interval=60.0, train_dir=None, config=None):
+def monitor_process(interval=60.0, train_dir=None, target_pid=None, config=None):
     config = config or CONFIG
     if not train_dir:
         raise ValueError("train_dir is required (pass it in, or run this script with the train_dir as its first argument).")
+    if not target_pid:
+        raise ValueError("target_pid is required (pass it in, or run this script with the PID as its second argument).")
 
     train_dir = os.path.abspath(train_dir)
     os.makedirs(train_dir, exist_ok=True)
     log_path = os.path.join(train_dir, "performance_metrics.log")
     logger = setup_logger(log_path)
 
-    logger.info(f"=== PERFORMANCE METRICS MONITOR STARTED === (train_dir: {train_dir})")
-    logger.info("Searching for running training process (main_train.py)...")
-
-    target_pid = None
-    while target_pid is None:
-        target_pid = find_process_by_name("main_train.py")
-        if target_pid is None:
-            logger.info("Training process not found yet. Retrying in 5 seconds...")
-            time.sleep(5)
-
-    logger.info(f"Found training process with native PID: {target_pid}")
+    logger.info(f"=== PERFORMANCE METRICS MONITOR STARTED === (train_dir: {train_dir}, target_pid: {target_pid})")
 
     try:
         main_proc = psutil.Process(target_pid)
     except psutil.NoSuchProcess:
-        logger.critical(f"Process with PID {target_pid} disappeared before monitoring could start.")
+        logger.critical(f"Process with PID {target_pid} does not exist. Nothing to monitor.")
         return
+
 
     logical_cores = psutil.cpu_count(logical=True) or 1
 
@@ -509,7 +501,12 @@ def monitor_process(interval=60.0, train_dir=None, config=None):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: performance_metrics.py <train_dir>", file=sys.stderr)
+    if len(sys.argv) < 3:
+        print("Usage: performance_metrics.py <train_dir> <target_pid>", file=sys.stderr)
         sys.exit(1)
-    monitor_process(interval=60.0, train_dir=sys.argv[1])
+    try:
+        pid_arg = int(sys.argv[2])
+    except ValueError:
+        print(f"target_pid must be an integer, got: {sys.argv[2]!r}", file=sys.stderr)
+        sys.exit(1)
+    monitor_process(interval=60.0, train_dir=sys.argv[1], target_pid=pid_arg)

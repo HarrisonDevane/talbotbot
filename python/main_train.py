@@ -263,7 +263,7 @@ class RLOrchestrator:
         metrics_script = os.path.abspath(os.path.join(current_script_dir, "performance_metrics.py"))
         self.logger.info(f"Launching performance metrics monitor: {metrics_script}")
         metrics_process = subprocess.Popen(
-            [sys.executable, metrics_script, self.train_dir],
+            [sys.executable, metrics_script, self.train_dir, str(os.getpid())],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
