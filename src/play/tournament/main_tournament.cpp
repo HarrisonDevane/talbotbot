@@ -62,7 +62,6 @@
 #include "game_worker.hpp"
 #include "self_play_session.hpp"
 #include "opening_book.hpp"
-#include "build_info.hpp"
 #include "tbprobe.h"
 
 namespace fs = std::filesystem;
@@ -453,9 +452,6 @@ static std::unique_ptr<MCTSEngine> build_engine(
 // MAIN
 // =============================================================================
 int main(int argc, char* argv[]) {
-    std::cerr << "Talbot [git " << talbot::GIT_COMMIT
-            << "] built " << talbot::BUILD_TIME << "\n";
-
     CliArgs args;
     if (!parse_args(argc, argv, args)) return 1;
 

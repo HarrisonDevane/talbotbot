@@ -80,9 +80,9 @@ memory:
   prefetch_worker_working_set_max_gb: 8
 
 core_pinning:
-  inference_worker: [13,14,15]                           # Dedicated cores for batcher filler/dispatcher/collector threads
+  inference_worker: [13,14,15]                                    # Dedicated cores for batcher filler/dispatcher/collector threads
   game_worker: [16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]  # Self-play worker cores; total workers = len * workers_per_core
-  data_generator: [12]                                             # Main orchestrator thread (data generator loop, LMDB coordinator)
-  io_writer: [12]                                                  # LMDB writer thread
-  io_reader: [10,11]                                               # Prefetch worker cores for async LMDB reads
+  data_generator: [12]                                            # Main orchestrator thread (data generator loop, LMDB coordinator)
+  io_writer: [12]                                                 # LMDB writer thread
+  io_reader: [10,11]                                              # Prefetch worker cores for async LMDB reads
   training: [8,9]                                                 # Python trainer thread (main_train.py + trainer loop)

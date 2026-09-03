@@ -53,7 +53,6 @@
 #include "logger.hpp"
 #include "time_control.hpp"
 #include "tbprobe.h"   // Fathom Syzygy probing (tb_init / tb_free / TB_LARGEST)
-#include "build_info.hpp"
 
 namespace fs = std::filesystem;
 
@@ -549,8 +548,6 @@ static std::string get_exe_dir() {
 
 // =============================================================================
 int main(int argc, char* argv[]) {
-    std::cerr << "Talbot [git " << talbot::GIT_COMMIT
-            << "] built " << talbot::BUILD_TIME << "\n";
     // A GUI launches us with no args and expects UCI on stdio. Do not add flags.
 
     const std::string exe_dir = get_exe_dir();

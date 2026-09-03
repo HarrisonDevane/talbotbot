@@ -40,7 +40,14 @@ class RLOrchestrator:
             self.model_config = yaml.safe_load(f)
 
         # Limitm memory size
-        kernel32 = ctypes.windll.kernel32
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.SetProcessWorkingSetSizeEx.restype = wintypes.BOOL
+        kernel32.SetProcessWorkingSetSizeEx.argtypes = [
+            wintypes.HANDLE, ctypes.c_size_t, ctypes.c_size_t, wintypes.DWORD
+        ]
         handle = kernel32.GetCurrentProcess()
         kernel32.SetProcessWorkingSetSizeEx(
             handle,

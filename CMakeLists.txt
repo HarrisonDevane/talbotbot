@@ -7,8 +7,6 @@
 #   2. Shared config (includes, libs, flags) lives in ONE INTERFACE library
 #      (talbot_common) rather than being duplicated per target. Impossible to
 #      have the three main binaries drift on flags.
-#   3. Every binary stamps itself with the git commit + configure time via a
-#      generated build_info.hpp. Trace any log or artifact back to source.
 # =============================================================================
 
 cmake_minimum_required(VERSION 3.21)  # 3.21 for CMakePresets v3 support
@@ -90,12 +88,6 @@ string(TIMESTAMP BUILD_TIME_UTC "%Y-%m-%d %H:%M:%S UTC" UTC)
 message(STATUS "GIT_COMMIT = ${GIT_COMMIT}")
 message(STATUS "BUILD_TIME = ${BUILD_TIME_UTC}")
 
-configure_file(
-    "${CMAKE_SOURCE_DIR}/src/core/build_info.hpp.in"
-    "${CMAKE_BINARY_DIR}/generated/build_info.hpp"
-    @ONLY
-)
-
 # -----------------------------------------------------------------------------
 # 3. SHARED SOURCES
 # -----------------------------------------------------------------------------
@@ -121,7 +113,6 @@ set(SHARED_SOURCES
 # does NOT link talbot_common and stays configured separately below.
 # -----------------------------------------------------------------------------
 set(INCLUDE_DIRS
-    "${CMAKE_BINARY_DIR}/generated"    # for build_info.hpp
     "./src"
     "./src/core"
     "./src/train"

@@ -25,8 +25,6 @@
 
 #include <fstream>
 
-#include "build_info.hpp"
-
 namespace fs = std::filesystem;
 
 std::atomic<bool> global_stop_event{false};
@@ -175,9 +173,6 @@ std::vector<uint8_t> compile_trt_engine(const std::string& compile_exe,
 }
 
 int main(int argc, char* argv[]) {
-    std::cerr << "Talbot [git " << talbot::GIT_COMMIT
-            << "] built " << talbot::BUILD_TIME << "\n";
-
     std::signal(SIGINT, signal_handler);
 
     std::unordered_map<std::string, std::string> args;
