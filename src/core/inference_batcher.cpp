@@ -1,11 +1,10 @@
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-
 #include "inference_batcher.hpp"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
+#include <pthread.h>
+#include <sched.h>
+#include <immintrin.h>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -133,17 +132,15 @@ void InferenceBatcher::run(
     std::atomic<double> local_idle_time_sec{0.0};
 
     // Distribute cores round-robin across 3 roles: dispatcher(0), collector(1), filler(2)
-    DWORD_PTR frontendMask = 0;
-    DWORD_PTR backendMask = 0;
-    DWORD_PTR fillerMask = 0;
+    cpu_set_t frontendSet, backendSet, fillerSet;
+    CPU_ZERO(&frontendSet); CPU_ZERO(&backendSet); CPU_ZERO(&fillerSet);
     std::vector<std::string> role_cores(3);
 
     for (size_t i = 0; i < core_ids.size(); ++i) {
-        DWORD_PTR bit = static_cast<DWORD_PTR>(1) << core_ids[i];
         int role = i % 3;
-        if (role == 0) frontendMask |= bit;
-        else if (role == 1) backendMask |= bit;
-        else fillerMask |= bit;
+        if (role == 0)      CPU_SET(core_ids[i], &frontendSet);
+        else if (role == 1) CPU_SET(core_ids[i], &backendSet);
+        else                CPU_SET(core_ids[i], &fillerSet);
         if (!role_cores[role].empty()) role_cores[role] += ",";
         role_cores[role] += std::to_string(core_ids[i]);
     }
@@ -158,8 +155,8 @@ void InferenceBatcher::run(
         }
     }
 
-    if (frontendMask != 0) {
-        SetThreadAffinityMask(GetCurrentThread(), frontendMask);
+    if (CPU_COUNT(&frontendSet) > 0) {
+        pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &frontendSet);
     }
     load_initial_engine(logger);
 
@@ -211,13 +208,10 @@ void InferenceBatcher::run(
     std::atomic<bool> slot_free[NUM_SLOTS] = {true, true, true};
 
     std::thread collector_thread([&]() {
-        if (backendMask != 0) {
-            SetThreadAffinityMask(GetCurrentThread(), backendMask);
+        if (CPU_COUNT(&backendSet) > 0) {
+            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &backendSet);
         }
         last_report_time = std::chrono::steady_clock::now();
-        
-        uint64_t previousTotalTicks = 0;
-        uint64_t previousIdleTicks = 0;
 
         while (true) {
             PipelineJob job;
@@ -260,13 +254,6 @@ void InferenceBatcher::run(
 
             if (elapsed_interval_time >= (double)logging_interval_sec) {
                 if (logger.get_level() <= 20) {
-                    
-                    size_t free_byte = 0, total_byte = 0;
-                    cudaError_t cuda_status = cudaMemGetInfo(&free_byte, &total_byte);
-                    double free_db = (double)free_byte / (1024.0 * 1024.0);
-                    double total_db = (double)total_byte / (1024.0 * 1024.0);
-                    double used_db = total_db - free_db;
-
                     double idle_sec = local_idle_time_sec.exchange(0.0);
                     double idle_pct = (idle_sec / elapsed_interval_time) * 100.0;
                     
@@ -277,33 +264,6 @@ void InferenceBatcher::run(
                     double util_pct = (interval_total_processing_duration / NUM_SLOTS / elapsed_interval_time) * 100.0;
                     double inf_per_sec = interval_total_inferences / elapsed_interval_time;
 
-                    // System CPU tracking
-                    FILETIME idleTime, kernelTime, userTime;
-                    float sys_cpu_pct = 0.0f;
-                    if (GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
-                        auto FileTimeToInt64 = [](const FILETIME& ft) {
-                            return (((uint64_t)ft.dwHighDateTime) << 32) | ((uint64_t)ft.dwLowDateTime);
-                        };
-                        uint64_t idleTicks = FileTimeToInt64(idleTime);
-                        uint64_t totalTicks = FileTimeToInt64(kernelTime) + FileTimeToInt64(userTime);
-                        
-                        uint64_t totalTicksSinceLastTime = totalTicks - previousTotalTicks;
-                        uint64_t idleTicksSinceLastTime  = idleTicks - previousIdleTicks;
-                        
-                        if (previousTotalTicks > 0 && totalTicksSinceLastTime > 0) {
-                            sys_cpu_pct = 100.0f * (1.0f - ((float)idleTicksSinceLastTime) / totalTicksSinceLastTime);
-                        }
-                        previousTotalTicks = totalTicks;
-                        previousIdleTicks = idleTicks;
-                    }
-
-                    // System RAM tracking
-                    MEMORYSTATUSEX memInfo;
-                    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
-                    GlobalMemoryStatusEx(&memInfo);
-                    double sys_ram_used_gb = (memInfo.ullTotalPhys - memInfo.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
-                    double sys_ram_total_gb = memInfo.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
-                    
                     // Queue profiling
                     size_t input_queue_size = queue.size_approx();
                     size_t dispatch_q_size = dispatch_queue.size();
@@ -322,17 +282,13 @@ void InferenceBatcher::run(
                     logger.log("INFO", "============================================================");
                     logger.log("INFO", " INFERENCE BATCHER DIAGNOSTICS (" + std::to_string(elapsed_interval_time) + "s interval)");
                     logger.log("INFO", "============================================================");
-                    
-                    logger.log("INFO", "  [SYSTEM HEALTH]");
-                    logger.log("INFO", "    System CPU Usage       : " + std::to_string(sys_cpu_pct) + "%");
-                    logger.log("INFO", "    System RAM Used        : " + std::to_string(sys_ram_used_gb) + " GB / " + std::to_string(sys_ram_total_gb) + " GB");
-                    logger.log("INFO", "    Buffer Free Slots      : " + std::to_string(current_free_slots));
 
                     logger.log("INFO", "  [QUEUE HEALTH]");
                     logger.log("INFO", "    Inference Q (Approx)   : " + std::to_string(input_queue_size));
                     logger.log("INFO", "    Dispatch Q (To GPU)    : " + std::to_string(dispatch_q_size));
                     logger.log("INFO", "    Scatter Q (From GPU)   : " + std::to_string(scatter_q_size));
                     logger.log("INFO", "    Result Qs (To Workers) : " + std::to_string(total_result_items) + " items across " + std::to_string(active_result_queues) + " active worker queues");
+                    logger.log("INFO", "    Buffer Free Slots      : " + std::to_string(current_free_slots));
 
                     logger.log("INFO", "  [THROUGHPUT]");
                     logger.log("INFO", "    Overall Inferences/Sec : " + std::to_string(inf_per_sec));
@@ -347,14 +303,6 @@ void InferenceBatcher::run(
                     logger.log("INFO", "  [GPU PIPELINE]");
                     logger.log("INFO", "    Batcher Utilization    : " + std::to_string(util_pct) + "%");
                     logger.log("INFO", "    Filler IDLE Time       : " + std::to_string(idle_pct) + "% (Waiting for Workers)");
-                    
-                    if (cuda_status == cudaSuccess) {
-                        logger.log("INFO", "  [VRAM STATUS]");
-                        logger.log("INFO", "    VRAM Used : " + std::to_string(used_db) + " MB");
-                        logger.log("INFO", "    VRAM Free : " + std::to_string(free_db) + " MB");
-                    } else {
-                        logger.log("ERROR", "   [VRAM STATUS] Failed to query CUDA Memory.");
-                    }
                 }
                 last_report_time = current_time;
                 interval_batches_processed = 0;
@@ -365,8 +313,8 @@ void InferenceBatcher::run(
     });
 
     std::thread filler_thread([&]() {
-        if (fillerMask != 0) {
-            SetThreadAffinityMask(GetCurrentThread(), fillerMask);
+        if (CPU_COUNT(&fillerSet) > 0) {
+            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &fillerSet);
         }
         int current_slot = 0;
         

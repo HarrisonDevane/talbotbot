@@ -1,6 +1,8 @@
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 #include <iostream>
 #include <vector>
@@ -76,11 +78,11 @@ void write_lmdb_signal(MDB_env* env, MDB_dbi dbi, const char* key_name, uint64_t
 // (i.e. same CMake build output directory). Falls back to bare name (relies on
 // cwd / PATH) if GetModuleFileName fails, which shouldn't happen in practice.
 std::string resolve_trt_compile_exe() {
-    char buf[MAX_PATH];
-    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n == 0 || n == MAX_PATH) return "talbot_trt_compile.exe";
-    return (fs::path(std::string(buf, n)).parent_path()
-            / "talbot_trt_compile.exe").string();
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return "talbot_trt_compile";
+    buf[n] = '\0';
+    return (fs::path(buf).parent_path() / "talbot_trt_compile").string();
 }
 
 // Read a file into a byte vector. Empty vector on any failure (missing file,
@@ -108,55 +110,32 @@ int run_trt_compile(const std::string& compile_exe,
                     const std::string& engine_path,
                     int max_batch,
                     int input_planes) {
-    std::string cmd = "\"" + compile_exe + "\""
-                    + " \"" + onnx_path + "\""
-                    + " \"" + engine_path + "\""
-                    + " --input-planes " + std::to_string(input_planes)
-                    + " --max-batch "    + std::to_string(max_batch)
-                    + " --force";
+    pid_t pid = fork();
+    if (pid < 0) return -1;
 
-    // Open an inheritable handle to NUL for the child's stdout.
-    SECURITY_ATTRIBUTES sa = {};
-    sa.nLength        = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    HANDLE null_out = CreateFileA("NUL", GENERIC_WRITE,
-                                  FILE_SHARE_WRITE | FILE_SHARE_READ,
-                                  &sa, OPEN_EXISTING, 0, nullptr);
-    if (null_out == INVALID_HANDLE_VALUE) return -1;
+    if (pid == 0) {
+        // Child: silence stdout, keep stderr
+        int null_fd = open("/dev/null", O_WRONLY);
+        if (null_fd >= 0) {
+            dup2(null_fd, STDOUT_FILENO);
+            close(null_fd);
+        }
 
-    STARTUPINFOA si = {};
-    si.cb         = sizeof(si);
-    si.dwFlags    = STARTF_USESTDHANDLES;
-    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = null_out;
-    si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
-    PROCESS_INFORMATION pi = {};
+        std::string batch_str  = std::to_string(max_batch);
+        std::string planes_str = std::to_string(input_planes);
 
-    // CreateProcessA requires a writable command-line buffer.
-    std::vector<char> mutable_cmd(cmd.begin(), cmd.end());
-    mutable_cmd.push_back('\0');
-
-    BOOL ok = CreateProcessA(
-        nullptr,                 // let CreateProcess parse the app name from cmd
-        mutable_cmd.data(),
-        nullptr, nullptr,        // security attrs
-        TRUE,                    // must inherit handles for STARTF_USESTDHANDLES
-        0,                       // flags: no new console
-        nullptr, nullptr,        // env, cwd -- inherit
-        &si, &pi
-    );
-    if (!ok) {
-        CloseHandle(null_out);
-        return -1;
+        execl(compile_exe.c_str(), compile_exe.c_str(),
+              onnx_path.c_str(), engine_path.c_str(),
+              "--input-planes", planes_str.c_str(),
+              "--max-batch",    batch_str.c_str(),
+              "--force", (char*)nullptr);
+        _exit(127);  // exec failed
     }
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD exit_code = 0;
-    GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    CloseHandle(null_out);
-    return static_cast<int>(exit_code);
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
 }
 
 // Compile + read-back combined. Returns engine bytes on success, empty on any
@@ -204,18 +183,12 @@ int main(int argc, char* argv[]) {
     int num_orch_threads = orch_cores.size();
     at::set_num_threads(num_orch_threads); 
 
-    DWORD_PTR mainMask = 0;
+    cpu_set_t mainSet;
+    CPU_ZERO(&mainSet);
     for (const auto& core : orch_cores) {
-        mainMask |= (static_cast<DWORD_PTR>(1) << core.as<int>());
+        CPU_SET(core.as<int>(), &mainSet);
     }
-    SetThreadAffinityMask(GetCurrentThread(), mainMask);
-    
-    {
-        SIZE_T ws_min = (SIZE_T)config["memory"]["engine_working_set_min_gb"].as<size_t>() * 1024 * 1024 * 1024;
-        SIZE_T ws_max = (SIZE_T)config["memory"]["engine_working_set_max_gb"].as<size_t>() * 1024 * 1024 * 1024;
-        SetProcessWorkingSetSizeEx(GetCurrentProcess(), ws_min, ws_max, QUOTA_LIMITS_HARDWS_MAX_ENABLE);
-    }
-
+    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &mainSet);
     
     const double sampling_ratio = config["training"]["sampling_ratio"].as<double>();
     const size_t batch_size = config["training"]["batch_size"].as<size_t>();

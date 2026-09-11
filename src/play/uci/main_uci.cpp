@@ -1,7 +1,7 @@
 // =============================================================================
 // main_uci.cpp
 //
-// Entry point for talbot.exe -- a bare, single-game UCI engine.
+// Entry point for talbot -- a bare, single-game UCI engine.
 //
 // UCI clients (chess GUIs, cutechess-cli, tournament tools) launch engines
 // with NO arguments and speak UCI on stdin/stdout. There is deliberately no
@@ -21,9 +21,9 @@
 // are advertised for GUI compatibility but accepted-and-ignored.
 // =============================================================================
 
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
 
 #include <iostream>
 #include <fstream>
@@ -206,14 +206,14 @@ static std::vector<std::string> split(const std::string& s, char delimiter) {
     return tokens;
 }
 
-static DWORD_PTR mask_from_cores(const std::vector<int>& cores) {
-    DWORD_PTR m = 0;
+static cpu_set_t set_from_cores(const std::vector<int>& cores) {
+    cpu_set_t s;
+    CPU_ZERO(&s);
     for (int c : cores) {
-        if (c >= 0 && c < (int)(sizeof(DWORD_PTR) * 8)) m |= (DWORD_PTR{1} << c);
+        if (c >= 0 && c < CPU_SETSIZE) CPU_SET(c, &s);
     }
-    return m;
+    return s;
 }
-
 // =============================================================================
 // CONFIG STRUCT (single source of truth for all UCI runtime knobs)
 // =============================================================================
@@ -416,7 +416,7 @@ struct SearchWorker {
     // sub-thread loops while true.
     std::atomic<bool> search_active{false};
 
-    DWORD_PTR core_mask = 0;
+    cpu_set_t core_set;
 };
 
 // Builds the shared CPU half-precision buffers used by a batcher + its engines.
@@ -536,14 +536,15 @@ static bool probe_root_tablebase(const chess::Board& board,
 // CONFIG RESOLUTION
 //
 // UCI GUIs launch the exe with zero args. The contract is: play_uci.yaml
-// and model.engine both sit next to talbot.exe. No overrides, no env vars,
+// and model.engine both sit next to talbot. No overrides, no env vars,
 // no CLI flags. Missing either -> fatal at startup with a clear message.
 // =============================================================================
 static std::string get_exe_dir() {
-    char buf[MAX_PATH];
-    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n == 0 || n == MAX_PATH) return "";      // shouldn't happen on Windows
-    return fs::path(std::string(buf, n)).parent_path().string();
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return "";
+    buf[n] = '\0';
+    return fs::path(buf).parent_path().string();
 }
 
 // =============================================================================
@@ -559,14 +560,14 @@ int main(int argc, char* argv[]) {
     const std::string config_file_path = exe_dir + "/play_uci.yaml";
     if (!fs::exists(config_file_path)) {
         std::cerr << "Fatal: play_uci.yaml not found at " << config_file_path << "\n"
-                  << "It must sit in the same directory as talbot.exe.\n";
+                  << "It must sit in the same directory as talbot.\n";
         return 1;
     }
 
     const std::string model_yaml_path = exe_dir + "/model.yaml";
     if (!fs::exists(model_yaml_path)) {
         std::cerr << "Fatal: model.yaml not found at " << model_yaml_path << "\n"
-                  << "It must sit in the same directory as talbot.exe.\n";
+                  << "It must sit in the same directory as talbot.\n";
         return 1;
     }
 
@@ -629,7 +630,7 @@ int main(int argc, char* argv[]) {
 
     if (!fs::exists(cfg.engine_path)) {
         std::cerr << "Fatal: model.engine not found at " << cfg.engine_path << "\n"
-                  << "It must sit in the same directory as talbot.exe.\n";
+                  << "It must sit in the same directory as talbot.\n";
         return 1;
     }
 
@@ -644,7 +645,7 @@ int main(int argc, char* argv[]) {
         std::time_t now_time = std::chrono::system_clock::to_time_t(now);
         std::tm* lt = std::localtime(&now_time);
         std::ostringstream time_oss;
-        time_oss << std::put_time(lt, "%Y-%m-%d_%H-%M-%S") << "_pid" << GetCurrentProcessId();
+        time_oss << std::put_time(lt, "%Y-%m-%d_%H-%M-%S") << "_pid" << getpid();
         run_log_dir = cfg.base_log_dir + "/" + time_oss.str();
         fs::create_directories(run_log_dir);
     }
@@ -656,8 +657,8 @@ int main(int argc, char* argv[]) {
     main_logger.log("INFO", "Engine: " + cfg.engine_path);
 
     if (!cfg.main_cores.empty()) {
-        DWORD_PTR m = mask_from_cores(cfg.main_cores);
-        if (m != 0) SetThreadAffinityMask(GetCurrentThread(), m);
+        cpu_set_t cpuset = set_from_cores(cfg.main_cores);
+        sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
     }
 
     {
@@ -769,11 +770,11 @@ int main(int argc, char* argv[]) {
     // search_worker.contempt feeds ActionSelector.select_move (via q_to_cp /
     // best_child_q) at the end of the search.
     search_worker.contempt = cfg.selector.contempt;
-    search_worker.core_mask = mask_from_cores(cfg.game_worker_cores);
+    search_worker.core_set = set_from_cores(cfg.game_worker_cores);
 
     search_worker.thread = std::thread([worker = &search_worker]() {
-        if (worker->core_mask != 0)
-            SetThreadAffinityMask(GetCurrentThread(), worker->core_mask);
+        if (CPU_COUNT(&worker->core_set) > 0)
+            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &worker->core_set);
 
         while (true) {
             std::unique_lock<std::mutex> lock(worker->mtx);

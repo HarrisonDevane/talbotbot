@@ -1,5 +1,5 @@
 engine:
-  log_dir: 'D:/Projects/talbot/logs/local_inference'              # Empty = file logging disabled. 'D:/Projects/talbot/logs/local_inference'
+  log_dir: '/home/hdevane/talbotbot/logs/local_inference'         # Empty = file logging disabled. 'D:/Projects/talbot/logs/local_inference'
   log_level: 20                                                   # 10=DEBUG 20=INFO 30=WARNING 40=ERROR 50=CRITICAL
 
 evaluation:

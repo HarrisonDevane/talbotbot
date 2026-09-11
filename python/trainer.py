@@ -16,12 +16,11 @@ import psutil
 import struct
 import traceback
 import threading
-import ctypes
 
 from model import ChessAIModel
 
 class AsyncBatchPrefetcher:
-    def __init__(self, db_path, batch_size, input_planes, board_dim, policy_moves, core_ids, min_memory, max_memory, prefetch_workers, train_dir, lmdb_size, log_level, rotation_interval):
+    def __init__(self, db_path, batch_size, input_planes, board_dim, policy_moves, core_ids, prefetch_workers, train_dir, lmdb_size, log_level, rotation_interval):
         self.ready_queue = mp.Queue(maxsize=3) 
         self.free_queue = mp.Queue(maxsize=3)
         for i in range(3):
@@ -33,8 +32,6 @@ class AsyncBatchPrefetcher:
         self.board_dim = board_dim
         self.policy_moves = policy_moves
         self.core_ids = core_ids
-        self.min_memory = min_memory
-        self.max_memory = max_memory
         self.prefetch_workers = prefetch_workers
         self.train_dir = train_dir
         self.log_level = log_level
@@ -80,22 +77,6 @@ class AsyncBatchPrefetcher:
 
         try:
             psutil.Process().cpu_affinity(self.core_ids)
-
-            from ctypes import wintypes
-            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-            kernel32.GetCurrentProcess.argtypes = []
-            kernel32.SetProcessWorkingSetSizeEx.restype = wintypes.BOOL
-            kernel32.SetProcessWorkingSetSizeEx.argtypes = [
-                wintypes.HANDLE, ctypes.c_size_t, ctypes.c_size_t, wintypes.DWORD
-            ]
-            handle = kernel32.GetCurrentProcess()
-            kernel32.SetProcessWorkingSetSizeEx(
-                handle,
-                ctypes.c_size_t(self.min_memory * 1024**3),
-                ctypes.c_size_t(self.max_memory * 1024**3),
-                ctypes.c_uint(0x00000004),  # QUOTA_LIMITS_HARDWS_MAX_ENABLE
-            )
 
             env = lmdb.open(
                 self.db_path, 
@@ -232,6 +213,10 @@ class TrainTask:
         log_level = self.training_config['logging_level']
         rotation_interval = self.global_config['logging_rotation_steps']
 
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
         # Pass the rotation interval so the prefetcher knows when to switch folders
         self.prefetcher = AsyncBatchPrefetcher(
             db_path=db_path,
@@ -240,8 +225,6 @@ class TrainTask:
             board_dim=self.board_dim,
             policy_moves=self.total_policy_moves,
             core_ids=self.core_pinning['io_reader'],
-            min_memory=self.memory_config['prefetch_worker_working_set_min_gb'],
-            max_memory=self.memory_config['prefetch_worker_working_set_max_gb'],
             prefetch_workers=self.training_config['prefetch_workers'],
             train_dir=train_dir,
             lmdb_size=self.global_config['buffer_size_gb'],
@@ -250,6 +233,7 @@ class TrainTask:
         )
 
         self.model = ChessAIModel(self.model_config).to(self.device)
+        self.model = self.model.to(memory_format=torch.channels_last)
 
         self.optimizer = optim.SGD(
             self.model.parameters(),
@@ -270,6 +254,8 @@ class TrainTask:
         if 'scaler_state_dict' in checkpoint:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
 
+        self.model = torch.compile(self.model, mode="reduce-overhead")
+
     def _setup_logger(self):
         logger = logging.getLogger("TrainTask")
         logger.setLevel(self.training_config['logging_level'])
@@ -287,8 +273,10 @@ class TrainTask:
         return logger
 
     def save_checkpoint(self, path: str):
+        # Access underlying model if compiled, else the model itself
+        model_to_save = self.model._orig_mod if hasattr(self.model, '_orig_mod') else self.model
         torch.save({
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': model_to_save.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scaler_state_dict': self.scaler.state_dict()
         }, path)
@@ -344,7 +332,7 @@ class TrainTask:
 
         shuffle_idx = torch.randperm(valid_idx)
 
-        board_tensors    = t_b[shuffle_idx].to(self.device, non_blocking=True)
+        board_tensors    = t_b[shuffle_idx].to(self.device, non_blocking=True).to(memory_format=torch.channels_last)
         policy_target    = t_p[shuffle_idx].to(self.device, non_blocking=True)
         value_targets    = t_v[shuffle_idx].float().to(self.device, non_blocking=True).flatten()
         true_legal_masks = t_m[shuffle_idx].to(self.device, non_blocking=True)

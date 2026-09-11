@@ -1,9 +1,8 @@
-# Core ML & Quantization (Based on your provided screenshot)
---extra-index-url https://download.pytorch.org/whl/cu130
-torch==2.11.0
-onnx==1.17.0
+# Core ML & Quantization
+--extra-index-url https://download.pytorch.org/whl/cu132
+torch==2.14.0
+onnx>=1.20.1
 onnxscript
-pytorch-quantization --index-url https://pypi.nvidia.com
 
 # Data Handling & Storage
 numpy
@@ -29,4 +28,4 @@ tensorboard
 pillow
 matplotlib
 beautifulsoup4
-setuptools<70
+setuptools

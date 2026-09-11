@@ -1,7 +1,7 @@
-#define NOMINMAX
 #include "io_writer.hpp"
 #include <iostream>
-#include <windows.h> 
+#include <pthread.h>
+#include <sched.h>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -62,8 +62,10 @@ void IOWriter::pack_bits_bool_into(const uint8_t* data, size_t size, std::vector
 
 void IOWriter::run() {
     if (!io_cores.empty()) {
-        DWORD_PTR mask = (static_cast<DWORD_PTR>(1) << io_cores[0]);
-        SetThreadAffinityMask(GetCurrentThread(), mask);
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(io_cores[0], &cpuset);
+        pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
     }
     at::set_num_threads(1);
 

@@ -51,6 +51,12 @@ CONFIG = {
     "GPU_POWER":          True,
     "GPU_CLOCKS":         True,
 
+    # cgroup v2 per-process memory tracking (Linux only, needs cgroup setup
+    # in main_train.py via _launch_in_cgroup / _apply_self_cgroup). Reports
+    # current usage, high/max thresholds, anon vs page-cache split, and
+    # high-event / OOM-kill counts per tracked cgroup.
+    "CGROUPS":             True,
+
     # Optional: point this at your replay buffer file or directory to track
     # its size over time (e.g. r"D:/Projects/talbot/train_dir/replay_buffer.bin").
     # Directory paths are walked recursively -- fine for a handful of files,
@@ -58,6 +64,94 @@ CONFIG = {
     "TRACK_BUFFER_SIZE": False,
     "BUFFER_PATH":         None,
 }
+
+
+# =============================================================================
+# cgroup v2 stats -- per-cgroup memory usage including page cache breakdown.
+# Only meaningful when the process is running under cgroup v2 with per-process
+# sub-cgroups created (see main_train.py's _launch_in_cgroup / _apply_self_cgroup).
+# Silently returns empty dict if cgroups aren't available.
+# =============================================================================
+CGROUP_ROOT = "/sys/fs/cgroup"
+TRACKED_CGROUPS = ["talbot_trainer", "talbot_data_generator"]
+
+
+def _read_cgroup_file(path):
+    """Read a single value from a cgroup file. Returns None on any error."""
+    try:
+        with open(path, "r") as f:
+            return f.read().strip()
+    except (OSError, IOError):
+        return None
+
+
+def get_cgroup_stats(cgroup_names):
+    """
+    Returns dict[cgroup_name -> dict] with keys:
+      current_mb, high_mb, max_mb, anon_mb, file_mb, high_events, oom_kills
+    Missing values are absent from the inner dict. Absent cgroups are omitted
+    from the outer dict.
+    """
+    result = {}
+    for name in cgroup_names:
+        base = os.path.join(CGROUP_ROOT, name)
+        if not os.path.isdir(base):
+            continue
+        d = {}
+
+        cur = _read_cgroup_file(os.path.join(base, "memory.current"))
+        if cur is not None:
+            try:
+                d["current_mb"] = int(cur) / (1024 * 1024)
+            except ValueError:
+                pass
+
+        for field, key in [("memory.high", "high_mb"), ("memory.max", "max_mb")]:
+            v = _read_cgroup_file(os.path.join(base, field))
+            if v is not None and v != "max":  # "max" = unlimited
+                try:
+                    d[key] = int(v) / (1024 * 1024)
+                except ValueError:
+                    pass
+
+        stat = _read_cgroup_file(os.path.join(base, "memory.stat"))
+        if stat:
+            for line in stat.splitlines():
+                parts = line.split()
+                if len(parts) != 2:
+                    continue
+                k, v = parts
+                if k == "anon":
+                    try:
+                        d["anon_mb"] = int(v) / (1024 * 1024)
+                    except ValueError:
+                        pass
+                elif k == "file":
+                    try:
+                        d["file_mb"] = int(v) / (1024 * 1024)
+                    except ValueError:
+                        pass
+
+        events = _read_cgroup_file(os.path.join(base, "memory.events"))
+        if events:
+            for line in events.splitlines():
+                parts = line.split()
+                if len(parts) != 2:
+                    continue
+                k, v = parts
+                if k == "high":
+                    try:
+                        d["high_events"] = int(v)
+                    except ValueError:
+                        pass
+                elif k == "oom_kill":
+                    try:
+                        d["oom_kills"] = int(v)
+                    except ValueError:
+                        pass
+
+        result[name] = d
+    return result
 
 
 # =============================================================================
@@ -321,6 +415,27 @@ def build_log_message(config, num_gpus, gpu_mode, ctx):
             if bits:
                 parts.append(f"GPU{i}: " + " ".join(bits))
 
+    if config.get("CGROUPS"):
+        cg_stats = ctx.get("cgroup_stats", {})
+        for name, d in cg_stats.items():
+            bits = []
+            if "current_mb" in d:
+                bits.append(f"Cur={d['current_mb']:.0f}MB")
+            if "high_mb" in d:
+                bits.append(f"High={d['high_mb']:.0f}MB")
+            if "max_mb" in d:
+                bits.append(f"Max={d['max_mb']:.0f}MB")
+            if "anon_mb" in d:
+                bits.append(f"Anon={d['anon_mb']:.0f}MB")
+            if "file_mb" in d:
+                bits.append(f"Cache={d['file_mb']:.0f}MB")
+            if d.get("high_events", 0) > 0:
+                bits.append(f"HighEvt={d['high_events']}")
+            if d.get("oom_kills", 0) > 0:
+                bits.append(f"OOM={d['oom_kills']}")
+            if bits:
+                parts.append(f"CG[{name}]: " + " ".join(bits))
+
     if config["TRACK_BUFFER_SIZE"] and config["BUFFER_PATH"]:
         size = get_path_size_mb(config["BUFFER_PATH"])
         parts.append(f"Buffer={size:.2f}MB" if size is not None else "Buffer=N/A")
@@ -362,6 +477,15 @@ def monitor_process(interval=60.0, train_dir=None, target_pid=None, config=None)
         logger.info(f"GPU monitoring enabled via {gpu_mode} ({num_gpus} GPU(s) detected). "
                     f"Utilization/temp/power/clocks are whole-GPU (all processes); "
                     f"GPU_ProcMem is attributed to the tracked process tree specifically.")
+
+    if config.get("CGROUPS"):
+        found = [n for n in TRACKED_CGROUPS if os.path.isdir(os.path.join(CGROUP_ROOT, n))]
+        if found:
+            logger.info(f"cgroup v2 tracking enabled for: {', '.join(found)}")
+        else:
+            logger.warning(f"CGROUPS enabled but none of {TRACKED_CGROUPS} exist under {CGROUP_ROOT}. "
+                           f"cgroup stats will be skipped (check that main_train.py created them and that "
+                           f"the container has --cgroupns=host --privileged).")
 
     if config["TRACK_BUFFER_SIZE"] and not config["BUFFER_PATH"]:
         logger.warning("TRACK_BUFFER_SIZE is on but BUFFER_PATH is not set -- buffer size will be skipped.")
@@ -481,6 +605,9 @@ def monitor_process(interval=60.0, train_dir=None, target_pid=None, config=None)
                 ctx["gpu_stats"] = get_gpu_stats(gpu_mode, gpu_ctx, config)
                 if config["GPU_PROCESS_MEM"]:
                     ctx["gpu_proc_mem"] = get_gpu_process_mem(gpu_mode, gpu_ctx, set(tracked.keys()))
+
+            if config.get("CGROUPS"):
+                ctx["cgroup_stats"] = get_cgroup_stats(TRACKED_CGROUPS)
 
             message = build_log_message(config, num_gpus, gpu_mode, ctx)
             logger.info(message)

@@ -1,4 +1,3 @@
-#define NOMINMAX
 #include "data_generator.hpp"
 #include "logger.hpp"
 #include <iostream>
@@ -7,7 +6,8 @@
 #include "board_utils.hpp"
 #include "pgn_writer.hpp"
 #include <sstream>
-#include <windows.h> 
+#include <pthread.h>
+#include <sched.h>
 #include <cmath>
 #include <random>
 
@@ -89,7 +89,10 @@ void DataGenerator::stop() {
 void DataGenerator::worker_main(int logical_idx, int core_id) {
     int worker_id = logical_idx + 1;
     int core_index = logical_idx / config.workers_per_core;
-    SetThreadAffinityMask(GetCurrentThread(), (static_cast<DWORD_PTR>(1) << core_id));
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
     at::set_num_threads(1);
 
     uint64_t local_step_cache = current_step.load(std::memory_order_relaxed);

@@ -1,8 +1,8 @@
 global:
-  model_file: 'D:/Projects/talbot/config/model.yaml'             # Path to the model architecture config
-  checkpoint_dir: 'D:/Projects/talbot/train_dir/models/checkpoints'  # Folder containing the .pth files in tournament_models
-  log_dir: 'D:/Projects/talbot/logs/local_tournament'            # Directory for all tournament run logs
-  exe_path: './build/Release/talbot_tournament.exe'                    # Path to the compiled play engine
+  model_file: '/home/hdevane/talbotbot/config/model.yaml'        # Path to the model architecture config
+  checkpoint_dir: '/home/hdevane/talbotbot/train_dir/models/checkpoints'  # Folder containing the .pth files in tournament_models
+  log_dir: '/home/hdevane/talbotbot/logs/local_tournament'       # Directory for all tournament run logs
+  exe_path: './build/Release/talbot_tournament.exe'              # Path to the compiled play engine
   main_logging_level: 20                                         # Logging level for the Tournament Orchestrator
 
 evaluation:
@@ -46,7 +46,7 @@ selection:
 tournament:
   workers_per_core: 5                                           # Number of game workers to pin to each core
   games_per_match: 100                                          # Total games per pairing (must be even; each opening played twice)
-  opening_file: 'D:/Projects/talbot/data/opening_pgn/8moves_v3.pgn'  # Path to the PGN file of opening lines
+  opening_file: '/home/hdevane/talbotbot/data/opening_pgn/8moves_v3.pgn'  # Path to the PGN file of opening lines
   max_ply_length: 400                                            # Hard cutoff in half-moves before a game is forced drawn
   mode: fixed
   worker_logging_level: 20                                       # Logging level for MCTS game worker: 20 = per move analysis, 50 = only PGN

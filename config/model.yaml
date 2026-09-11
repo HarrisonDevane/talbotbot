@@ -1,5 +1,5 @@
 model:
-  filters: 64
+  filters: 60
   resblocks: 6
   se_channels: 32
   value_channels: 32

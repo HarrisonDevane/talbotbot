@@ -12,7 +12,6 @@ import struct
 import lmdb
 import warnings
 import json
-import ctypes
 
 from trainer import TrainTask
 from model import ChessAIModel, fuse_bn_for_export
@@ -39,26 +38,6 @@ class RLOrchestrator:
         with open(MODEL_FILE, 'r') as f:
             self.model_config = yaml.safe_load(f)
 
-        # Limitm memory size
-        from ctypes import wintypes
-        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-        kernel32.GetCurrentProcess.argtypes = []
-        kernel32.SetProcessWorkingSetSizeEx.restype = wintypes.BOOL
-        kernel32.SetProcessWorkingSetSizeEx.argtypes = [
-            wintypes.HANDLE, ctypes.c_size_t, ctypes.c_size_t, wintypes.DWORD
-        ]
-        handle = kernel32.GetCurrentProcess()
-        kernel32.SetProcessWorkingSetSizeEx(
-            handle,
-            ctypes.c_size_t(self.params_config['memory']['trainer_working_set_min_gb'] * 1024**3),
-            ctypes.c_size_t(self.params_config['memory']['trainer_working_set_max_gb'] * 1024**3),
-            ctypes.c_uint(0x00000004),  # QUOTA_LIMITS_HARDWS_MAX_ENABLE
-        )
-
-        # Resolve train_dir. Relative paths are anchored at project root so
-        # config files remain portable; absolute paths (e.g. a scratch disk)
-        # are respected as-is.
         train_dir_cfg = self.params_config['global']['train_dir']
         if os.path.isabs(train_dir_cfg):
             self.train_dir = train_dir_cfg
@@ -113,6 +92,12 @@ class RLOrchestrator:
             fmt="[%(asctime)s] %(message)s"
         )
 
+        self._apply_self_cgroup(
+            "talbot_trainer",
+            self.params_config['memory']['trainer_high_gb'],
+            self.params_config['memory']['trainer_max_gb'],
+        )
+
         self.model_pth = os.path.join(self.train_dir, "models", "model.pth")
         self.train_task = None
         self.next_build_step = self._calculate_next_build_step(self.current_step)
@@ -122,12 +107,6 @@ class RLOrchestrator:
                 self._create_seed_models()
 
         self._export_to_cpp()
-
-    def _apply_working_set_cap(self):
-        mem_cfg = self.params_config.get('memory', {})
-        min_gb = mem_cfg['']
-        max_gb = mem_cfg['trainer_working_set_max_gb']
-
 
     def _initialize_empty_lmdb(self):
         cpp_blob = struct.pack(CPP_STATE_FMT, 0, 0, 0.0, 0, 0, 0)
@@ -147,7 +126,43 @@ class RLOrchestrator:
     def _calculate_next_build_step(self, current_target_step):
         build_steps = self.params_config['global']['build_steps']
         return ((current_target_step // build_steps) + 1) * build_steps
-                
+
+    def _launch_in_cgroup(self, cgroup_name, memory_high_gb, memory_max_gb, cmd):
+        """
+        Create a cgroup, apply memory limits, launch the command into it.
+        Returns the Popen object.
+        """
+        cgroup_path = f"/sys/fs/cgroup/{cgroup_name}"
+        os.makedirs(cgroup_path, exist_ok=True)
+        
+        # Enable memory controller (may already be enabled)
+        with open("/sys/fs/cgroup/cgroup.subtree_control", "w") as f:
+            f.write("+memory")
+        
+        # Set limits
+        with open(f"{cgroup_path}/memory.high", "w") as f:
+            f.write(str(memory_high_gb * 1024**3))
+        with open(f"{cgroup_path}/memory.max", "w") as f:
+            f.write(str(memory_max_gb * 1024**3))
+        
+        def _move_to_cgroup():
+            with open(f"{cgroup_path}/cgroup.procs", "w") as f:
+                f.write(str(os.getpid()))
+        
+        return subprocess.Popen(cmd, preexec_fn=_move_to_cgroup)
+
+    def _apply_self_cgroup(self, cgroup_name, high_gb, max_gb):
+        cgroup_path = f"/sys/fs/cgroup/{cgroup_name}"
+        os.makedirs(cgroup_path, exist_ok=True)
+        with open("/sys/fs/cgroup/cgroup.subtree_control", "w") as f:
+            f.write("+memory")
+        with open(f"{cgroup_path}/memory.high", "w") as f:
+            f.write(str(high_gb * 1024**3))
+        with open(f"{cgroup_path}/memory.max", "w") as f:
+            f.write(str(max_gb * 1024**3))
+        with open(f"{cgroup_path}/cgroup.procs", "w") as f:
+            f.write(str(os.getpid()))
+                    
     def _wait_for_trt_engine(self):
         target_step = self._get_lmdb_signal(b"__TRT_EXPORT_SIGNAL")
 
@@ -255,8 +270,9 @@ class RLOrchestrator:
         all_cores = list(range(psutil.cpu_count()))
         proc.cpu_affinity(all_cores)
 
-        engine_exe = os.path.abspath(os.path.join(root_dir, "build", "Release", "talbot_train.exe"))
+        engine_exe = os.path.abspath(os.path.join(root_dir, "build", "talbot_data_generator"))
         self.logger.info(f"Launching C++ Engine: {engine_exe}")
+
         cmd = [
             engine_exe,
             "--train_dir", self.train_dir,
@@ -264,8 +280,13 @@ class RLOrchestrator:
             "--model_file", MODEL_FILE,
             "--db_path", self.buffer_file_path
         ]
-        
-        engine_process = subprocess.Popen(cmd)
+                
+        engine_process = self._launch_in_cgroup(
+            "talbot_data_generator",
+            self.params_config['memory']['data_generator_high_gb'],
+            self.params_config['memory']['data_generator_max_gb'],
+            cmd
+        )
 
         metrics_script = os.path.abspath(os.path.join(current_script_dir, "performance_metrics.py"))
         self.logger.info(f"Launching performance metrics monitor: {metrics_script}")
@@ -287,7 +308,6 @@ class RLOrchestrator:
         )
 
         proc.cpu_affinity(training_cores)
-        proc.nice(psutil.HIGH_PRIORITY_CLASS)
         self.logger.info(f"Python Orchestrator pinned to cores {training_cores}.")
 
         rotation_interval = self.params_config['global']['logging_rotation_steps']

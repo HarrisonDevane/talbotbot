@@ -11,7 +11,7 @@
 using namespace chess;
 
 // --- High-Performance Mapping Lookups ---
-inline int get_sliding_dir_idx(int dr, int df) {
+int get_sliding_dir_idx(int dr, int df) {
     if (dr == -1 && df == 0) return 0;
     if (dr == -1 && df == 1) return 1;
     if (dr == 0  && df == 1) return 2;
@@ -27,7 +27,7 @@ constexpr int SLIDING_DIRS_LIST[8][2] = {
     {-1, 0}, {-1, 1}, {0, 1}, {1, 1}, {1, 0}, {1, -1}, {0, -1}, {-1, -1}
 };
 
-inline int get_knight_offset_idx(int dr, int df) {
+int get_knight_offset_idx(int dr, int df) {
     if (dr == -2 && df == -1) return 0;
     if (dr == -2 && df == 1) return 1;
     if (dr == -1 && df == -2) return 2;
@@ -43,7 +43,7 @@ constexpr int KNIGHT_OFFSETS_LIST[8][2] = {
     {-2, -1}, {-2, 1}, {-1, -2}, {-1, 2}, {1, -2}, {1, 2}, {2, -1}, {2, 1}
 };
 
-inline int get_pawn_promo_move_type_idx(int df) {
+int get_pawn_promo_move_type_idx(int df) {
     if (df == 0) return 0;
     if (df == -1) return 1;
     if (df == 1) return 2;
@@ -352,7 +352,7 @@ Move policy_components_to_move(int from_row_norm, int from_col_norm, int channel
     return Move::NO_MOVE;
 }
 
-inline int policy_components_to_flat_index(int from_row, int from_col, int channel) {
+int policy_components_to_flat_index(int from_row, int from_col, int channel) {
     // Channel-major layout: matches a plain PyTorch conv output (N,73,8,8)
     // flattened as channel*64 + row*8 + col. This lets the model policy head be
     // a plain conv+flatten with no permute.

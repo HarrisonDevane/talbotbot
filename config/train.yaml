@@ -5,11 +5,11 @@ global:
   max_buffer_size: 40000000                                       # Steady-state replay buffer size (~500K games)
   buffer_ramp_steps: 40000                                        # Linear ramp from min -> max buffer size over N steps
   buffer_size_gb: 24                                              # LMDB file size on disk (fixed allocation)
-  build_steps: 500                                                # Rebuild TensorRT engine every N steps (self-play pauses during rebuild)
+  build_steps: 1000                                               # Rebuild TensorRT engine every N steps (self-play pauses during rebuild)
   train_dir: 'train_dir'                                          # Output root: checkpoints, ONNX exports, .engine files
 
 inference:
-  batch_size: 512                                                 # Target GPU batch size; batcher flushes at this size OR after batch_timeout_ms
+  batch_size: 128                                                 # Target GPU batch size; batcher flushes at this size OR after batch_timeout_ms
   batch_size_factor: 32                                           # Shared-RAM slot count = batch_size * this (8192 slots total)
   batch_timeout_ms: 10                                            # If batch not full after this long, dispatch anyway (avoid starving workers)
   logging_interval_sec: 10                                        # Batcher stats interval (throughput, batch fullness, wait times)
@@ -72,12 +72,10 @@ training:
   logging_level: 20                                               # Training loop log level
 
 memory:
-  engine_working_set_min_gb: 4                                    # talbot_train.exe: writer + MCTS ram
-  engine_working_set_max_gb: 8
-  trainer_working_set_min_gb: 2                                   # main_train.py orchestrator process
-  trainer_working_set_max_gb: 4
-  prefetch_worker_working_set_min_gb: 4                           # AsyncBatchPrefetcher subprocess (random-read heavy, needs more headroom)
-  prefetch_worker_working_set_max_gb: 8
+  data_generator_high_gb: 6                                       # talbot_train: soft cap (reclaim starts here)
+  data_generator_max_gb: 8                                        # talbot_train: hard cap (OOM kill above this)
+  trainer_high_gb: 12                                             # main_train.py + AsyncBatchPrefetcher subprocess soft cap (shared)
+  trainer_max_gb: 16                                              # main_train.py + AsyncBatchPrefetcher subprocess hard cap (shared)
 
 core_pinning:
   inference_worker: [13,14,15]                                    # Dedicated cores for batcher filler/dispatcher/collector threads

@@ -1,10 +1,10 @@
 // =============================================================================
 // main_tournament.cpp
 //
-// Entry point for talbot_tournament.exe -- one process, one pairing.
+// Entry point for talbot_tournament -- one process, one pairing.
 //
 // LAUNCH CONTRACT (matches the Python orchestrator's subprocess call):
-//   talbot_tournament.exe --tournament               # ignored flag, kept for compat
+//   talbot_tournament --tournament               # ignored flag, kept for compat
 //                          --config_file  <yaml>
 //                          --model_a      <path>
 //                          --model_b      <path>
@@ -32,9 +32,11 @@
 //   per-worker log files -- for diagnostics.
 // =============================================================================
 
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 #include <iostream>
 #include <fstream>
@@ -67,9 +69,9 @@
 namespace fs = std::filesystem;
 
 // =============================================================================
-// TRT COMPILE (out-of-process, mirrors main_train.cpp)
+// TRT COMPILE (out-of-process, mirrors main_data_generator.cpp})
 //
-// Engine building lives in talbot_trt_compile.exe. This exe finds it next to
+// Engine building lives in talbot_trt_compile. This exe finds it next to
 // itself (same build dir) and shells out synchronously. The engine is written
 // to disk at a deterministic path derived from the ONNX path; if it already
 // exists we skip the build. Python's tournament orchestrator puts ONNX +
@@ -78,14 +80,14 @@ namespace fs = std::filesystem;
 // hit cache).
 // =============================================================================
 static std::string resolve_trt_compile_exe() {
-    char buf[MAX_PATH];
-    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n == 0 || n == MAX_PATH) return "talbot_trt_compile.exe";
-    return (fs::path(std::string(buf, n)).parent_path()
-            / "talbot_trt_compile.exe").string();
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return "talbot_trt_compile";
+    buf[n] = '\0';
+    return (fs::path(buf).parent_path() / "talbot_trt_compile").string();
 }
 
-// Run talbot_trt_compile.exe synchronously. Returns exit code, -1 on launch
+// Run talbot_trt_compile synchronously. Returns exit code, -1 on launch
 // failure. Copies the CreateProcess pattern from main_train.cpp verbatim so
 // there is one source of truth for how we launch that exe.
 static int run_trt_compile(const std::string& compile_exe,
@@ -93,50 +95,31 @@ static int run_trt_compile(const std::string& compile_exe,
                            const std::string& engine_path,
                            int max_batch,
                            int input_planes) {
-    std::string cmd = "\"" + compile_exe + "\""
-                    + " \"" + onnx_path + "\""
-                    + " \"" + engine_path + "\""
-                    + " --input-planes " + std::to_string(input_planes)
-                    + " --max-batch "    + std::to_string(max_batch)
-                    + " --force";
+    pid_t pid = fork();
+    if (pid < 0) return -1;
 
-    SECURITY_ATTRIBUTES sa = {};
-    sa.nLength        = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    HANDLE null_out = CreateFileA("NUL", GENERIC_WRITE,
-                                  FILE_SHARE_WRITE | FILE_SHARE_READ,
-                                  &sa, OPEN_EXISTING, 0, nullptr);
-    if (null_out == INVALID_HANDLE_VALUE) return -1;
+    if (pid == 0) {
+        int null_fd = open("/dev/null", O_WRONLY);
+        if (null_fd >= 0) {
+            dup2(null_fd, STDOUT_FILENO);
+            close(null_fd);
+        }
 
-    STARTUPINFOA si = {};
-    si.cb         = sizeof(si);
-    si.dwFlags    = STARTF_USESTDHANDLES;
-    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = null_out;
-    si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
-    PROCESS_INFORMATION pi = {};
+        std::string batch_str  = std::to_string(max_batch);
+        std::string planes_str = std::to_string(input_planes);
 
-    std::vector<char> mutable_cmd(cmd.begin(), cmd.end());
-    mutable_cmd.push_back('\0');
-
-    BOOL ok = CreateProcessA(
-        nullptr, mutable_cmd.data(),
-        nullptr, nullptr,
-        TRUE, 0,
-        nullptr, nullptr,
-        &si, &pi);
-    if (!ok) {
-        CloseHandle(null_out);
-        return -1;
+        execl(compile_exe.c_str(), compile_exe.c_str(),
+              onnx_path.c_str(), engine_path.c_str(),
+              "--input-planes", planes_str.c_str(),
+              "--max-batch",    batch_str.c_str(),
+              "--force", (char*)nullptr);
+        _exit(127);
     }
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD exit_code = 0;
-    GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    CloseHandle(null_out);
-    return static_cast<int>(exit_code);
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
 }
 
 // Ensure an engine file exists for the given ONNX. Returns the engine path,
@@ -166,7 +149,7 @@ static std::string ensure_engine(const std::string& onnx_path,
     const int rc = run_trt_compile(compile_exe, onnx_path, engine_path.string(),
                                     max_batch, input_planes);
     if (rc != 0) {
-        logger.log("CRITICAL", "talbot_trt_compile.exe failed with exit code " +
+        logger.log("CRITICAL", "talbot_trt_compile failed with exit code " +
                                std::to_string(rc) + " (onnx=" + onnx_path + ")");
         return "";
     }
@@ -483,9 +466,10 @@ int main(int argc, char* argv[]) {
 
     // Pin main
     if (!cfg.main_cores.empty()) {
-        DWORD_PTR m = 0;
-        for (int c : cfg.main_cores) if (c >= 0 && c < 64) m |= (DWORD_PTR{1} << c);
-        if (m) SetThreadAffinityMask(GetCurrentThread(), m);
+        cpu_set_t s;
+        CPU_ZERO(&s);
+        for (int c : cfg.main_cores) if (c >= 0 && c < CPU_SETSIZE) CPU_SET(c, &s);
+        if (CPU_COUNT(&s) > 0) pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &s);
     }
 
     // Tablebase --------------------------------------------------------------
@@ -560,7 +544,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Ensure TRT engines exist -----------------------------------------------
-    // Shells out to talbot_trt_compile.exe if the .engine file isn't already
+    // Shells out to talbot_trt_compile if the .engine file isn't already
     // cached alongside the .onnx. Cached hits are cheap (one fs::exists call).
     const std::string engine_a = ensure_engine(
         args.model_a_path, cfg.max_batch_size, cfg.input_planes, main_logger);
@@ -659,8 +643,11 @@ int main(int argc, char* argv[]) {
     for (int w = 0; w < cfg.num_workers; ++w) {
         worker_threads.emplace_back([&, w]() {
             const int core = cfg.game_worker_cores[w / cfg.workers_per_core];
-            if (core >= 0 && core < 64) {
-                SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR{1} << core);
+            if (core >= 0 && core < CPU_SETSIZE) {
+                cpu_set_t s;
+                CPU_ZERO(&s);
+                CPU_SET(core, &s);
+                pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &s);
             }
             at::set_num_threads(1);
 
