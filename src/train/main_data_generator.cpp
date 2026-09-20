@@ -286,6 +286,10 @@ int main(int argc, char* argv[]) {
     uint64_t last_handled_export_step = has_ready ? ready_signal : 0; 
     bool needs_initial_build = false;
 
+    uint64_t halt_signal = 0;
+    read_lmdb_signal(lmdb_env, shared_dbi, "__TRT_HALT_SIGNAL", halt_signal);
+    uint64_t last_handled_halt = halt_signal;
+
     if (has_export) {
         if (!has_ready || ready_signal < export_signal) {
             main_logger.log("INFO", "Export signal (" + std::to_string(export_signal) + 
@@ -300,7 +304,7 @@ int main(int argc, char* argv[]) {
 
     if (needs_initial_build) {
         main_logger.log("INFO",
-            "[BUILD] TensorRT is cooking. Terminal will be silent for ~60s...");
+            "[BUILD] TensorRT is cooking.");
         // Initial build only needs the .engine file on disk; the batcher will
         // pick it up when it constructs below. We don't need the bytes here.
         int rc = run_trt_compile(trt_compile_exe, onnx_path, engine_path,
@@ -379,6 +383,26 @@ int main(int argc, char* argv[]) {
         }
         mdb_txn_commit(txn);
 
+        if (read_lmdb_signal(lmdb_env, shared_dbi, "__TRT_HALT_SIGNAL", halt_signal)) {
+            if (halt_signal > last_handled_halt && !trt_update_in_progress.load()) {
+                last_handled_halt = halt_signal;
+
+                main_logger.log("INFO", "Halt signal received. Initiating Synchronous Pipeline Drain...");
+                batcher.request_pause();
+
+                while (!batcher.is_fully_paused() && !global_stop_event.load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+
+                if (global_stop_event.load()) {
+                    batcher.cancel_pause();
+                    continue;
+                }
+
+                main_logger.log("INFO", "Pipeline drained. Awaiting Python export...");
+            }
+        }
+
         uint64_t exported_step = 0;
         if (read_lmdb_signal(lmdb_env, shared_dbi, "__TRT_EXPORT_SIGNAL", exported_step)) {
             if (exported_step > last_handled_export_step && !trt_update_in_progress.load()) {
@@ -398,23 +422,6 @@ int main(int argc, char* argv[]) {
                     auto start_time = std::chrono::steady_clock::now();
 
                     try {
-                        // Request pause and wait for pipeline drain
-                        main_logger.log("INFO", "Initiating Synchronous Pipeline Drain...");
-                        batcher.request_pause();
-
-                        while (!batcher.is_fully_paused() && !global_stop_event.load()) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                        }
-
-                        if (global_stop_event.load()) {
-                            batcher.cancel_pause();
-                            trt_update_in_progress.store(false);
-                            return;
-                        }
-
-                        main_logger.log("INFO", "Pipeline drained.");
-                        main_logger.log("INFO", "Executing FULL ENGINE REBUILD (this will take ~60s)...");
-
                         // Shell out to talbot_trt_compile.exe. It writes the
                         // engine to disk; we read the bytes back so the
                         // batcher's hot-reload path is unchanged.

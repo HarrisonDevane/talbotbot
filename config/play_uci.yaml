@@ -1,8 +1,6 @@
 engine:
-  log_dir: '/home/hdevane/talbotbot/logs/local_inference'         # Empty = file logging disabled. 'D:/Projects/talbot/logs/local_inference'
+  log_dir: '/app/logs/local_inference'                            # Empty = file logging disabled.
   log_level: 20                                                   # 10=DEBUG 20=INFO 30=WARNING 40=ERROR 50=CRITICAL
-
-evaluation:
 
 inference:
   batch_size: 128                                                 # Max batch size during inference
@@ -16,7 +14,7 @@ mcts:
   virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored
   contempt: 0.0                                                   # Contempt for playing drawing positions
   deficit_eps: 0.2
-  policy_softmax_temp: 2.0
+  policy_softmax_temp: 4.0
   early_stop_q_gap: 0.2
   early_stop_min_visits: 100000
   early_return_on_forced_win: true

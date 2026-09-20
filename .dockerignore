@@ -3,3 +3,8 @@
 build/
 __pycache__/
 venv/
+train_dir/
+backup/
+data/
+Dockerfile
+*.md

@@ -12,7 +12,16 @@ import struct
 import lmdb
 import warnings
 import json
+import numpy as np
+import onnxruntime as ort
 
+from onnxruntime.quantization import (
+    quantize_static, 
+    CalibrationDataReader, 
+    CalibrationMethod,
+    QuantType, 
+    QuantFormat
+)
 from trainer import TrainTask
 from model import ChessAIModel, fuse_bn_for_export
 
@@ -23,6 +32,8 @@ RL_PARAMS_FILE = os.path.abspath(os.path.join(root_dir, "config", "train.yaml"))
 MODEL_FILE = os.path.abspath(os.path.join(root_dir, "config", "model.yaml"))
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"torch.onnx.*")
+logging.getLogger().setLevel(logging.ERROR)
+ort.set_default_logger_severity(3)
 
 # Format matching the C++ structs
 CPP_STATE_FMT = 'QQdQQQ'  
@@ -106,8 +117,6 @@ class RLOrchestrator:
             if not os.path.exists(self.model_pth):
                 self._create_seed_models()
 
-        self._export_to_cpp()
-
     def _initialize_empty_lmdb(self):
         cpp_blob = struct.pack(CPP_STATE_FMT, 0, 0, 0.0, 0, 0, 0)
         py_blob = struct.pack(PY_STATE_FMT, 0, 0.0)
@@ -124,7 +133,9 @@ class RLOrchestrator:
             return None
         
     def _calculate_next_build_step(self, current_target_step):
-        build_steps = self.params_config['global']['build_steps']
+        if current_target_step == 0:
+            return int(self.params_config['global']['first_build_steps'])
+        build_steps = int(self.params_config['global']['build_steps'])
         return ((current_target_step // build_steps) + 1) * build_steps
 
     def _launch_in_cgroup(self, cgroup_name, memory_high_gb, memory_max_gb, cmd):
@@ -424,45 +435,171 @@ class RLOrchestrator:
             
 
     def _export_to_cpp(self):
-        checkpoint = torch.load(self.model_pth, map_location='cpu', weights_only=True)
-        model = ChessAIModel(self.model_config)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model.eval()
-        
-        model = fuse_bn_for_export(model)
-        model = model.cuda().half() 
-
-        dummy_input = torch.zeros(
-            1, 
-            self.model_config['model']['input_planes'], 
-            self.model_config['model']['board_dim'], 
-            self.model_config['model']['board_dim'], 
-            dtype=torch.float16
-        ).cuda()
-
+        with self.env.begin(write=True) as txn:
+            current = txn.get(b"__TRT_HALT_SIGNAL")
+            prev = struct.unpack('Q', current)[0] if current else 0
+            txn.put(b"__TRT_HALT_SIGNAL", struct.pack('Q', prev + 1))
+            
         onnx_path = self.model_pth.replace(".pth", ".onnx")
-        
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=DeprecationWarning)
-            torch.onnx.export(
-                model, 
-                dummy_input, 
-                onnx_path,
-                export_params=True,
-                opset_version=17,
-                do_constant_folding=True,
-                input_names=['input'],
-                output_names=['policy', 'value'],
-                dynamic_axes={'input': {0: 'batch_size'}, 'policy': {0: 'batch_size'}, 'value': {0: 'batch_size'}},
-                dynamo=False
+        target_calib_samples = self.params_config['training']['batch_size']
+
+        # 1. Check LMDB buffer count FIRST
+        with self.env.begin(write=False) as txn:
+            cpp_blob = txn.get(b"__CPP_STATE")
+            actual_count = struct.unpack('QQdQQQ', cpp_blob)[3] if cpp_blob else 0
+
+        # 2. If buffer is too small, export straight to native FP16 (Fast path)
+        if actual_count < target_calib_samples:
+            self.logger.info(f"LMDB buffer has {actual_count} samples (< {target_calib_samples}). Exporting native FP16 model.")
+            
+            checkpoint = torch.load(self.model_pth, map_location='cpu', weights_only=True)
+            model = ChessAIModel(self.model_config)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            model.eval()
+            
+            model = fuse_bn_for_export(model)
+            model = model.cuda().half()
+
+            dummy_input = torch.zeros(
+                1, 
+                self.model_config['model']['input_planes'], 
+                self.model_config['model']['board_dim'], 
+                self.model_config['model']['board_dim'], 
+                dtype=torch.float16
+            ).cuda()
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning)
+                torch.onnx.export(
+                    model, 
+                    dummy_input, 
+                    onnx_path,
+                    export_params=True,
+                    opset_version=17,
+                    do_constant_folding=True,
+                    input_names=['input'],
+                    output_names=['policy', 'value'],
+                    dynamic_axes={'input': {0: 'batch_size'}, 'policy': {0: 'batch_size'}, 'value': {0: 'batch_size'}},
+                    dynamo=False
+                )
+            
+            del model
+            del dummy_input
+            torch.cuda.empty_cache()
+
+        else:
+            # 3. Buffer has enough data: Export FP32 base, then run ONNX static quantization
+            self.logger.info(f"LMDB buffer has {actual_count} samples. Running ONNX PTQ calibration...")
+            
+            checkpoint = torch.load(self.model_pth, map_location='cpu', weights_only=True)
+            model = ChessAIModel(self.model_config)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            model.eval()
+            
+            model = fuse_bn_for_export(model)
+            model = model.cuda()
+
+            # Enforce FP16 I/O boundaries while keeping internals FP32 for the quantizer
+            original_forward = model.forward
+            def trt_export_forward(x):
+                p, v = original_forward(x.float())
+                return p.half(), v.half()
+            model.forward = trt_export_forward
+
+            dummy_input = torch.zeros(
+                1, 
+                self.model_config['model']['input_planes'], 
+                self.model_config['model']['board_dim'], 
+                self.model_config['model']['board_dim'], 
+                dtype=torch.float16
+            ).cuda()
+
+            fp32_onnx_path = onnx_path.replace(".onnx", "_fp32.onnx")
+            
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=DeprecationWarning)
+                torch.onnx.export(
+                    model, 
+                    dummy_input, 
+                    fp32_onnx_path,
+                    export_params=True,
+                    opset_version=17,
+                    do_constant_folding=True,
+                    input_names=['input'],
+                    output_names=['policy', 'value'],
+                    dynamic_axes={'input': {0: 'batch_size'}, 'policy': {0: 'batch_size'}, 'value': {0: 'batch_size'}},
+                    dynamo=False
+                )
+
+            del model
+            del dummy_input
+            torch.cuda.empty_cache()
+
+            TARGET_CALIB_SAMPLES = self.params_config['training']['batch_size']
+            CALIB_BATCH_SIZE = self.params_config['training']['calib_batch_size']
+
+            calib_batches = []
+            total = 0
+            while total < TARGET_CALIB_SAMPLES:
+                slot = self.train_task.prefetcher.ready_queue.get()
+                valid_idx = self.train_task.prefetcher.shm_valid[slot].item()
+
+                full = (
+                    self.train_task.prefetcher.shm_b[slot][:valid_idx]
+                    .numpy()
+                    .astype(np.float16)
+                    .copy()
+                )
+                self.train_task.prefetcher.free_queue.put(slot)
+
+                # Slice the prefetcher batch into calib-sized chunks
+                for start in range(0, valid_idx, CALIB_BATCH_SIZE):
+                    chunk = full[start:start + CALIB_BATCH_SIZE]
+                    calib_batches.append({"input": chunk})
+                    total += chunk.shape[0]
+                    if total >= TARGET_CALIB_SAMPLES:
+                        break
+
+            self.logger.info(
+                f"Collected {total} samples across {len(calib_batches)} batches "
+                f"({CALIB_BATCH_SIZE} per batch) for calibration."
             )
-        
-        self.logger.info(f"Stable FP16 ONNX export successful: {onnx_path}")
 
-        del model
-        del dummy_input
-        torch.cuda.empty_cache()
+            class LMDBCalibrationDataReader(CalibrationDataReader):
+                def __init__(self, batches):
+                    self.enum_data = iter(batches)
+                def get_next(self):
+                    return next(self.enum_data, None)
 
+            data_reader = LMDBCalibrationDataReader(calib_batches)
+            nodes_to_exclude = ['policy_conv1', 'policy_conv2', 'value_conv', 'value_fc1', 'value_fc2']
+
+            extra_options = {
+                "WeightSymmetric": True,
+                "ActivationSymmetric": True,
+                "QuantizeBias": False
+            }
+
+            quantize_static(
+                model_input=fp32_onnx_path,
+                model_output=onnx_path,
+                calibration_data_reader=data_reader,
+                quant_format=QuantFormat.QDQ,
+                calibrate_method=CalibrationMethod.MinMax,
+                per_channel=True,
+                weight_type=QuantType.QInt8,
+                activation_type=QuantType.QInt8,
+                nodes_to_exclude=nodes_to_exclude,
+                calibration_providers=["CUDAExecutionProvider"],
+                extra_options=extra_options
+            )
+
+            if os.path.exists(fp32_onnx_path):
+                os.remove(fp32_onnx_path)
+
+            self.logger.info(f"INT8 QDQ ONNX export successful: {onnx_path}")
+
+        # 4. Signal completion
         with self.env.begin(write=True) as txn:
             current = txn.get(b"__TRT_EXPORT_SIGNAL")
             prev = struct.unpack('Q', current)[0] if current else 0

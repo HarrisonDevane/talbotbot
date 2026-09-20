@@ -67,7 +67,6 @@ build/*
 *.engine
 *.onnx
 train_dir/*
-backup_dir/*
-python/plot_rl_metrics.py
-python/plot_tournament_metrics.py
+backup/*
+python/plot_training.py
 env/dev.env

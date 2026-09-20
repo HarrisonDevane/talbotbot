@@ -2,7 +2,7 @@
 --extra-index-url https://download.pytorch.org/whl/cu132
 torch==2.14.0
 onnx>=1.20.1
-onnxscript
+onnxruntime-gpu
 
 # Data Handling & Storage
 numpy

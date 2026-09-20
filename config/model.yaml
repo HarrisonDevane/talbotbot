@@ -1,7 +1,7 @@
 model:
-  filters: 60
-  resblocks: 6
-  se_channels: 32
+  filters: 192
+  resblocks: 15
+  se_channels: 96
   value_channels: 32
   value_fc_hidden: 128
   policy_channels: 73
