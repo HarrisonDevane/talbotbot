@@ -45,12 +45,6 @@ PgnConfig PgnConfig::annotated() {
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
-int q_to_cp(double q) {
-    // Lc0 mapping. Sharp near |q|=1, roughly linear near 0.
-    q = std::clamp(q, -0.999, 0.999);
-    return static_cast<int>(std::round(111.7 * std::tan(1.5620688421 * q)));
-}
-
 std::string today_utc_date() {
     std::time_t now = std::time(nullptr);
     std::tm tm_utc{};

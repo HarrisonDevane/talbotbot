@@ -21,10 +21,11 @@ DataGenerator::DataGenerator(
     std::vector<torch::Tensor>& in_buffer, std::vector<torch::Tensor>& p_buffer, std::vector<torch::Tensor>& v_buffer,
     ThreadSafeQueue<int>& free_slots, ThreadSafeQueue<CompletedGame>& completed_games_queue,
     int start_game_id, std::atomic<uint64_t>& step_ref
-) : main_logger(logger), inference_queue(i_queue), result_queues(r_queues),
+) : game_counter(start_game_id), interval_games(0), interval_samples(0),
+    main_logger(logger), stop_event(false), current_step(step_ref),
+    inference_queue(i_queue), result_queues(r_queues),
     shared_input_buffer(in_buffer), shared_policy_buffer(p_buffer), shared_value_buffer(v_buffer),
-    buffer_free_slots(free_slots), completed_games_queue(completed_games_queue),
-    stop_event(false), game_counter(start_game_id), interval_games(0), interval_samples(0), current_step(step_ref)
+    buffer_free_slots(free_slots), completed_games_queue(completed_games_queue)
 {
     config.num_cores = core_cfg["game_worker"].size();
     config.workers_per_core = data_gen_cfg["workers_per_core"].as<int>();
@@ -50,9 +51,6 @@ DataGenerator::DataGenerator(
     model_config.board_dim = model_cfg["model"]["board_dim"].as<int>();
     model_config.policy_moves = model_cfg["model"]["total_policy_moves"].as<int>();
 
-    // Single loader populates both configs. Shared contempt/draw_cutoff
-    // fields cannot drift; adding a new mcts or selection knob is a one-line
-    // change in load_configs() that both training and UCI pick up.
     LoadedConfigs loaded = load_configs(mcts_cfg, sel_cfg, /*require_gumbel_m=*/true);
     mcts_config     = loaded.mcts;
     selector_config = loaded.selector;

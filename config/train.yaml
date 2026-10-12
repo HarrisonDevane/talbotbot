@@ -29,11 +29,14 @@ data_generation:
   io_logging_level: 20                                            # LMDB writer log level
 
 mcts:
-  worker_minibatch_size: 16                                       # Max positions a single worker sends to the batcher per submission
+  worker_minibatch_size: 4                                        # Max positions a single worker sends to the batcher per submission
   virtual_loss: 0.3                                               # Penalty on in-flight leaf's ancestors; acts as regulariser in single-worker-per-tree design
   contempt: 0.0                                                   # Draw value from side-to-move's perspective (0 = neutral)
-  deficit_eps: 0.0                                                # Non-root selection floor against RAW PRIOR (not uniform); 0 = pure deficit rule
+  explore_c_root: 0.0                                             # Exploration bonus coefficient at depth 0
+  explore_c_decay: 0.0                                            # Per-ply multiplier on the exploration coefficient
+  explore_c_min: 0.00                                             # Floor on the exploration coefficient  
   policy_softmax_temp: 1.0                                        # Softens/sharpens raw policy logits before use in selection (1.0 = no change)
+  gumbel_sigma_cap: 100.0                                         # Cap on max_visits in sigma: sigma = (c_visit + min(max_visits, cap)) * c_scale
   gumbel_c_visit: 50.0                                            # Sigma offset: sigma = (c_visit + max_visits) * c_scale
   gumbel_c_scale: 1.0                                             # Sigma multiplicative gain
   gumbel_noise: 1.0                                               # Scale of Gumbel noise added to raw prior logits at root
@@ -51,6 +54,7 @@ selection:
   temperature_ply_cutoff: 30                                      # Temperature sampling applies for first N plies; deterministic after
   temperature_q_decay: 0.1                                        # T in LCB-filtered visit sampling: weight = visits * exp(-q_drop / T)
   draw_cutoff: 0.0                                                # If best non-forced Q <= this AND draw available, take the draw
+  draw_min_visit_share: 0.25                                      # Draw-line vs best move: each needs >= this share of the leader's visits for Q vs draw_cutoff to decide; else the better-visited one wins
   resignation_probability: 0.9                                    # Per-game probability resignation is enabled (10% play losses to mate for calibration)
   resignation_cutoff: -0.80                                       # Q threshold below which resignation-enabled game gives up
 
@@ -81,7 +85,7 @@ memory:
 
 core_pinning:
   inference_worker: [13,14,15]                                    # Dedicated cores for batcher filler/dispatcher/collector threads
-  game_worker: [0,1,2,3,4,5,6,7]                                  # Self-play worker cores; total workers = len * workers_per_core
+  game_worker: [0,1,2,3,4,5,6,7,16,17,18]                         # Self-play worker cores; total workers = len * workers_per_core
   data_generator: [12]                                            # Main orchestrator thread (data generator loop, LMDB coordinator)
   io_writer: [12]                                                 # LMDB writer thread
   io_reader: [10,11]                                              # Prefetch worker cores for async LMDB reads

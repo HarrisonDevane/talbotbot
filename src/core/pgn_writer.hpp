@@ -162,10 +162,5 @@ std::string build_pgn(
 // Helpers
 // -----------------------------------------------------------------------------
 
-// Lc0-style Q -> centipawn mapping. Q in [-1, 1]; cp is signed centipawns.
-// This is one convention among several; if you need Stockfish-scale or a
-// different mapping, do the conversion yourself before setting annotation.cp.
-int q_to_cp(double q);
-
 // "yyyy.mm.dd" of the current UTC date. Used when PgnHeader::date is empty.
 std::string today_utc_date();

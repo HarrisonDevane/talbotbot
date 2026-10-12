@@ -2,6 +2,8 @@
 
 #include <vector>
 #include "chess.hpp"
+#include <cmath>
+#include <algorithm>
 
 // --- Core Constants ---
 constexpr int BOARD_DIM = 8;
@@ -31,6 +33,8 @@ void board_to_tensor(const chess::Board& board, const std::vector<chess::Board>&
 
 // Creates a boolean mask of valid moves aligned with the 4672-length policy vector
 void get_legal_move_mask(const chess::Board& board, bool* mask_out);
+
+int q_to_cp(double q);
 
 // Maps a list of probabilities to the global 4672-length policy vector
 void map_policy_to_global_vector(const chess::Movelist& moves, const float* probs, const chess::Board& board, float* policy_vector_out);

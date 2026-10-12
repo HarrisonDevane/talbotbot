@@ -43,26 +43,14 @@ struct MCTSEdge {
     // noise: 0 for non-root descendants during selection; root's edges pull
     // their noise from MCTSEngine::root_gumbel_noise indexed by edge slot
     // (edge - root->first_edge).
-    double calculate_gumbel_score(double contempt, double gumbel_c_visit,
-                                  double gumbel_c_scale, double max_visits,
+    double calculate_gumbel_score(double contempt, double sigma,
                                   double v_mix, double noise) const;
 };
 
 // -----------------------------------------------------------------------------
-// MCTSNode -- 48 bytes. Allocated lazily by selection when it first descends
+// MCTSNode -- 56 bytes. Allocated lazily by selection when it first descends
 // into an edge.
 // -----------------------------------------------------------------------------
-//
-// Size history:
-//   ~136 B  original (doubles + std::optional + bools)
-//     72 B  first trim (float sums, packed flags, sentinel-tagged outcome)
-//     56 B  second trim (raw_l derived, gumbel noise/score moved off-node)
-//     48 B  this pass: move, policy_flat_index, and raw_logit moved to
-//           MCTSEdge; first_child renamed to first_edge (still 8 B ptr).
-//
-// The three fields removed here are precisely what an unvisited child needed.
-// Under the new scheme unvisited children have no node at all, so those
-// fields find their permanent home on the edge instead.
 //
 // Invariants worth stating explicitly:
 //   * A node is only allocated when selection descends into an edge. Virtual

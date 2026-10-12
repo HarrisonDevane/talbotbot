@@ -12,8 +12,10 @@ import struct
 import lmdb
 import warnings
 import json
+import gc
 import numpy as np
 import onnxruntime as ort
+import onnx
 
 from onnxruntime.quantization import (
     quantize_static, 
@@ -38,6 +40,23 @@ ort.set_default_logger_severity(3)
 # Format matching the C++ structs
 CPP_STATE_FMT = 'QQdQQQ'  
 PY_STATE_FMT = 'Qd'       
+
+def head_node_names(graph, entry_prefixes=("/policy_conv1/", "/value_conv/")):
+    """All ONNX nodes downstream of the policy/value head entry points."""
+    consumers = {}
+    for n in graph.node:
+        for t in n.input:
+            consumers.setdefault(t, []).append(n)
+    stack = [n for n in graph.node if n.name.startswith(entry_prefixes)]
+    seen = set()
+    while stack:
+        n = stack.pop()
+        if n.name in seen:
+            continue
+        seen.add(n.name)
+        for t in n.output:
+            stack.extend(consumers.get(t, []))
+    return sorted(seen)
 
 class RLOrchestrator:
     def __init__(self):
@@ -439,7 +458,7 @@ class RLOrchestrator:
             current = txn.get(b"__TRT_HALT_SIGNAL")
             prev = struct.unpack('Q', current)[0] if current else 0
             txn.put(b"__TRT_HALT_SIGNAL", struct.pack('Q', prev + 1))
-            
+
         onnx_path = self.model_pth.replace(".pth", ".onnx")
         target_calib_samples = self.params_config['training']['batch_size']
 
@@ -451,28 +470,28 @@ class RLOrchestrator:
         # 2. If buffer is too small, export straight to native FP16 (Fast path)
         if actual_count < target_calib_samples:
             self.logger.info(f"LMDB buffer has {actual_count} samples (< {target_calib_samples}). Exporting native FP16 model.")
-            
+
             checkpoint = torch.load(self.model_pth, map_location='cpu', weights_only=True)
             model = ChessAIModel(self.model_config)
             model.load_state_dict(checkpoint['model_state_dict'])
             model.eval()
-            
+
             model = fuse_bn_for_export(model)
             model = model.cuda().half()
 
             dummy_input = torch.zeros(
-                1, 
-                self.model_config['model']['input_planes'], 
-                self.model_config['model']['board_dim'], 
-                self.model_config['model']['board_dim'], 
+                1,
+                self.model_config['model']['input_planes'],
+                self.model_config['model']['board_dim'],
+                self.model_config['model']['board_dim'],
                 dtype=torch.float16
             ).cuda()
 
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=DeprecationWarning)
                 torch.onnx.export(
-                    model, 
-                    dummy_input, 
+                    model,
+                    dummy_input,
                     onnx_path,
                     export_params=True,
                     opset_version=17,
@@ -482,20 +501,23 @@ class RLOrchestrator:
                     dynamic_axes={'input': {0: 'batch_size'}, 'policy': {0: 'batch_size'}, 'value': {0: 'batch_size'}},
                     dynamo=False
                 )
-            
+
             del model
             del dummy_input
+            del checkpoint
+            gc.collect()
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
         else:
             # 3. Buffer has enough data: Export FP32 base, then run ONNX static quantization
             self.logger.info(f"LMDB buffer has {actual_count} samples. Running ONNX PTQ calibration...")
-            
+
             checkpoint = torch.load(self.model_pth, map_location='cpu', weights_only=True)
             model = ChessAIModel(self.model_config)
             model.load_state_dict(checkpoint['model_state_dict'])
             model.eval()
-            
+
             model = fuse_bn_for_export(model)
             model = model.cuda()
 
@@ -507,20 +529,20 @@ class RLOrchestrator:
             model.forward = trt_export_forward
 
             dummy_input = torch.zeros(
-                1, 
-                self.model_config['model']['input_planes'], 
-                self.model_config['model']['board_dim'], 
-                self.model_config['model']['board_dim'], 
+                1,
+                self.model_config['model']['input_planes'],
+                self.model_config['model']['board_dim'],
+                self.model_config['model']['board_dim'],
                 dtype=torch.float16
             ).cuda()
 
             fp32_onnx_path = onnx_path.replace(".onnx", "_fp32.onnx")
-            
+
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=DeprecationWarning)
                 torch.onnx.export(
-                    model, 
-                    dummy_input, 
+                    model,
+                    dummy_input,
                     fp32_onnx_path,
                     export_params=True,
                     opset_version=17,
@@ -531,8 +553,14 @@ class RLOrchestrator:
                     dynamo=False
                 )
 
+            model.forward = original_forward
+            del trt_export_forward
+            del original_forward
             del model
             del dummy_input
+            del checkpoint
+            gc.collect()
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
             TARGET_CALIB_SAMPLES = self.params_config['training']['batch_size']
@@ -571,8 +599,19 @@ class RLOrchestrator:
                 def get_next(self):
                     return next(self.enum_data, None)
 
+            # Exclude the heads using the REAL ONNX node names (walks forward
+            # from the head entry points, so unnamed Relu/Flatten/Softmax/Cast
+            # nodes inside the heads are excluded too).
+            fp32_graph = onnx.load(fp32_onnx_path).graph
+            nodes_to_exclude = head_node_names(fp32_graph, entry_prefixes=("/policy_conv2/", "/value_conv/"))
+            required = ("/policy_conv2/", "/value_conv/", "/value_fc1/", "/value_fc2/")
+            missing = [p for p in required
+                       if not any(n.startswith(p) for n in nodes_to_exclude)]
+            if missing:
+                self.logger.warning(f"Head nodes not found for exclusion: {missing}")
+            self.logger.info(f"Excluding {len(nodes_to_exclude)} head nodes from INT8.")
+
             data_reader = LMDBCalibrationDataReader(calib_batches)
-            nodes_to_exclude = ['policy_conv1', 'policy_conv2', 'value_conv', 'value_fc1', 'value_fc2']
 
             extra_options = {
                 "WeightSymmetric": True,
@@ -590,12 +629,52 @@ class RLOrchestrator:
                 weight_type=QuantType.QInt8,
                 activation_type=QuantType.QInt8,
                 nodes_to_exclude=nodes_to_exclude,
-                calibration_providers=["CUDAExecutionProvider"],
+                calibration_providers=[("CUDAExecutionProvider", {
+                    "device_id": 0,
+                    "arena_extend_strategy": "kSameAsRequested",
+                    "gpu_mem_limit": 2 * 1024**3,
+                })],
                 extra_options=extra_options
             )
 
+            # Structural check: no Q/DQ nodes should touch the heads.
+            int8_graph = onnx.load(onnx_path).graph
+            head_names = ("policy_conv2", "value_conv", "value_fc1", "value_fc2")
+            bad = [n.name for n in int8_graph.node
+                   if n.op_type in ("QuantizeLinear", "DequantizeLinear")
+                   and any(h in n.name for h in head_names)]
+            if bad:
+                self.logger.warning(f"Head layers still quantized: {bad}")
+
+            # Numeric check: INT8 vs FP32 on a real batch of positions.
+            try:
+                fp32_sess = ort.InferenceSession(fp32_onnx_path, providers=["CPUExecutionProvider"])
+                int8_sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+                x = calib_batches[0]["input"]
+                p32, v32 = fp32_sess.run(None, {"input": x})
+                p8, v8 = int8_sess.run(None, {"input": x})
+                value_err = float(np.abs(v32.astype(np.float32) - v8.astype(np.float32)).max())
+                top1 = float((p32.argmax(1) == p8.argmax(1)).mean())
+                self.logger.info(f"INT8 check: max |dWDL|={value_err:.4f}, policy top-1 agreement={top1:.3f}")
+                if value_err > 0.05 or top1 < 0.95:
+                    self.logger.warning(
+                        f"INT8 export deviates from FP32 (max |dWDL|={value_err:.4f}, "
+                        f"top-1={top1:.3f}); continuing anyway."
+                    )
+                del fp32_sess, int8_sess
+            except Exception as e:
+                self.logger.warning(f"INT8 numeric check failed to run: {e}")
+
             if os.path.exists(fp32_onnx_path):
                 os.remove(fp32_onnx_path)
+
+            del data_reader
+            del calib_batches
+            gc.collect()
+
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
 
             self.logger.info(f"INT8 QDQ ONNX export successful: {onnx_path}")
 

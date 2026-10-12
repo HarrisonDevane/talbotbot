@@ -24,7 +24,7 @@ void ActionSelector::reset_for_new_game() {
 
 SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSEngine* engine) {
     SelectionResult result;
-    
+
     int num_children = root->num_children;
     if (num_children == 0) return result;
 
@@ -78,32 +78,63 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSE
     MCTSEdge* top_edge = nullptr;
     double best_q = -2.0;
 
-    // gscore reads gumbel_c_visit/gumbel_c_scale from the engine directly --
-    // ActionSelectorConfig no longer carries those fields after the split.
-    // (They lived on the old catch-all config but were never read via
-    // config.*; the engine has always been the source of truth here.)
-    auto gscore = [&](MCTSEdge* e, double mv, double vm) -> double {
+    auto gscore = [&](MCTSEdge* e, double sigma, double vm) -> double {
         int idx = static_cast<int>(e - root->first_edge);
         double noise = (idx >= 0 && idx < (int)engine->root_gumbel_noise.size())
                      ? engine->root_gumbel_noise[idx] : 0.0;
-        return e->calculate_gumbel_score(
-            config.contempt, engine->gumbel_c_visit, engine->gumbel_c_scale,
-            mv, vm, noise);
+        return e->calculate_gumbel_score(config.contempt, sigma, vm, noise);
     };
 
-    if (!non_forced_visited.empty()) {
+    auto pick_top = [&]() -> MCTSEdge* {
+        if (!engine->root_used_halving) {
+            // Deficit root: visits track the improved policy -> argmax visits, Q breaks ties.
+            return *std::max_element(non_forced_visited.begin(), non_forced_visited.end(),
+                [&](MCTSEdge* a, MCTSEdge* b) {
+                    if (a->child->visits != b->child->visits) return a->child->visits < b->child->visits;
+                    return -a->child->expected_value(config.contempt) < -b->child->expected_value(config.contempt);
+                });
+        }
+        // Sequential halving: top-2 by visits, best gumbel score.
         double mv = 0.0;
         for (MCTSEdge* e : non_forced_visited) if (e->child->visits > mv) mv = e->child->visits;
+        const double sigma = sigma_scale(mv, engine->gumbel_c_visit, engine->gumbel_c_scale, engine->gumbel_sigma_cap);
         double vm = root->calculate_v_mix(config.contempt);
         std::sort(non_forced_visited.begin(), non_forced_visited.end(),
                   [&](MCTSEdge* a, MCTSEdge* b) {
             if (a->child->visits != b->child->visits) return a->child->visits > b->child->visits;
-            return gscore(a, mv, vm) > gscore(b, mv, vm);
+            return gscore(a, sigma, vm) > gscore(b, sigma, vm);
         });
         MCTSEdge* e1 = non_forced_visited[0];
         MCTSEdge* e2 = (non_forced_visited.size() > 1) ? non_forced_visited[1] : e1;
-        top_edge = (gscore(e1, mv, vm) > gscore(e2, mv, vm)) ? e1 : e2;
+        return (gscore(e1, sigma, vm) > gscore(e2, sigma, vm)) ? e1 : e2;
+    };
+
+    if (!non_forced_visited.empty()) {
+        top_edge = pick_top();
         best_q = -top_edge->child->expected_value(config.contempt);
+    }
+
+    MCTSEdge* top_mhd = nullptr;
+    for (MCTSEdge* e : mhd_edges) {
+        if (top_mhd == nullptr || e->child->visits > top_mhd->child->visits) top_mhd = e;
+    }
+
+    bool use_mhd = false;
+    if (top_mhd != nullptr) {
+        if (top_edge == nullptr) {
+            use_mhd = true;   // no non-draw option to play
+        } else {
+            const double va   = static_cast<double>(top_edge->child->visits);
+            const double vm   = static_cast<double>(top_mhd->child->visits);
+            const double lead = std::max(va, vm);
+            const bool alt_ok = va >= config.draw_min_visit_share * lead;
+            const bool mhd_ok = vm >= config.draw_min_visit_share * lead;
+            if (alt_ok && mhd_ok) {
+                use_mhd = (best_q <= config.draw_cutoff);   // both backed: value decides
+            } else {
+                use_mhd = mhd_ok;                           // only one side has support: use it
+            }
+        }
     }
 
     // Rule A: Win
@@ -127,7 +158,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSE
     // NN's noisy positive estimate on non-forced children win. Checked after
     // Rule B so a proven draw always beats a preference-only draw.
     // Take highest visit count (most confident in true draw)
-    } else if (!mhd_edges.empty() && best_q <= config.draw_cutoff) {
+    } else if (use_mhd) {
         MCTSEdge* best = mhd_edges[0];
         for (MCTSEdge* e : mhd_edges) {
             if (e->child->visits > best->child->visits) best = e;
@@ -226,19 +257,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSE
             std::discrete_distribution<> d(weights.begin(), weights.end());
             result.best_move = non_forced_visited[d(rng)]->move;
         } else {
-            // Deterministic: pick the gumbel winner. Same formula as the
-            // dropped gumbel_score field, computed inline via gscore().
-            double mv = 0.0;
-            for (MCTSEdge* e : non_forced_visited) if (e->child->visits > mv) mv = e->child->visits;
-            double vm = root->calculate_v_mix(config.contempt);
-            std::sort(non_forced_visited.begin(), non_forced_visited.end(),
-                      [&](MCTSEdge* a, MCTSEdge* b) {
-                if (a->child->visits != b->child->visits) return a->child->visits > b->child->visits;
-                return gscore(a, mv, vm) > gscore(b, mv, vm);
-            });
-            MCTSEdge* e1 = non_forced_visited[0];
-            MCTSEdge* e2 = (non_forced_visited.size() > 1) ? non_forced_visited[1] : e1;
-            result.best_move = (gscore(e1, mv, vm) > gscore(e2, mv, vm)) ? e1->move : e2->move;
+            result.best_move = top_edge->move;
         }
         
     // Rule F: Delay Mate
@@ -268,7 +287,7 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSE
 // load_config in main_uci.cpp (inference). Adding a new MCTS or selection
 // knob means editing this function only -- both binaries pick it up.
 //
-// contempt and draw_cutoff live in both structs by design; each YAML key is
+// contempt lives in both structs by design; each YAML key is
 // read exactly once here and mirrored into both, so drift between the two
 // fields is impossible by construction.
 //
@@ -282,17 +301,18 @@ LoadedConfigs load_configs(const YAML::Node& mcts_n, const YAML::Node& sel_n,
 
     // Shared fields: read once, mirror into both structs.
     const double contempt    = mcts_n["contempt"].as<double>();
-    const double draw_cutoff = sel_n["draw_cutoff"].as<double>();
 
     MctsConfig& m = out.mcts;
     m.contempt              = contempt;
-    m.draw_cutoff           = draw_cutoff;
-    m.deficit_eps           = mcts_n["deficit_eps"].as<double>();
+    m.explore_c_root        = mcts_n["explore_c_root"].as<double>();
+    m.explore_c_decay       = mcts_n["explore_c_decay"].as<double>();
+    m.explore_c_min         = mcts_n["explore_c_min"].as<double>();
     m.policy_softmax_temp   = mcts_n["policy_softmax_temp"].as<double>();
     m.virtual_loss          = mcts_n["virtual_loss"].as<double>();
+    m.gumbel_sigma_cap      = mcts_n["gumbel_sigma_cap"].as<double>();
     m.gumbel_c_visit        = mcts_n["gumbel_c_visit"].as<double>();
     m.gumbel_c_scale        = mcts_n["gumbel_c_scale"].as<double>();
-    m.gumbel_noise          = mcts_n["gumbel_noise"].as<double>();
+    m.gumbel_noise =         mcts_n["gumbel_noise"] ? mcts_n["gumbel_noise"].as<double>() : 0.0;
     m.gumbel_search_depth   = mcts_n["gumbel_search_depth"].as<int>();
     m.batch_size_per_worker = mcts_n["worker_minibatch_size"].as<int>();
 
@@ -307,11 +327,12 @@ LoadedConfigs load_configs(const YAML::Node& mcts_n, const YAML::Node& sel_n,
 
     ActionSelectorConfig& s = out.selector;
     s.contempt                = contempt;
-    s.draw_cutoff             = draw_cutoff;
+    s.draw_cutoff             = sel_n["draw_cutoff"].as<double>();
     s.temperature_ply_cutoff  = sel_n["temperature_ply_cutoff"].as<int>();
     s.temperature_q_decay     = sel_n["temperature_q_decay"].as<double>();
     s.resignation_probability = sel_n["resignation_probability"].as<double>();
     s.resignation_cutoff      = sel_n["resignation_cutoff"].as<double>();
+    s.draw_min_visit_share    = sel_n["draw_min_visit_share"].as<double>();
 
     return out;
 }

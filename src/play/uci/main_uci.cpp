@@ -19,6 +19,9 @@
 // etc.) advertised in the `uci` handshake and applied via `setoption`. Some
 // options (Threads, Ponder, UCI_AnalyseMode, Clear Hash, SyzygyProbeLimit)
 // are advertised for GUI compatibility but accepted-and-ignored.
+//
+// On exit, the moves Talbot saw are written to <log_dir>/game.pgn. The result
+// is always "*": UCI never tells the engine how the game ended.
 // =============================================================================
 
 #include <pthread.h>
@@ -41,6 +44,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <cstdlib>
+#include <cctype>
 
 #include "concurrentqueue.h"
 #include <torch/torch.h>
@@ -50,6 +54,8 @@
 #include "mcts_engine.hpp"
 #include "action_selector.hpp"
 #include "inference_batcher.hpp"
+#include "board_utils.hpp"   // q_to_cp
+#include "pgn_writer.hpp"
 #include "logger.hpp"
 #include "time_control.hpp"
 #include "tbprobe.h"   // Fathom Syzygy probing (tb_init / tb_free / TB_LARGEST)
@@ -71,18 +77,6 @@ static inline void uci_out(const std::string& line) {
 }
 
 // ---- info-line helpers ------------------------------------------------------
-// q -> centipawns via logit map. This is standard for NN engines with WDL
-// heads: cp is monotone in q, saturates smoothly near +-1, and roughly
-// matches the scale GUIs expect for cp scores. Clamped to a sane range.
-static int q_to_cp(double q) {
-    // The literal constant 1.5620688421 in the formula is tan⁻¹(10) / 90 * 180/π — it's calibrated so that q = 1.0 (nominal win) maps to cp ≈ +900, 
-    // roughly matching Stockfish's "clearly winning but not mate" range. Sensible default.
-    const double max_q = 1.569 / 1.5620688421;
-    q = std::clamp(q, -max_q, max_q);
-    double cp = 90.0 * std::tan(q * 1.5620688421);
-    
-    return static_cast<int>(std::round(cp));
-}
 
 // Root argmax under Gumbel score. Under the edge/node split, iteration is
 // over MCTSEdge; the child pointer may be nullptr for unvisited edges (which
@@ -97,6 +91,8 @@ static MCTSEdge* get_best_root_edge(MCTSNode* root, MCTSEngine* engine, double c
         if (c && c->visits > max_visits) max_visits = c->visits;
     }
     const double v_mix = root->calculate_v_mix(contempt);
+    const double sigma = sigma_scale(max_visits, engine->gumbel_c_visit,
+                                engine->gumbel_c_scale, engine->gumbel_sigma_cap);
 
     MCTSEdge* best = nullptr;
     double best_score = -1e20;
@@ -104,9 +100,7 @@ static MCTSEdge* get_best_root_edge(MCTSNode* root, MCTSEngine* engine, double c
         MCTSEdge* e = root->first_edge + i;
         double noise = (i < (int)engine->root_gumbel_noise.size())
                      ? engine->root_gumbel_noise[i] : 0.0;
-        double score = e->calculate_gumbel_score(
-            contempt, engine->gumbel_c_visit, engine->gumbel_c_scale,
-            max_visits, v_mix, noise);
+        double score = e->calculate_gumbel_score(contempt, sigma, v_mix, noise);
         if (score > best_score) {
             best_score = score;
             best = e;
@@ -243,7 +237,7 @@ struct UciConfig {
     int policy_moves;
 
     // Split search config. Loaded together via load_configs() so their shared
-    // contempt/draw_cutoff fields cannot drift.
+    // contempt fields cannot drift.
     //   mcts     -- fed to MCTSEngine (construction, pool sizing, sim budget)
     //   selector -- fed to ActionSelector (rules A-F in select_move)
     MctsConfig           mcts;
@@ -415,6 +409,10 @@ struct SearchWorker {
     // signals cv_start until the worker has emitted bestmove. The info
     // sub-thread loops while true.
     std::atomic<bool> search_active{false};
+
+    // Last move Talbot played (search or tablebase). Used to complete the
+    // game PGN on exit, since the GUI may never echo our final move back.
+    chess::Move last_bestmove = chess::Move::NO_MOVE;
 
     cpu_set_t core_set;
 };
@@ -601,9 +599,20 @@ int main(int argc, char* argv[]) {
         return true;
     };
 
+    // Opponent name, passed on the command line (fastchess: args="--opponent X").
+    // Only used for the log folder name, the log, and game.pgn.
+    std::string opponent_name;
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--cores" && i + 1 < argc) {
+        if (arg == "--opponent" && i + 1 < argc) {
+            opponent_name = argv[++i];
+        }
+        else if (arg == "--log-dir" && i + 1 < argc) {
+            // Overrides engine.log_dir from play_uci.yaml.
+            cfg.base_log_dir = argv[++i];
+        }
+        else if (arg == "--cores" && i + 1 < argc) {
             std::vector<int> override_cores;
             if (!parse_cores(argv[++i], override_cores)) return 1;
             if (!override_cores.empty()) {
@@ -645,7 +654,15 @@ int main(int argc, char* argv[]) {
         std::time_t now_time = std::chrono::system_clock::to_time_t(now);
         std::tm* lt = std::localtime(&now_time);
         std::ostringstream time_oss;
-        time_oss << std::put_time(lt, "%Y-%m-%d_%H-%M-%S") << "_pid" << getpid();
+        time_oss << std::put_time(lt, "%Y-%m-%d_%H-%M-%S");
+        if (!opponent_name.empty()) {
+            // Keep the folder name filesystem-safe.
+            std::string safe = opponent_name;
+            for (char& c : safe)
+                if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '.') c = '_';
+            time_oss << "_vs-" << safe;
+        }
+        time_oss << "_pid" << getpid();
         run_log_dir = cfg.base_log_dir + "/" + time_oss.str();
         fs::create_directories(run_log_dir);
     }
@@ -655,6 +672,7 @@ int main(int argc, char* argv[]) {
     main_logger.log("INFO", "Booting Talbot UCI Engine...");
     main_logger.log("INFO", "Config: " + config_file_path);
     main_logger.log("INFO", "Engine: " + cfg.engine_path);
+    main_logger.log("INFO", "Opponent: " + (opponent_name.empty() ? std::string("<unknown>") : opponent_name));
 
     if (!cfg.main_cores.empty()) {
         cpu_set_t cpuset = set_from_cores(cfg.main_cores);
@@ -822,7 +840,7 @@ int main(int argc, char* argv[]) {
                     next_board.makeMove(mv);
                     std::vector<chess::Board> next_history = walk_history;
                     next_history.insert(next_history.begin(), walk_board);
-                    if (next_history.size() > 4) next_history.pop_back();
+                    if (next_history.size() > 7) next_history.pop_back();
 
                     if (!worker->mcts->reset_reuse(next_board, next_history, mv,
                                                    pt.node_target, pt.edge_target)) {
@@ -908,49 +926,49 @@ int main(int argc, char* argv[]) {
             worker->search_active.store(false, std::memory_order_relaxed);
             if (info_thread.joinable()) info_thread.join();
 
-            // Emit final info line + bestmove.
+            // Choose the move first, then emit the final info line from that
+            // move, so the PV always starts with the bestmove.
+            SelectionResult result = worker->agent->select_move(worker->mcts->root, ply_snapshot, worker->mcts);
+
             {
-                MCTSNode* root = worker->mcts->root;
-                if (root && root->visits > 0) {
+                MCTSNode* root   = worker->mcts->root;
+                MCTSEdge* played = find_root_edge(root, result.best_move);
+                if (root && root->visits > 0 && played) {
                     long long elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - search_start).count();
                     long long nps = elapsed_ms > 0 ? (worker->mcts->simulation_count * 1000LL / elapsed_ms) : 0;
-                    
-                    std::string score_str;
-                    bool skip_emit = false;
 
+                    std::string score_str;
                     if (root->has_forced_outcome() && root->forced_outcome != 0) {
                         int moves_to_mate = (root->distance_to_mate + 1) / 2;
                         if (root->forced_outcome == -1) moves_to_mate = -moves_to_mate;
                         score_str = "score mate " + std::to_string(moves_to_mate);
+                    } else if (played->child && played->child->visits > 0) {
+                        double q = -played->child->expected_value(worker->contempt);
+                        score_str = "score cp " + std::to_string(q_to_cp(q));
                     } else {
-                        double q = best_child_q(root, worker->mcts, worker->contempt);
-                        if (!std::isnan(q)) {
-                            score_str = "score cp " + std::to_string(q_to_cp(q));
-                        } else {
-                            skip_emit = true;
-                        }
+                        // Fallback: root value from the side to move's perspective,
+                        // so a score line is always sent for adjudication.
+                        double q = root->calculate_v_mix(worker->contempt);
+                        score_str = "score cp " + std::to_string(q_to_cp(q));
                     }
 
-                    if (!skip_emit) {
-                        std::vector<std::string> pv = extract_pv(root, worker->mcts, worker->contempt);
-                        int depth    = worker->mcts->max_selection_depth;
-                        int seldepth = std::max(depth, (int)pv.size());
-                        std::ostringstream oss;
-                        oss << "info depth " << depth
-                            << " seldepth " << seldepth
-                            << " nodes " << worker->mcts->simulation_count
-                            << " nps " << nps
-                            << " time " << elapsed_ms
-                            << " " << score_str
-                            << " pv";
-                        for (const auto& m : pv) oss << " " << m;
-                        uci_out(oss.str());
-                    }
+                    std::vector<std::string> pv = extract_pv_from(played);
+                    int depth    = worker->mcts->max_selection_depth;
+                    int seldepth = std::max(depth, (int)pv.size());
+                    std::ostringstream oss;
+                    oss << "info depth " << depth
+                        << " seldepth " << seldepth
+                        << " nodes " << worker->mcts->simulation_count
+                        << " nps " << nps
+                        << " time " << elapsed_ms
+                        << " " << score_str
+                        << " pv";
+                    for (const auto& m : pv) oss << " " << m;
+                    uci_out(oss.str());
                 }
             }
 
-            SelectionResult result = worker->agent->select_move(worker->mcts->root, ply_snapshot, worker->mcts);
             std::string best_move_str = (result.best_move == chess::Move::NO_MOVE)
                 ? "0000" : chess::uci::moveToUci(result.best_move);
             uci_out("bestmove " + best_move_str);
@@ -958,12 +976,17 @@ int main(int argc, char* argv[]) {
 
             {
                 std::lock_guard<std::mutex> l2(worker->mtx);
+                worker->last_bestmove = result.best_move;
                 worker->start_flag = false;
                 worker->done_flag  = true;
             }
             worker->cv_done.notify_one();
         }
     });
+
+    // Talbot's colour in the current game: 0 white, 1 black, -1 not yet known.
+    // Set on the first `go` of each game; used for the PGN written on exit.
+    int talbot_color = -1;
 
     // ---- UCI command loop --------------------------------------------------
     std::string line;
@@ -1007,6 +1030,7 @@ int main(int argc, char* argv[]) {
             agent.reset_for_new_game();
             mcts_engine->reset_nps_history(cfg.time_control.nps_ewma);
             ply_count = 1;
+            talbot_color = -1;
 
             // Fresh game -> no tree to reuse across the boundary.
             has_prior_tree = false;
@@ -1038,7 +1062,7 @@ int main(int argc, char* argv[]) {
 
             for (size_t i = moves_idx + 1; i < tokens.size(); ++i) {
                 history.insert(history.begin(), board);
-                if (history.size() > 4) history.pop_back();
+                if (history.size() > 7) history.pop_back();
                 chess::Move move = chess::uci::uciToMove(board, tokens[i]);
                 current_moves.push_back(move);
                 board.makeMove(move);
@@ -1046,6 +1070,14 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (command == "go") {
+            // Record which side Talbot is playing on the first search of the game.
+            if (talbot_color < 0) {
+                talbot_color = (board.sideToMove() == chess::Color::WHITE) ? 0 : 1;
+                main_logger.log("INFO", std::string("Talbot plays ") +
+                                (talbot_color == 0 ? "WHITE" : "BLACK") + " vs " +
+                                (opponent_name.empty() ? std::string("<unknown>") : opponent_name));
+            }
+
             // Root tablebase probe: if the position is inside the loaded tables,
             // play the DTZ-optimal move immediately and skip the search entirely
             // -- this is the path that converts won endings.
@@ -1060,6 +1092,11 @@ int main(int argc, char* argv[]) {
                     main_logger.log("INFO", "Root TB hit: " + mv + " wdl=" + wdl_str +
                                     " dtz=" + std::to_string(tb_dtz) + " -- skipping search.");
                     uci_out("info string syzygy " + std::string(wdl_str) + " dtz " + std::to_string(tb_dtz));
+                    // Score line so the GUI can adjudicate. Cursed wins / blessed
+                    // losses are draws under the 50-move rule.
+                    int tb_cp = (tb_wdl == 4) ? 2000 : (tb_wdl == 0) ? -2000 : 0;
+                    uci_out("info depth 1 score cp " + std::to_string(tb_cp) + " pv " + mv);
+                    { std::lock_guard<std::mutex> l(search_worker.mtx); search_worker.last_bestmove = tb_move; }
                     uci_out("bestmove " + mv);
                     continue;
                 }
@@ -1204,6 +1241,16 @@ int main(int argc, char* argv[]) {
             }
             break;
         }
+        else if (command == "dumppath") {
+            mcts_engine->debug_dump_paths.clear();
+            if (tokens.size() >= 2 && tokens[1] != "clear") {
+                std::vector<std::string> path;
+                for (size_t i = 1; i < tokens.size(); ++i) {
+                    path.push_back(tokens[i]);
+                    mcts_engine->debug_dump_paths.push_back(path);
+                }
+            }
+        }
         else if (command == "setoption") {
             // Grammar: setoption name <NAME words> [value <VALUE words>]
             // NAME can contain spaces (e.g. "Clear Hash"); VALUE too (paths).
@@ -1294,6 +1341,37 @@ int main(int argc, char* argv[]) {
     }
     search_worker.cv_start.notify_one();
     if (search_worker.thread.joinable()) search_worker.thread.join();
+
+    // ---- Write the game as Talbot saw it ------------------------------------
+    // Runs after the loop, so it also covers stdin closing without `quit`.
+    // Result is "*" because UCI never reports how the game ended, and the
+    // opponent's final move is missing if that move ended the game.
+    {
+        std::vector<chess::Move> game_moves = current_moves;
+        chess::Move last = search_worker.last_bestmove;
+        if (last != chess::Move::NO_MOVE) {
+            chess::Movelist legal;
+            chess::movegen::legalmoves(legal, board);
+            if (std::find(legal.begin(), legal.end(), last) != legal.end())
+                game_moves.push_back(last);   // Talbot's final move, if never echoed back
+        }
+
+        if (!run_log_dir.empty() && !game_moves.empty()) {
+            PgnHeader hdr;
+            hdr.event        = "Talbot UCI game";
+            const std::string opp = opponent_name.empty() ? std::string("Opponent") : opponent_name;
+            hdr.white        = (talbot_color == 0) ? "Talbot" : (talbot_color == 1 ? opp : "?");
+            hdr.black        = (talbot_color == 1) ? "Talbot" : (talbot_color == 0 ? opp : "?");
+            hdr.starting_fen = current_base_fen;   // empty = standard start position
+
+            PgnConfig pgn_cfg = PgnConfig::minimal();
+            pgn_cfg.include_date = true;
+
+            std::ofstream(fs::path(run_log_dir) / "game.pgn")
+                << build_pgn(hdr, game_moves, {}, "*", pgn_cfg);
+            main_logger.log("INFO", "Wrote " + (fs::path(run_log_dir) / "game.pgn").string());
+        }
+    }
 
     global_stop_event.store(true);
     if (batcher_thread.joinable()) batcher_thread.join();

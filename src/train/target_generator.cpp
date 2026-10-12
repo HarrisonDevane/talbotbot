@@ -43,7 +43,7 @@ TargetResult TargetGenerator::generate_targets(
     // A proven win enters the softmax at q = +1, a proven loss at q = -1,
     // a proven draw at its exact draw value, regardless of visit count.
     //
-    // Proven losses are NOT hard-zeroed: at sigma_scale >= c_visit, the
+    // Proven losses are NOT hard-zeroed: at sigma >= c_visit, the
     // q_norm floor of 0.0 suppresses them by tens of logits, so their
     // target mass is effectively zero while the target remains a smooth
     // softmax over exact values (paper-canonical Eq. 11 behaviour).
@@ -56,7 +56,7 @@ TargetResult TargetGenerator::generate_targets(
         MCTSNode* c = all_edges[i]->child;
         if (c != nullptr) max_visits = std::max(max_visits, c->visits);
     }
-    double sigma_scale = (config.gumbel_c_visit + max_visits) * config.gumbel_c_scale;
+    double sigma = sigma_scale(max_visits, config.gumbel_c_visit, config.gumbel_c_scale, config.gumbel_sigma_cap);
 
     std::vector<float> base_logits(num_children);
     float max_logit = -1e20f;
@@ -86,7 +86,7 @@ TargetResult TargetGenerator::generate_targets(
         }
 
         double q_norm = (q + 1.0) / 2.0;
-        base_logits[i] = static_cast<float>(e->raw_logit + sigma_scale * q_norm);
+        base_logits[i] = static_cast<float>(e->raw_logit + sigma * q_norm);
         if (base_logits[i] > max_logit) max_logit = base_logits[i];
     }
 

@@ -15,12 +15,13 @@ declare -A OPPONENT=(      [1]="4,20"    [2]="7,23"    [3]="12,28"    [4]="15,31
 POOL="$SLOT_DIR/$ENGINE_TYPE"
 
 SLOT=""
-for i in 1 2 3 4; do
-  if mkdir "$POOL/$i" 2>/dev/null; then
-    SLOT="$i"
-    trap 'rmdir "$POOL/$SLOT"' EXIT
-    break
-  fi
+for attempt in $(seq 1 100); do
+  for i in 1 2 3 4; do
+    exec 9>"$POOL/$i.lock"
+    if flock -n 9; then SLOT="$i"; break 2; fi
+    exec 9>&-
+  done
+  sleep 0.1
 done
 
 [ -z "$SLOT" ] && { echo "no slot free ($ENGINE_TYPE)" >&2; exit 1; }

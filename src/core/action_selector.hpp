@@ -13,13 +13,14 @@ namespace YAML { class Node; }
 struct ActionSelectorConfig {
     // Shared with MctsConfig
     double contempt;
-    double draw_cutoff;
 
     // Selection-only.
+    double draw_cutoff;
     int    temperature_ply_cutoff;
     double temperature_q_decay;
     double resignation_probability;
     double resignation_cutoff;
+    double draw_min_visit_share;
 };
 
 struct LoadedConfigs {

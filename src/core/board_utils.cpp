@@ -393,3 +393,8 @@ void map_policy_to_global_vector(const Movelist& moves, const float* probs, cons
         policy_vector_out[flat_index] = probs[i];
     }
 }
+
+int q_to_cp(double q) {
+    q = std::clamp(q, -0.999, 0.999);
+    return static_cast<int>(std::round(90.0 * std::tan(1.5620688421 * q)));
+}

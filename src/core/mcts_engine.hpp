@@ -4,6 +4,7 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <algorithm>
 #include <memory>
 #include <chrono>
 #include <atomic>
@@ -51,19 +52,27 @@ struct PoolTargets {
 struct MctsConfig {
     // Shared with ActionSelectorConfig (mirrored by load_configs).
     double contempt;
-    double draw_cutoff;
 
     // Engine-only.
-    double deficit_eps;
+    double explore_c_root;
+    double explore_c_decay;
+    double explore_c_min;
+
     double policy_softmax_temp;
     double virtual_loss;
     double gumbel_c_visit;
     double gumbel_c_scale;
     double gumbel_noise;
+    double gumbel_sigma_cap;
+
     int    gumbel_search_depth;
     int    gumbel_m;
     int    batch_size_per_worker;
 };
+
+inline double sigma_scale(double max_visits, double c_visit, double c_scale, double cap) {
+    return (c_visit + std::min(max_visits, cap)) * c_scale;
+}
 
 template <typename T>
 class ThreadSafeQueue {
@@ -175,19 +184,25 @@ public:
     int worker_batch_size;
     int worker_id;
     bool early_terminal_return;
-    double deficit_eps;
     double policy_softmax_temp;
     double virtual_loss;
     double contempt;
-    double draw_cutoff;
     int simulation_count;
     int inference_sent;
     int inference_received;
+
+    std::vector<std::vector<std::string>> debug_dump_paths;
+    int debug_dump_top_n = 15;
 
     int max_selection_depth = 0;
     double gumbel_c_visit;
     double gumbel_c_scale;
     double gumbel_noise;
+    double gumbel_sigma_cap;
+    double explore_c_root;
+    double explore_c_decay;
+    double explore_c_min;
+
     std::mt19937 rng;
 
     double time_selection = 0.0;
@@ -205,7 +220,7 @@ public:
     //
     // _select breakdown:
     double time_select_gscore  = 0.0;   // MCTSEdge::calculate_gumbel_score loop
-    double time_select_softmax = 0.0;   // std::exp for score and prior softmax
+    double time_select_softmax = 0.0;   // std::exp for score
     double time_select_other   = 0.0;   // visit-stat scan + deficit argmax + makeMove
 
     // _backpropagate breakdown:
@@ -254,6 +269,7 @@ public:
     bool early_return_on_forced_win = false;
 
     std::vector<float> root_gumbel_noise;
+    bool root_used_halving = true;
     std::atomic<bool> pool_exhausted{false};
 
     std::atomic<int>* core_wait_count;
@@ -381,6 +397,7 @@ private:
     void _virtual_loss(MCTSNode* node, bool is_applying);
 
     bool _should_early_stop(const std::vector<MCTSEdge*>& candidates) const;
+    bool _single_legal_move() const;
     
     void _mark_selected(MCTSNode* node);
     void _unmark_selected(MCTSNode* node);

@@ -18,7 +18,6 @@ mcts:
   worker_minibatch_size: 32                                       # Max positions sent to batcher at once
   virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored
   contempt: 0.0                                                   # Contempt for playing drawing positions
-  deficit_eps: 0.2
   policy_softmax_temp: 1.0
   early_stop_q_gap: 0.2
   early_stop_min_visits: 1000
@@ -40,6 +39,7 @@ selection:
   temperature_ply_cutoff: 0                                      # Sample proportional to visit count for first moves (0 = always deterministic)
   temperature_q_decay: 0.0                                       # Absolute Q value [-1, 1] Boltzmann temperature decay
   draw_cutoff: 0.0                                               # Value threshold to consider a game a draw
+  draw_min_visit_share: 0.25                                      # Draw-line vs best move: each needs >= this share of the leader's visits for Q vs draw_cutoff to decide; else the better-visited one wins
   resignation_probability: 0.0                                   # Chance the bot checks for resignation allowed
   resignation_cutoff: 0.0                                        # Value head cutoff for resignation
 

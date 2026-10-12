@@ -32,13 +32,11 @@ double MCTSNode::expected_value(double contempt) const {
 // to child. Formula identical to the previous MCTSNode::calculate_gumbel_score,
 // with visits/Q read through the child pointer. Null child == 0 visits ==
 // fall back to v_mix, matching the pre-refactor 0-visit case.
-double MCTSEdge::calculate_gumbel_score(double contempt, double gumbel_c_visit,
-                                        double gumbel_c_scale, double max_visits,
+double MCTSEdge::calculate_gumbel_score(double contempt, double sigma,
                                         double v_mix, double noise) const {
     int32_t v = (child != nullptr) ? child->visits : 0;
     double q_val = (v > 0) ? -child->expected_value(contempt) : v_mix;
     double q_norm = (q_val + 1.0) / 2.0;
-    double sigma = (gumbel_c_visit + max_visits) * gumbel_c_scale;
     return raw_logit + noise + (sigma * q_norm);
 }
 
