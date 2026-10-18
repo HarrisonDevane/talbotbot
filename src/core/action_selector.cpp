@@ -280,59 +280,87 @@ SelectionResult ActionSelector::select_move(MCTSNode* root, int ply_count, MCTSE
     return result;
 }
 
-// -----------------------------------------------------------------------------
-// Shared YAML loader for MctsConfig + ActionSelectorConfig.
-//
-// Single source of truth; called from both DataGenerator (training) and
-// load_config in main_uci.cpp (inference). Adding a new MCTS or selection
-// knob means editing this function only -- both binaries pick it up.
-//
-// contempt lives in both structs by design; each YAML key is
-// read exactly once here and mirrored into both, so drift between the two
-// fields is impossible by construction.
-//
-// require_gumbel_m: see header. Training passes true (missing key -> throw);
-// UCI passes false (missing key -> default 0, field is not consumed at
-// inference anyway).
-// -----------------------------------------------------------------------------
-LoadedConfigs load_configs(const YAML::Node& mcts_n, const YAML::Node& sel_n,
-                           bool require_gumbel_m) {
-    LoadedConfigs out;
+// ---- Replaces load_configs() in action_selector.cpp ------------------------
+// (and in action_selector.hpp change the declaration to:
+//    LoadedConfigs load_configs(const YAML::Node& mcts_n, const YAML::Node& sel_n); )
 
-    // Shared fields: read once, mirror into both structs.
-    const double contempt    = mcts_n["contempt"].as<double>();
-
-    MctsConfig& m = out.mcts;
-    m.contempt              = contempt;
-    m.explore_c_root        = mcts_n["explore_c_root"].as<double>();
-    m.explore_c_decay       = mcts_n["explore_c_decay"].as<double>();
-    m.explore_c_min         = mcts_n["explore_c_min"].as<double>();
-    m.policy_softmax_temp   = mcts_n["policy_softmax_temp"].as<double>();
-    m.virtual_loss          = mcts_n["virtual_loss"].as<double>();
-    m.gumbel_sigma_cap      = mcts_n["gumbel_sigma_cap"].as<double>();
-    m.gumbel_c_visit        = mcts_n["gumbel_c_visit"].as<double>();
-    m.gumbel_c_scale        = mcts_n["gumbel_c_scale"].as<double>();
-    m.gumbel_noise =         mcts_n["gumbel_noise"] ? mcts_n["gumbel_noise"].as<double>() : 0.0;
-    m.gumbel_search_depth   = mcts_n["gumbel_search_depth"].as<int>();
-    m.batch_size_per_worker = mcts_n["worker_minibatch_size"].as<int>();
-
-    // gumbel_m: required for training, optional for UCI. Explicit throw with
-    // a named field beats yaml-cpp's generic "key not found" when training
-    // yamls lose the key by accident.
-    if (require_gumbel_m && !mcts_n["gumbel_m"]) {
-        throw std::runtime_error(
-            "load_configs: mcts.gumbel_m is required (training) but missing");
+// Missing keys throw with the full YAML path, e.g. "missing mcts.gumbel.m".
+static YAML::Node require_key(const YAML::Node& parent, const std::string& key,
+                              const std::string& path) {
+    const YAML::Node& p = parent;
+    if (!p.IsMap() || !p[key]) {
+        throw std::runtime_error("config: missing " + path + key);
     }
-    m.gumbel_m = mcts_n["gumbel_m"] ? mcts_n["gumbel_m"].as<double>() : 0.0;
+    return p[key];
+}
+
+// -----------------------------------------------------------------------------
+// Shared YAML loader for MctsConfig + ActionSelectorConfig, used by training
+// (DataGenerator), UCI and the tournament.
+//
+//   mcts:                      every search
+//     search: deficit|halving|puct
+//     search_depth, worker_minibatch_size, virtual_loss, contempt,
+//     policy_softmax_temp
+//     gumbel:                  required for deficit and halving
+//       c_visit, c_scale, sigma_cap, noise, explore_c
+//       m                      required for halving only
+//     puct:                    required for puct
+//       cpuct, fpu_reduction
+//   selection: ...
+//
+// Sections a search does not use may be present (the tournament keeps all of
+// them so per-side overrides can switch search) and are simply not read.
+// contempt is read once and mirrored into both structs.
+// -----------------------------------------------------------------------------
+LoadedConfigs load_configs(const YAML::Node& mcts_n, const YAML::Node& sel_n) {
+    LoadedConfigs out;
+    MctsConfig& m = out.mcts;
+
+    const std::string search = require_key(mcts_n, "search", "mcts.").as<std::string>();
+    if      (search == "deficit") m.search = SearchType::DEFICIT;
+    else if (search == "halving") m.search = SearchType::HALVING;
+    else if (search == "puct")    m.search = SearchType::PUCT;
+    else if (search == "hybrid")  m.search = SearchType::HYBRID;   // SH root + PUCT below
+    else if (search == "policy")  m.search = SearchType::POLICY;   // no search, argmax prior
+    else throw std::runtime_error("config: mcts.search must be deficit, halving, puct, hybrid or policy, got '" +
+                                  search + "'");
+
+    const double contempt   = require_key(mcts_n, "contempt", "mcts.").as<double>();
+    m.contempt              = contempt;
+    m.search_depth          = require_key(mcts_n, "search_depth", "mcts.").as<int>();
+    m.batch_size_per_worker = require_key(mcts_n, "worker_minibatch_size", "mcts.").as<int>();
+    m.virtual_loss          = require_key(mcts_n, "virtual_loss", "mcts.").as<double>();
+    m.policy_softmax_temp   = require_key(mcts_n, "policy_softmax_temp", "mcts.").as<double>();
+
+    const bool uses_sh     = (m.search == SearchType::HALVING || m.search == SearchType::HYBRID);
+    const bool uses_gumbel = (m.search == SearchType::DEFICIT || uses_sh);
+    const bool uses_puct   = (m.search == SearchType::PUCT    || m.search == SearchType::HYBRID);
+
+    if (uses_gumbel) {
+        const YAML::Node g = require_key(mcts_n, "gumbel", "mcts.");
+        m.gumbel_c_visit   = require_key(g, "c_visit",   "mcts.gumbel.").as<double>();
+        m.gumbel_c_scale   = require_key(g, "c_scale",   "mcts.gumbel.").as<double>();
+        m.gumbel_sigma_cap = require_key(g, "sigma_cap", "mcts.gumbel.").as<double>();
+        m.gumbel_noise     = require_key(g, "noise",     "mcts.gumbel.").as<double>();
+        if (m.search != SearchType::HYBRID)            // explore_c only acts in the deficit _select branch
+            m.explore_c    = require_key(g, "explore_c", "mcts.gumbel.").as<double>();
+        if (uses_sh)
+            m.gumbel_m     = require_key(g, "m",         "mcts.gumbel.").as<int>();
+    }
+    if (uses_puct) {
+        const YAML::Node p   = require_key(mcts_n, "puct", "mcts.");
+        m.cpuct              = require_key(p, "cpuct",         "mcts.puct.").as<double>();
+        m.puct_fpu_reduction = require_key(p, "fpu_reduction", "mcts.puct.").as<double>();
+    }
 
     ActionSelectorConfig& s = out.selector;
     s.contempt                = contempt;
-    s.draw_cutoff             = sel_n["draw_cutoff"].as<double>();
-    s.temperature_ply_cutoff  = sel_n["temperature_ply_cutoff"].as<int>();
-    s.temperature_q_decay     = sel_n["temperature_q_decay"].as<double>();
-    s.resignation_probability = sel_n["resignation_probability"].as<double>();
-    s.resignation_cutoff      = sel_n["resignation_cutoff"].as<double>();
-    s.draw_min_visit_share    = sel_n["draw_min_visit_share"].as<double>();
-
+    s.draw_cutoff             = require_key(sel_n, "draw_cutoff",             "selection.").as<double>();
+    s.temperature_ply_cutoff  = require_key(sel_n, "temperature_ply_cutoff",  "selection.").as<int>();
+    s.temperature_q_decay     = require_key(sel_n, "temperature_q_decay",     "selection.").as<double>();
+    s.resignation_probability = require_key(sel_n, "resignation_probability", "selection.").as<double>();
+    s.resignation_cutoff      = require_key(sel_n, "resignation_cutoff",      "selection.").as<double>();
+    s.draw_min_visit_share    = require_key(sel_n, "draw_min_visit_share",    "selection.").as<double>();
     return out;
 }

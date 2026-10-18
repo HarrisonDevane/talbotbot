@@ -10,21 +10,27 @@ inference:
   logging_level: 20                                               # Logging level for the Batcher Diagnostics
 
 mcts:
-  worker_minibatch_size: 128                                      # Max positions sent to batcher at once
+  search: puct                                                    # deficit | halving | puct
+  search_depth: 1000                                              # Fixed node budget when UCI gives no time (and for the first two plies)
+  tree_reuse: true                                                # Reuse the previous move's subtree (deficit/puct; halving always starts fresh)
+  worker_minibatch_size: 128                                      # Max positions sent to the batcher at once
   virtual_loss: 1.0                                               # Penalty applied to nodes currently being explored
   contempt: 0.0                                                   # Contempt for playing drawing positions
-  explore_c_root: 0.5                                             # Exploration bonus coefficient at depth 0
-  explore_c_decay: 0.8                                            # Per-ply multiplier on the exploration coefficient
-  explore_c_min: 0.05                                             # Floor on the exploration coefficient  
-  policy_softmax_temp: 1.0
-  early_stop_q_gap: 0.2
-  early_stop_min_visits: 100000
-  early_return_on_forced_win: true
-  gumbel_sigma_cap: 100.0                                         # Cap on max_visits in sigma: sigma = (c_visit + min(max_visits, cap)) * c_scale
-  gumbel_c_visit: 50.0                                            # Sigma used for gumbel score calculation
-  gumbel_c_scale: 1.0                                             # Scale for sigma with visit count
-  gumbel_search_depth: 1000                                       # Fallback node budget when UCI gives no time
-
+  policy_softmax_temp: 1.0                                        # Temperature on the policy logits (prior sharpness)
+  early_stop_q_gap: 0.2                                           # Stop early when the top two root moves differ by this much Q (0 = off)
+  early_stop_min_visits: 100000                                   # Minimum root visits before early stop may trigger
+  early_return_on_forced_win: true                                # Return immediately when a forced win is proven
+  gumbel:                                                         # deficit + halving only
+    c_visit: 50.0                                                 # sigma = (c_visit + min(max_visits, sigma_cap)) * c_scale
+    c_scale: 1.0                                                  # Sigma multiplicative gain
+    sigma_cap: 50.0                                               # Cap on max_visits inside sigma
+    noise: 0.0                                                    # Gumbel noise at the root (0 = deterministic)
+    explore_c: 0.0                                                # Exploration bonus coefficient, same at every depth (0 = none)
+    m: 16                                                         # Root candidates for sequential halving (halving only)
+  puct:                                                           # puct only
+    cpuct: 1.5                                                    # Exploration constant, Q on [-1, 1]
+    fpu_reduction: 0.0                                            # Value for unvisited moves = v_mix - this
+  
 pool_sizing:
   avg_branching: 35.0                                             # Avg legal moves per chess position
   node_safety_factor: 4.0                                         # Slack over predicted sims for node count

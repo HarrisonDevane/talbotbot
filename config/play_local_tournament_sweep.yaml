@@ -1,0 +1,62 @@
+# PUCT: cpuct x policy temperature
+# 4x4 grid, gauntlet vs the reference cell (puct_c1.4_t1.0), one tournament per budget.
+# Use the TUNING opening book in the base config (not the held-out eval book).
+# If an edge cell wins at some budget, extend that budget one step (0.7 or 4.0).
+
+config_file: 'config/play_local_tournament.yaml'                              # Base tournament config (engine, MCTS, selection, pinning)
+
+tournament:
+  schedule: gauntlet                                                          # every player vs baseline only
+  baseline: puct_c1.4_t1.0                                                    # Reference cell; Elo anchor (0)
+  search_depths: [1000, 4000, 16000, 64000]                                   # Fixed nodes per move; one independent tournament per depth
+  fixed_overrides: [mcts.search=puct, mcts.tree_reuse=true]                   # PUCT everywhere; reuse on (deployment setting)
+
+players:
+  - name: puct_c1.4_t1.0                                                      # reference
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=1.4, mcts.policy_softmax_temp=1.0]
+  - name: puct_c1.0_t0.7
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=1.0, mcts.policy_softmax_temp=0.7]
+  - name: puct_c1.4_t0.7
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=1.4, mcts.policy_softmax_temp=0.7]
+  - name: puct_c2.0_t0.7
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=2.0, mcts.policy_softmax_temp=0.7]
+  - name: puct_c3.0_t0.7
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=3.0, mcts.policy_softmax_temp=0.7]
+  - name: puct_c1.0_t1.0
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=1.0, mcts.policy_softmax_temp=1.0]
+  - name: puct_c2.0_t1.0
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=2.0, mcts.policy_softmax_temp=1.0]
+  - name: puct_c3.0_t1.0
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=3.0, mcts.policy_softmax_temp=1.0]
+  - name: puct_c1.0_t1.4
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=1.0, mcts.policy_softmax_temp=1.4]
+  - name: puct_c1.4_t1.4
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=1.4, mcts.policy_softmax_temp=1.4]
+  - name: puct_c2.0_t1.4
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=2.0, mcts.policy_softmax_temp=1.4]
+  - name: puct_c3.0_t1.4
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=3.0, mcts.policy_softmax_temp=1.4]
+  - name: puct_c1.0_t2.0
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=1.0, mcts.policy_softmax_temp=2.0]
+  - name: puct_c1.4_t2.0
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=1.4, mcts.policy_softmax_temp=2.0]
+  - name: puct_c2.0_t2.0
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=2.0, mcts.policy_softmax_temp=2.0]
+  - name: puct_c3.0_t2.0
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.puct.cpuct=3.0, mcts.policy_softmax_temp=2.0]

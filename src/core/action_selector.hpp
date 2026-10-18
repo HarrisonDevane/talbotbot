@@ -27,8 +27,8 @@ struct LoadedConfigs {
     MctsConfig mcts;
     ActionSelectorConfig selector;
 };
-LoadedConfigs load_configs(const YAML::Node& mcts_n, const YAML::Node& sel_n,
-                           bool require_gumbel_m);
+
+LoadedConfigs load_configs(const YAML::Node& mcts_n, const YAML::Node& sel_n);
 
 struct SelectionResult {
     chess::Move best_move = chess::Move::NO_MOVE;

@@ -48,27 +48,46 @@ struct PoolTargets {
     size_t node_target;
     size_t edge_target;
 };
+ 
+// Which search the engine runs (mcts.search in the YAML).
+//   DEFICIT -- Gumbel deficit selection at every level (UCI / tournament)
+//   HALVING -- sequential halving at the root (training; tournament; UCI)
+//   PUCT    -- AlphaZero-style PUCT at every level
+enum class SearchType { DEFICIT, HALVING, PUCT, HYBRID, POLICY };
 
+inline const char* search_type_name(SearchType t) {
+    switch (t) {
+        case SearchType::DEFICIT: return "deficit";
+        case SearchType::HALVING: return "halving";
+        case SearchType::PUCT:    return "puct";
+        case SearchType::HYBRID:  return "hybrid";
+        case SearchType::POLICY:  return "policy";
+    }
+    return "?";
+}
+ 
 struct MctsConfig {
-    // Shared with ActionSelectorConfig (mirrored by load_configs).
-    double contempt;
-
-    // Engine-only.
-    double explore_c_root;
-    double explore_c_decay;
-    double explore_c_min;
-
-    double policy_softmax_temp;
-    double virtual_loss;
-    double gumbel_c_visit;
-    double gumbel_c_scale;
-    double gumbel_noise;
-    double gumbel_sigma_cap;
-
-    int    gumbel_search_depth;
-    int    gumbel_m;
-    int    batch_size_per_worker;
+    // ---- mcts: (every search) ----
+    SearchType search            = SearchType::DEFICIT;
+    double contempt              = 0.0;   // mirrored into ActionSelectorConfig
+    int    search_depth          = 0;
+    int    batch_size_per_worker = 0;     // mcts.worker_minibatch_size
+    double virtual_loss          = 0.0;
+    double policy_softmax_temp   = 1.0;
+ 
+    // ---- mcts.gumbel: (deficit + halving; left at 0 for puct) ----
+    double gumbel_c_visit        = 0.0;
+    double gumbel_c_scale        = 0.0;
+    double gumbel_sigma_cap      = 0.0;
+    double gumbel_noise          = 0.0;
+    double explore_c             = 0.0;
+    int    gumbel_m              = 0;     // halving only
+ 
+    // ---- mcts.puct: (puct only) ----
+    double cpuct                 = 0.0;
+    double puct_fpu_reduction    = 0.0;
 };
+
 
 inline double sigma_scale(double max_visits, double c_visit, double c_scale, double cap) {
     return (c_visit + std::min(max_visits, cap)) * c_scale;
@@ -195,13 +214,13 @@ public:
     int debug_dump_top_n = 15;
 
     int max_selection_depth = 0;
+    long long sum_selection_depth = 0;
+    int selection_count     = 0;
     double gumbel_c_visit;
     double gumbel_c_scale;
     double gumbel_noise;
     double gumbel_sigma_cap;
-    double explore_c_root;
-    double explore_c_decay;
-    double explore_c_min;
+    double explore_c;
 
     std::mt19937 rng;
 
@@ -265,6 +284,9 @@ public:
     void clear_stop()   { stop_requested.store(false, std::memory_order_relaxed); }
 
     double early_stop_q_gap = 0.0;
+    bool   use_puct           = false;
+    double cpuct              = 0.0;
+    double puct_fpu_reduction = 0.0;
     int early_stop_min_visits = 0;
     bool early_return_on_forced_win = false;
 
@@ -341,18 +363,12 @@ public:
                      size_t edge_target = 0);
 
     int run_simulations_fixed(int search_depth, int max_m);
-    int run_simulations_timed(int max_m,
-                              std::chrono::steady_clock::time_point soft_deadline,
-                              std::chrono::steady_clock::time_point hard_deadline);
 
     // ---- INFERENCE-ONLY variants -----------------------------------------
     // Deficit-selection uniformly at every level (including root). No
     // sequential halving, no phase machinery. Enables tree reuse. MUST NOT
     // be called from training: SH-based policy target generation depends on
     // the phase-structured visit distribution these variants do not produce.
-    //
-    // Timed variant stops at soft_deadline (target budget). hard_deadline
-    // is accepted for signature symmetry but not consulted.
     // ----------------------------------------------------------------------
     int run_simulations_fixed_inference(int search_depth);
     int run_simulations_timed_inference(std::chrono::steady_clock::time_point target);

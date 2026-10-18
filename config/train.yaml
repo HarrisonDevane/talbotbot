@@ -29,19 +29,19 @@ data_generation:
   io_logging_level: 20                                            # LMDB writer log level
 
 mcts:
+  search: halving                                                 # Training always uses sequential halving at the root
+  search_depth: 128                                               # Total MCTS simulations per move (split across log2(m) phases)
   worker_minibatch_size: 4                                        # Max positions a single worker sends to the batcher per submission
   virtual_loss: 0.3                                               # Penalty on in-flight leaf's ancestors; acts as regulariser in single-worker-per-tree design
   contempt: 0.0                                                   # Draw value from side-to-move's perspective (0 = neutral)
-  explore_c_root: 0.0                                             # Exploration bonus coefficient at depth 0
-  explore_c_decay: 0.0                                            # Per-ply multiplier on the exploration coefficient
-  explore_c_min: 0.00                                             # Floor on the exploration coefficient  
   policy_softmax_temp: 1.0                                        # Softens/sharpens raw policy logits before use in selection (1.0 = no change)
-  gumbel_sigma_cap: 100.0                                         # Cap on max_visits in sigma: sigma = (c_visit + min(max_visits, cap)) * c_scale
-  gumbel_c_visit: 50.0                                            # Sigma offset: sigma = (c_visit + max_visits) * c_scale
-  gumbel_c_scale: 1.0                                             # Sigma multiplicative gain
-  gumbel_noise: 1.0                                               # Scale of Gumbel noise added to raw prior logits at root
-  gumbel_search_depth: 128                                        # Total MCTS simulations per move (split across log2(gumbel_m) phases)
-  gumbel_m: 16                                                    # Top-m root candidates selected by perturbed prior for sequential halving
+  gumbel:                                                         # Used by deficit and halving
+    c_visit: 50.0                                                 # Sigma offset: sigma = (c_visit + min(max_visits, sigma_cap)) * c_scale
+    c_scale: 1.0                                                  # Sigma multiplicative gain
+    sigma_cap: 100.0                                              # Cap on max_visits inside sigma
+    noise: 1.0                                                    # Scale of Gumbel noise added to raw prior logits at root
+    explore_c: 0.0                                                # Exploration bonus coefficient, same at every depth (0 = none)
+    m: 16                                                         # Top-m root candidates selected by perturbed prior for sequential halving
 
 pool_sizing:
   avg_branching: 35.0                                             # Average legal moves per position (~35 for chess)

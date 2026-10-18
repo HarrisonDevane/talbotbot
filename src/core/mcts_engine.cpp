@@ -40,8 +40,7 @@ MCTSEngine::MCTSEngine(
     gumbel_c_visit(cfg.gumbel_c_visit), gumbel_c_scale(cfg.gumbel_c_scale),
     gumbel_noise(cfg.gumbel_noise),
     gumbel_sigma_cap(cfg.gumbel_sigma_cap),
-    explore_c_root(cfg.explore_c_root), explore_c_decay(cfg.explore_c_decay),
-    explore_c_min(cfg.explore_c_min),
+    explore_c(cfg.explore_c), 
     root_board(board), base_history(base_history),
     node_pool(node_pool_capacity), edge_pool(edge_pool_capacity),
     scratch_node_pool(1), scratch_edge_pool(1), logger(logger),
@@ -113,6 +112,9 @@ void MCTSEngine::reset(const chess::Board& board,
     inference_received = 0;
     batch_buffer.clear();
     max_selection_depth = 0;
+    max_selection_depth = 0;
+    sum_selection_depth = 0;
+    selection_count     = 0;
 
     root_gumbel_noise.clear();
     pool_exhausted.store(false, std::memory_order_relaxed);
@@ -261,6 +263,9 @@ bool MCTSEngine::reset_reuse(const chess::Board& new_board,
     inference_received = 0;
     batch_buffer.clear();
     max_selection_depth = 0;
+    max_selection_depth = 0;
+    sum_selection_depth = 0;
+    selection_count     = 0;
     root_gumbel_noise.clear();
     pool_exhausted.store(false, std::memory_order_relaxed);
 
@@ -429,65 +434,103 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSEdge*>& simu
         const double v_mix       = node->calculate_v_mix(contempt);
         const double sigma       = sigma_scale(max_visits, gumbel_c_visit, gumbel_c_scale, gumbel_sigma_cap);
         const double ln_parent   = std::log(sum_visits + 2.0);   // once per node, not per child
-        const int    depth       = static_cast<int>(simulation_path.size());
-        const double explore_c   = std::max(explore_c_min, explore_c_root * std::pow(explore_c_decay, depth));
         
         if (profile) time_select_other += ELAPSED(other_start, NOW());
 
-        // ===== S1: gscore per active edge (stack-only, cached_q direct read) =====
-        auto gscore_start = profile ? NOW() : start_time;
-        double max_score_logit = -1e20;
-        for (int i = 0; i < num_edges; ++i) {
-            if (!active_cache[i]) continue;
-            // q from child: cached_q was written from child's perspective in
-            // backprop, so negate for the parent-selection perspective. Fresh
-            // 0-visit nodes use v_mix, same as pre-refactor.
-            double q = (visits_cache[i] > 0)
-                     ? -static_cast<double>(child_cache[i]->cached_q)
-                     : v_mix;
-            // Draw cap: if the child has mover_has_draw set, that mover can
-            // guarantee >= 0 for themselves, so parent's value for this move
-            // is <= 0. Cap parent-perspective Q from above at 0.0. Prevents
-            // noisy positive NN estimates from beating a certain drawing line.
-            if (child_cache[i] != nullptr && child_cache[i]->mover_has_draw()) {
-                q = 0.0;
+int  best_i       = -1;
+        auto other2_start = start_time;
+
+        if (use_puct) {
+            // ===== PUCT: argmax  Q + cpuct * P * sqrt(N) / (1 + n) =====
+            // P   = softmax(raw_logit) over ALL legal edges (raw_logit already
+            //       includes /policy_softmax_temp), so it is the network prior.
+            // Q   = parent-perspective child value; unvisited children use
+            //       FPU = v_mix - puct_fpu_reduction (v_mix is what the deficit
+            //       path uses for unvisited children, so reduction 0 = same base).
+            // N   = visits over active children (>= 1 so the first pick is
+            //       driven by the prior rather than a 0 * ... tie).
+            // Forced/unavailable children stay excluded and the mover-has-draw
+            // cap is applied exactly as in the deficit path.
+            other2_start = profile ? NOW() : start_time;
+            double max_logit = -1e20;
+            for (int i = 0; i < num_edges; ++i)
+                if (raw_logit_cache[i] > max_logit) max_logit = raw_logit_cache[i];
+            double sum_p = 0.0;
+            for (int i = 0; i < num_edges; ++i) {
+                exp_cache[i] = std::exp(static_cast<double>(raw_logit_cache[i]) - max_logit);
+                sum_p += exp_cache[i];
             }
-            double q_norm = (q + 1.0) / 2.0;
-            // Uncertainty bonus: shrinks as the child's own visits grow, grows slowly with parent visits.
-            // Skipped when the child's value is pinned by the draw cap. n=0 children get the full bonus.
-            if (child_cache[i] == nullptr || !child_cache[i]->mover_has_draw()) {
-                q_norm += explore_c * std::sqrt(ln_parent / (static_cast<double>(visits_cache[i]) + 1.0));
+            const double inv_sum_p = (sum_p > 0.0) ? 1.0 / sum_p : 0.0;
+            const double sqrt_n    = std::sqrt(std::max(sum_visits, 1.0));
+            const double fpu       = v_mix - puct_fpu_reduction;
+
+            double best_u = -1e20;
+            for (int i = 0; i < num_edges; ++i) {
+                if (!active_cache[i]) continue;
+                double q = (visits_cache[i] > 0)
+                         ? -static_cast<double>(child_cache[i]->cached_q)
+                         : fpu;
+                if (child_cache[i] != nullptr && child_cache[i]->mover_has_draw()) q = 0.0;
+                const double u = q + cpuct * (exp_cache[i] * inv_sum_p) * sqrt_n
+                                       / (1.0 + static_cast<double>(visits_cache[i]));
+                if (u > best_u) { best_u = u; best_i = i; }
             }
-            const double score = raw_logit_cache[i] + sigma * q_norm;
-            score_cache[i] = score;
-            if (score > max_score_logit) max_score_logit = score;
-        }
-        if (profile) time_select_gscore += ELAPSED(gscore_start, NOW());
+        } else {
+            // ===== S1: gscore per active edge (stack-only, cached_q direct read) =====
+            auto gscore_start = profile ? NOW() : start_time;
+            double max_score_logit = -1e20;
+            for (int i = 0; i < num_edges; ++i) {
+                if (!active_cache[i]) continue;
+                // q from child: cached_q was written from child's perspective in
+                // backprop, so negate for the parent-selection perspective. Fresh
+                // 0-visit nodes use v_mix, same as pre-refactor.
+                double q = (visits_cache[i] > 0)
+                         ? -static_cast<double>(child_cache[i]->cached_q)
+                         : v_mix;
+                // Draw cap: if the child has mover_has_draw set, that mover can
+                // guarantee >= 0 for themselves, so parent's value for this move
+                // is <= 0. Cap parent-perspective Q from above at 0.0. Prevents
+                // noisy positive NN estimates from beating a certain drawing line.
+                if (child_cache[i] != nullptr && child_cache[i]->mover_has_draw()) {
+                    q = 0.0;
+                }
+                double q_norm = (q + 1.0) / 2.0;
+                // Uncertainty bonus: shrinks as the child's own visits grow, grows slowly with parent visits.
+                // Skipped when the child's value is pinned by the draw cap. n=0 children get the full bonus.
+                if (child_cache[i] == nullptr || !child_cache[i]->mover_has_draw()) {
+                    q_norm += explore_c * std::sqrt(ln_parent / (static_cast<double>(visits_cache[i]) + 1.0));
+                }
+                const double score = raw_logit_cache[i] + sigma * q_norm;
+                score_cache[i] = score;
+                if (score > max_score_logit) max_score_logit = score;
+            }
+            if (profile) time_select_gscore += ELAPSED(gscore_start, NOW());
 
-        // ===== S2: softmax exp =====
-        auto softmax_start = profile ? NOW() : start_time;
-        double sum_score_exp = 0.0;
-        for (int i = 0; i < num_edges; ++i) {
-            if (!active_cache[i]) { exp_cache[i] = 0.0; continue; }
-            const double e = std::exp(score_cache[i] - max_score_logit);
-            exp_cache[i]   = e;
-            sum_score_exp += e;
-        }
-        if (profile) time_select_softmax += ELAPSED(softmax_start, NOW());
+            // ===== S2: softmax exp =====
+            auto softmax_start = profile ? NOW() : start_time;
+            double sum_score_exp = 0.0;
+            for (int i = 0; i < num_edges; ++i) {
+                if (!active_cache[i]) { exp_cache[i] = 0.0; continue; }
+                const double e = std::exp(score_cache[i] - max_score_logit);
+                exp_cache[i]   = e;
+                sum_score_exp += e;
+            }
+            if (profile) time_select_softmax += ELAPSED(softmax_start, NOW());
 
-        // ===== S3: deficit argmax =====
-        auto other2_start = profile ? NOW() : start_time;
-        const double inv_sum_visits    = 1.0 / (1.0 + sum_visits);
-        const double inv_sum_score_exp = (sum_score_exp > 0.0) ? (1.0 / sum_score_exp) : 0.0;
+            // ===== S3: deficit argmax =====
+            other2_start = profile ? NOW() : start_time;
+            const double inv_sum_visits    = 1.0 / (1.0 + sum_visits);
+            const double inv_sum_score_exp = (sum_score_exp > 0.0) ? (1.0 / sum_score_exp) : 0.0;
 
-        double best_deficit = -1e20;
-        int    best_i       = -1;
-        for (int i = 0; i < num_edges; ++i) {
-            if (!active_cache[i]) continue;
-            const double pi_prime     = exp_cache[i] * inv_sum_score_exp;
-            const double child_n_norm = static_cast<double>(visits_cache[i]) * inv_sum_visits;
-            const double deficit      = pi_prime - child_n_norm;
-            if (deficit > best_deficit) { best_deficit = deficit; best_i = i; }
+            double best_deficit = -1e20;
+            for (int i = 0; i < num_edges; ++i) {
+                if (!active_cache[i]) continue;
+                const double pi_prime     = exp_cache[i] * inv_sum_score_exp;
+                const double child_n_norm = static_cast<double>(visits_cache[i]) * inv_sum_visits;
+                const double deficit      = pi_prime - child_n_norm;
+                if (deficit > best_deficit) { best_deficit = deficit; best_i = i; }
+            }
+
         }
 
         if (best_i < 0) {
@@ -520,6 +563,8 @@ MCTSNode* MCTSEngine::_select(MCTSNode* start_node, std::vector<MCTSEdge*>& simu
     int depth = static_cast<int>(simulation_path.size()) +
                 (start_node == root ? 0 : 1);
     if (depth > max_selection_depth) max_selection_depth = depth;
+    sum_selection_depth += depth;
+    ++selection_count;
     return node;
 }
 
@@ -1560,142 +1605,6 @@ int MCTSEngine::run_simulations_fixed(int search_depth, int max_m) {
     return simulation_count;
 }
 
-int MCTSEngine::run_simulations_timed(int max_m,
-                                      std::chrono::steady_clock::time_point soft_deadline,
-                                      std::chrono::steady_clock::time_point hard_deadline) {
-    const auto wall_start = std::chrono::steady_clock::now();
-    root_used_halving = true;
-
-    double target_s = std::chrono::duration<double>(soft_deadline - wall_start).count();
-    if (target_s < 0.0) target_s = 0.0;
-    int search_depth = nps_ewma_ * target_s;
-
-    if (logger.get_level() <= 20) {
-        logger.log("INFO", "Starting Timed Sequential Halving MCTS. Planned budget: " +
-                   std::to_string(search_depth) + " (nps~" + std::to_string((long long)nps_ewma_) + ")");
-    }
-
-    _expand_root();
-    if (root->num_children == 0 || _single_legal_move()) return simulation_count;
-
-    std::vector<MCTSEdge*> all_edges;
-    std::vector<MCTSEdge*> active_candidates;
-    int m = _build_candidates(max_m, all_edges, active_candidates);
-    if (m == 0) {
-        _record_nps(simulation_count, std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count());
-        return simulation_count;
-    }
-
-    int remaining_search_depth = search_depth;
-    bool did_round0 = false;
-    bool aborted = false;
-    int r0_spent = 0;
-    int phase_idx = 0;
-
-    while (!active_candidates.empty() && remaining_search_depth > 0) {
-        if (did_round0 && std::chrono::steady_clock::now() >= soft_deadline) break;
-        if (stop_requested.load(std::memory_order_relaxed) || pool_exhausted.load(std::memory_order_relaxed)) { aborted = true; break; }
-
-        int num_cands = active_candidates.size();
-
-        if (!did_round0) {
-            int before = remaining_search_depth;
-            _run_round0(active_candidates, remaining_search_depth);
-            r0_spent = before - remaining_search_depth;
-            did_round0 = true;
-            active_candidates.erase(
-                std::remove_if(active_candidates.begin(), active_candidates.end(),
-                    [](MCTSEdge* e){ return e->child != nullptr && e->child->has_forced_outcome(); }),
-                active_candidates.end());
-            num_cands = active_candidates.size();
-            if (num_cands == 0) break;
-        }
-
-        int phases_left = std::max(1, (int)std::ceil(std::log2((double)num_cands)));
-        int current_phase_budget;
-        if (phases_left <= 1) {
-            current_phase_budget = remaining_search_depth;
-        } else {
-            int pool = remaining_search_depth + (phase_idx == 0 ? r0_spent : 0);
-            current_phase_budget = pool / phases_left;
-            if (phase_idx == 0) current_phase_budget -= r0_spent;
-        }
-        current_phase_budget = std::max(0, std::min(current_phase_budget, remaining_search_depth));
-
-        int active_idx = 0;
-        int since_check = 0;
-        int no_progress_streak = 0;
-        while (current_phase_budget > 0 && num_cands > 0) {
-            MCTSEdge* edge = active_candidates[active_idx];
-            MCTSNode* child = edge->child;
-
-            if (child != nullptr && child->has_forced_outcome()) {
-                active_candidates.erase(active_candidates.begin() + active_idx);
-                num_cands = active_candidates.size();
-                if (num_cands == 0) break;
-                if (active_idx >= num_cands) active_idx = 0;
-                continue;
-            }
-
-            if (_run_single_async_simulation(edge)) {
-                remaining_search_depth -= 1;
-                current_phase_budget -= 1;
-                no_progress_streak = 0;
-            } else {
-                no_progress_streak += 1;
-                if (no_progress_streak >= num_cands) {
-                    logger.log("WARNING", "Phase stalled: all " + std::to_string(num_cands) +
-                               " candidates returned no-op with nothing in flight. Ending phase early (budget left: " +
-                               std::to_string(current_phase_budget) + ").");
-                    break;
-                }
-            }
-
-            if (++since_check >= 128) {
-                since_check = 0;
-                if (std::chrono::steady_clock::now() >= hard_deadline
-                    || stop_requested.load(std::memory_order_relaxed)
-                    || pool_exhausted.load(std::memory_order_relaxed)) {
-                    aborted = true; break;
-                }
-            }
-
-            active_idx++;
-            if (active_idx >= num_cands) active_idx = 0;
-        }
-
-        while (inference_received < inference_sent) {
-            _retrieve_inference(true);
-        }
-
-        _log_tournament_results(active_candidates, "Phase " + std::to_string(phase_idx) + " End");
-
-        if (aborted) break;
-
-        if (_should_early_stop(active_candidates)) {
-            logger.log("INFO", "Early stop at phase " + std::to_string(phase_idx) +
-                       ": Q gap >= " + std::to_string(early_stop_q_gap));
-            break;
-        }
-
-        if (_should_return_on_forced_win()) {
-            logger.log("INFO", "Early return at phase " + std::to_string(phase_idx) + ": forced win found.");
-            break;
-        }
-
-        if (active_candidates.size() > 2) {
-            _halve(active_candidates);
-        }
-        phase_idx++;
-    }
-
-    _log_tournament_results(all_edges, "Final scores");
-    _log_system_stats();
-
-    _flush_inflight();
-    _record_nps(simulation_count, std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count());
-    return simulation_count;
-}
 
 int MCTSEngine::run_simulations_timed_inference(std::chrono::steady_clock::time_point target) {
     // ---- INFERENCE-ONLY: deficit-selection at root, soft-deadline stop ----
@@ -1726,9 +1635,6 @@ int MCTSEngine::run_simulations_timed_inference(std::chrono::steady_clock::time_
          
         double budget_s = std::chrono::duration<double>(target - wall_start).count();
         if (budget_s < 0.0) budget_s = 0.0;
-        logger.log("INFO", "Starting Timed Inference MCTS (deficit-at-root). Soft budget: "
-                   + std::to_string(budget_s) + "s (nps~"
-                   + std::to_string((long long)nps_ewma_) + ")");
     }
 
     _expand_root();
@@ -1856,9 +1762,6 @@ int MCTSEngine::run_simulations_fixed_inference(int search_depth) {
         logger.log("INFO", "===============================================================================================");
         logger.log("INFO", " MOVE " + std::to_string(current_move) + " | PLY " + std::to_string(ply_count) + " | " + color);
         logger.log("INFO", "===============================================================================================");    
-            
-        logger.log("INFO", "Starting Fixed Inference MCTS (deficit-at-root). Budget: "
-                   + std::to_string(search_depth));
     }
 
     _expand_root();

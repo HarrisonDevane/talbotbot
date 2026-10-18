@@ -51,14 +51,21 @@ DataGenerator::DataGenerator(
     model_config.board_dim = model_cfg["model"]["board_dim"].as<int>();
     model_config.policy_moves = model_cfg["model"]["total_policy_moves"].as<int>();
 
-    LoadedConfigs loaded = load_configs(mcts_cfg, sel_cfg, /*require_gumbel_m=*/true);
+    LoadedConfigs loaded = load_configs(mcts_cfg, sel_cfg);
+    mcts_config     = loaded.mcts;
+    selector_config = loaded.selector;
+
+    if (mcts_config.search != SearchType::HALVING) {
+        throw std::runtime_error("train.yaml: mcts.search must be halving");
+    }
+    
     mcts_config     = loaded.mcts;
     selector_config = loaded.selector;
 
     // --- Pool sizing block (required) ---------------------------------------
     // Fed to MCTSEngine::pool_sizing_cfg post-construction. Same 5 knobs
     // as play_uci.yaml but typically with smaller caps -- training only ever
-    // runs gumbel_search_depth-sim searches.
+    // runs search_depth-sim searches.
     pool_sizing_cfg.avg_branching       = pool_cfg["avg_branching"].as<double>();
     pool_sizing_cfg.node_safety_factor  = pool_cfg["node_safety_factor"].as<double>();
     pool_sizing_cfg.edge_safety_factor  = pool_cfg["edge_safety_factor"].as<double>();
@@ -107,10 +114,10 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
     dummy.setFen(chess::constants::STARTPOS);
 
     // Training runs an exactly-known number of sims per search
-    // (gumbel_search_depth). Size the initial pools for that -- the first
+    // (search_depth). Size the initial pools for that -- the first
     // reset() then finds capacity already sufficient and doesn't grow.
     PoolTargets initial_targets = MCTSEngine::predict_pool_needs_static(
-        mcts_config.gumbel_search_depth, pool_sizing_cfg);
+        mcts_config.search_depth, pool_sizing_cfg);
 
     MCTSEngine mcts(
         mcts_config,
@@ -183,9 +190,9 @@ void DataGenerator::worker_main(int logical_idx, int core_id) {
             // 1. Search
             //   Pool targets from the exact-known sim budget. After move 1
             //   this is a no-op grow (capacity already sufficient).
-            PoolTargets pt = mcts.predict_pool_needs(mcts_config.gumbel_search_depth);
+            PoolTargets pt = mcts.predict_pool_needs(mcts_config.search_depth);
             mcts.reset(board, history, pt.node_target, pt.edge_target);
-            int sim_count = mcts.run_simulations_fixed(mcts_config.gumbel_search_depth, mcts_config.gumbel_m);
+            int sim_count = mcts.run_simulations_fixed(mcts_config.search_depth, mcts_config.gumbel_m);
             double root_v_mix = mcts.root->calculate_v_mix(mcts_config.contempt);
 
             // 2. Generate Targets

@@ -85,6 +85,21 @@ static inline void uci_out(const std::string& line) {
 static MCTSEdge* get_best_root_edge(MCTSNode* root, MCTSEngine* engine, double contempt) {
     if (!root || root->num_children == 0) return nullptr;
 
+    // PUCT plays the most-visited move (ActionSelector's non-halving rule), so
+    // the info-line PV/score follows the same edge instead of the Gumbel score.
+    // Hybrid (SH root + PUCT below) picks its move by SH's Gumbel score, so
+    // only pure PUCT takes the max-visits branch.
+    if (engine->use_puct && !engine->root_used_halving) {
+        MCTSEdge* best = nullptr;
+        int best_v = -1;
+        for (int i = 0; i < root->num_children; ++i) {
+            MCTSEdge* e = root->first_edge + i;
+            const int v = e->child ? e->child->visits : 0;
+            if (v > best_v) { best_v = v; best = e; }
+        }
+        return best;
+    }
+
     double max_visits = 0.0;
     for (int i = 0; i < root->num_children; ++i) {
         MCTSNode* c = (root->first_edge + i)->child;
@@ -258,6 +273,10 @@ struct UciConfig {
     double early_stop_q_gap = 0.0;
     int early_stop_min_visits = 0;
     bool early_return_on_forced_win;
+
+    // Walk the previous search's tree down to the new position instead of
+    // starting fresh (mcts.tree_reuse, required).
+    bool tree_reuse = false;
 };
 
 // The exe_dir is passed in so we can set engine_path (model.engine sits next
@@ -311,7 +330,9 @@ static UciConfig load_config(const std::string& config_file_path,
     // binaries pick it up. Pre-refactor this block was a hand-maintained copy
     // of the one in data_generator.cpp; they had already drifted on .as<int>
     // vs .as<double> for the gumbel_* fields.
-    LoadedConfigs loaded = load_configs(mcts_n, sel_n, /*require_gumbel_m=*/false);
+    // mcts.search picks the search; load_configs requires mcts.gumbel for
+    // deficit/halving and mcts.puct for puct (see action_selector.cpp).
+    LoadedConfigs loaded = load_configs(mcts_n, sel_n);
     cfg.mcts     = loaded.mcts;
     cfg.selector = loaded.selector;
 
@@ -327,6 +348,11 @@ static UciConfig load_config(const std::string& config_file_path,
     if (mcts_n["early_return_on_forced_win"]) {
         cfg.early_return_on_forced_win = mcts_n["early_return_on_forced_win"].as<bool>();
     }
+
+    if (!mcts_n["tree_reuse"]) {
+        throw std::runtime_error("play_uci.yaml missing mcts.tree_reuse (true | false)");
+    }
+    cfg.tree_reuse = mcts_n["tree_reuse"].as<bool>();
 
 
     // time_control is REQUIRED for UCI (clock-based search is the whole point).
@@ -409,6 +435,16 @@ struct SearchWorker {
     // signals cv_start until the worker has emitted bestmove. The info
     // sub-thread loops while true.
     std::atomic<bool> search_active{false};
+
+    // Sequential halving (mcts.search: halving). SH needs its node budget up
+    // front, so timed searches convert the soft time target to nodes using the
+    // engine's NPS estimate; the info thread enforces the hard deadline.
+    bool use_halving = false;
+    int  gumbel_m    = 0;
+
+    // mcts.search: policy -- no search; one PUCT sim after root expansion
+    // lands on argmax(prior) and is played. Ignores clock and node limits.
+    bool policy_only = false;
 
     // Last move Talbot played (search or tablebase). Used to complete the
     // game PGN on exit, since the GUI may never echo our final move back.
@@ -673,6 +709,21 @@ int main(int argc, char* argv[]) {
     main_logger.log("INFO", "Config: " + config_file_path);
     main_logger.log("INFO", "Engine: " + cfg.engine_path);
     main_logger.log("INFO", "Opponent: " + (opponent_name.empty() ? std::string("<unknown>") : opponent_name));
+    main_logger.log("INFO", std::string("Tree reuse: ") + (cfg.tree_reuse ? "on" : "off"));
+    main_logger.log("INFO", "Search: " + std::string(search_type_name(cfg.mcts.search)) +
+        (cfg.mcts.search == SearchType::PUCT
+            ? " (cpuct=" + std::to_string(cfg.mcts.cpuct) +
+              ", fpu_reduction=" + std::to_string(cfg.mcts.puct_fpu_reduction) + ")"
+            : cfg.mcts.search == SearchType::POLICY
+            ? " (no search: argmax of policy; clock/nodes ignored)"
+            : cfg.mcts.search == SearchType::HYBRID
+            ? " (SH root m=" + std::to_string(cfg.mcts.gumbel_m) +
+              ", PUCT below cpuct=" + std::to_string(cfg.mcts.cpuct) +
+              ", fpu_reduction=" + std::to_string(cfg.mcts.puct_fpu_reduction) +
+              "; tree reuse off; timed budget from NPS)"
+            : cfg.mcts.search == SearchType::HALVING
+            ? " (m=" + std::to_string(cfg.mcts.gumbel_m) + "; tree reuse off; timed budget from NPS)"
+            : std::string()));
 
     if (!cfg.main_cores.empty()) {
         cpu_set_t cpuset = set_from_cores(cfg.main_cores);
@@ -770,6 +821,16 @@ int main(int argc, char* argv[]) {
     mcts_engine->early_stop_q_gap = cfg.early_stop_q_gap;
     mcts_engine->early_stop_min_visits = cfg.early_stop_min_visits;
     mcts_engine->early_return_on_forced_win = cfg.early_return_on_forced_win;
+    mcts_engine->use_puct                   = (cfg.mcts.search == SearchType::PUCT ||
+                                               cfg.mcts.search == SearchType::HYBRID ||
+                                               cfg.mcts.search == SearchType::POLICY);
+    mcts_engine->cpuct                      = cfg.mcts.cpuct;
+    mcts_engine->puct_fpu_reduction         = cfg.mcts.puct_fpu_reduction;
+    if (cfg.mcts.search == SearchType::POLICY) {
+        // 1-sim PUCT == argmax(prior); cpuct just has to be > 0.
+        mcts_engine->cpuct              = 1.0;
+        mcts_engine->puct_fpu_reduction = 0.0;
+    }
     // TimeControl is reconstructed per-go so setoption MoveOverhead changes
     // take effect on the next search.
 
@@ -788,6 +849,10 @@ int main(int argc, char* argv[]) {
     // search_worker.contempt feeds ActionSelector.select_move (via q_to_cp /
     // best_child_q) at the end of the search.
     search_worker.contempt = cfg.selector.contempt;
+    search_worker.use_halving = (cfg.mcts.search == SearchType::HALVING ||
+                                 cfg.mcts.search == SearchType::HYBRID);
+    search_worker.gumbel_m    = cfg.mcts.gumbel_m;
+    search_worker.policy_only = (cfg.mcts.search == SearchType::POLICY);
     search_worker.core_set = set_from_cores(cfg.game_worker_cores);
 
     search_worker.thread = std::thread([worker = &search_worker]() {
@@ -818,7 +883,9 @@ int main(int argc, char* argv[]) {
             // here is 1.0. For the fixed path (opening plies / go nodes / no
             // clock), sim count is known exactly.
             PoolTargets pt;
-            if (timed) {
+            if (worker->policy_only) {
+                pt = worker->mcts->predict_pool_needs(1);
+            } else if (timed) {
                 double time_s = std::chrono::duration<double>(
                     hard_dl - std::chrono::steady_clock::now()).count();
                 pt = worker->mcts->predict_pool_needs_for_time(time_s, 1.0);
@@ -867,7 +934,7 @@ int main(int argc, char* argv[]) {
             worker->search_active.store(true, std::memory_order_relaxed);
             const auto search_start = std::chrono::steady_clock::now();
 
-            std::thread info_thread([worker, search_start]() {
+            std::thread info_thread([worker, search_start, timed, hard_dl]() {
                 const auto emit_interval = std::chrono::milliseconds(1000);
                 const auto poll_interval = std::chrono::milliseconds(50);
                 auto next_emit = std::chrono::steady_clock::now() + emit_interval;
@@ -875,6 +942,10 @@ int main(int argc, char* argv[]) {
                 while (worker->search_active.load(std::memory_order_relaxed)) {
                     std::this_thread::sleep_for(poll_interval);
                     auto now = std::chrono::steady_clock::now();
+                    // SH has no clock of its own: enforce the hard limit here.
+                    if (worker->use_halving && timed && now >= hard_dl) {
+                        worker->mcts->request_stop();
+                    }
                     if (now < next_emit) continue;
                     next_emit = now + emit_interval;
 
@@ -915,7 +986,18 @@ int main(int argc, char* argv[]) {
             });
             // -----------------------------------------------------------------
 
-            if (timed) {
+            if (worker->policy_only) {
+                worker->mcts->run_simulations_fixed_inference(1);
+            } else if (worker->use_halving) {
+                int budget = search_nodes;
+                if (timed) {
+                    const double secs = std::chrono::duration<double>(
+                        soft_dl - std::chrono::steady_clock::now()).count();
+                    budget = static_cast<int>(worker->mcts->estimated_nps() * std::max(secs, 0.0));
+                }
+                budget = std::max(budget, worker->gumbel_m);   // SH needs >= m sims
+                worker->mcts->run_simulations_fixed(budget, worker->gumbel_m);
+            } else if (timed) {
                 worker->mcts->run_simulations_timed_inference( soft_dl);
             } else {
                 worker->mcts->run_simulations_fixed_inference(search_nodes);
@@ -1105,7 +1187,7 @@ int main(int argc, char* argv[]) {
             // Parse the subset of UCI `go` params we support.
             int64_t wtime = -1, btime = -1, winc = 0, binc = 0, movetime = -1;
             int movestogo = 0;
-            int total_search_nodes = cfg.mcts.gumbel_search_depth;
+            int total_search_nodes = cfg.mcts.search_depth;
             for (size_t i = 1; i + 1 < tokens.size(); ++i) {
                 if      (tokens[i] == "nodes")     total_search_nodes = std::stoi(tokens[i + 1]);
                 else if (tokens[i] == "wtime")     wtime     = std::stoll(tokens[i + 1]);
@@ -1125,7 +1207,7 @@ int main(int argc, char* argv[]) {
                 // is stale from the previous game (or zero) and the trainer's
                 // budget is a reasonable proxy.
                 timed = false;
-                total_search_nodes = cfg.mcts.gumbel_search_depth;
+                total_search_nodes = cfg.mcts.search_depth;
                 main_logger.log("INFO", "Opening ply " + std::to_string(ply_count) + " detected. Forcing fixed-node search.");
             } else if (movetime >= 0) {
                 // Fixed per-move time: spend (almost) all of it, no soft target.
@@ -1186,7 +1268,7 @@ int main(int argc, char* argv[]) {
                 }
 
                 // ---- Tree reuse plan --------------------------------------
-                // Reuse is possible iff we have a prior tree, the current
+                // Reuse is possible iff it is enabled (mcts.tree_reuse), we have a prior tree, the current
                 // base position matches the prior base, and current_moves is
                 // a strict extension of prior_moves by 1-4 plies. The 4-ply
                 // cap is defensive: very long descents cost more than a
@@ -1194,7 +1276,11 @@ int main(int argc, char* argv[]) {
                 // and it also indicates something unusual happened (GUI
                 // resynced from a saved game etc).
                 search_worker.reuse_moves.clear();
-                if (has_prior_tree
+                if (cfg.tree_reuse
+                    && cfg.mcts.search != SearchType::HALVING   // reset_reuse is deficit/puct-only
+                    && cfg.mcts.search != SearchType::HYBRID    // hybrid = SH root, no reuse
+                    && cfg.mcts.search != SearchType::POLICY    // policy-only: nothing to reuse
+                    && has_prior_tree
                     && current_base_fen == prior_base_fen
                     && current_moves.size() > prior_moves.size()
                     && (current_moves.size() - prior_moves.size()) <= 4

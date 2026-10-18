@@ -30,9 +30,7 @@
 // =============================================================================
 
 #include <vector>
-#include <optional>
 #include "chess.hpp"
-#include "time_control.hpp"    // for TimeBudget (used by our_time_budget)
 
 // -----------------------------------------------------------------------------
 // Result of a finished game, from White's point of view, plus a reason.
@@ -45,7 +43,7 @@ enum class SessionEndReason {
     DRAW_RULES,      // stalemate / 50-move / repetition / insufficient material
     RESIGNATION,     // a side resigned (ActionSelector resignation path)
     PLY_LIMIT,       // hit the max_ply_length hard cutoff -> scored as draw
-    TIME_LOSS,       // side flagged (clock reached zero in timed play)
+    TIME_LOSS,       // side flagged (remote clocked play, e.g. Lichess; tournament is fixed-node)
     OPPONENT_LEFT,   // remote opponent aborted/disconnected (Lichess)
     ABORTED          // session torn down externally (quit, error, timeout)
 };
@@ -84,10 +82,16 @@ public:
     // Must reflect every move applied so far (ours and the opponent's).
     virtual const chess::Board& current_position() const = 0;
 
-    // History of prior positions, most-recent-first, capped at the 4 plies
-    // board_to_tensor consumes. Returned so GameWorker can hand it straight
+    // History of prior positions (excluding the current one), most-recent-
+    // first, capped at the 7 plies board_to_tensor consumes -- the same cap
+    // data_generator and main_uci use. Returned so GameWorker can hand it straight
     // to MCTSEngine::reset(board, history) without each session re-deriving it.
     virtual const std::vector<chess::Board>& history() const = 0;
+
+    // Every move played this game, in order, INCLUDING the opening line.
+    // Used by SearchAgent for tree reuse: it replays the moves made since its
+    // last search to walk the old tree down to the current position.
+    virtual const std::vector<chess::Move>& moves_played() const = 0;
 
     // True when it is OUR turn to search and submit a move.
     // (UciSession knows this from the position command; SelfPlaySession from
@@ -101,12 +105,6 @@ public:
     // The 1-based ply counter, for ActionSelector temperature logic
     // (temperature_ply_cutoff). Matches ply_count in data_generator.cpp.
     virtual int ply_count() const = 0;
-
-    // Optional: time budget for OUR side's search this turn. Fixed-depth
-    // sessions (default) return nullopt -- GameWorker then uses the agent's
-    // built-in fixed search budget. Timed sessions override to return the
-    // current TimeBudget based on tracked clock state.
-    virtual std::optional<TimeBudget> our_time_budget() const { return std::nullopt; }
 
     // ---- the three things that actually differ ----
 

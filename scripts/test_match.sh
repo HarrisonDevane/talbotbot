@@ -28,7 +28,7 @@ run() {  # $1 = opponent name, rest = opponent -engine options
         option.SyzygyPath=/app/data/tablebases/3-4-5 \
       -engine cmd=$WRAP "$@" name=$opp \
       -each tc=65.3+0.54 restart=on \
-      -openings file=/app/data/opening_pgn/8moves_v3.pgn format=pgn order=random plies=8 \
+      -openings file=/app/data/opening_pgn/8moves_v3_tune.pgn format=pgn order=random plies=8 \
       -srand 12345 \
       -rounds 50 -repeat -concurrency 1 \
       -resign movecount=3 score=600 \
@@ -42,7 +42,7 @@ run() {  # $1 = opponent name, rest = opponent -engine options
 run olithink   args="opponent /app/data/engines/olithink/olithink" option.SyzygyPath=/app/data/tablebases/3-4-5
 run tomitank   args="opponent /usr/bin/node /app/data/engines/tomitank/tomitankChess.js" option.Hash=128 option.SyzygyPath=/app/data/tablebases/3-4-5
 run sentinel   args="opponent /app/data/engines/sentinel/sentinel" option.Hash=128 option.SyzygyPath=/app/data/tablebases/3-4-5
-run casanchess args="opponent /app/data/engines/casanchess/build/casanchess" option.Hash=128 option.SyzygyPath=/app/data/tablebases/3-4-5
+run vault args="opponent /app/data/engines/vault/vault" option.Hash=128 option.SyzygyPath=/app/data/tablebases/3-4-5 option.EvalFile=/app/data/engines/vault/default.nn
 
 wait
 echo "Done. Results in $RUN_DIR/<opponent>/"

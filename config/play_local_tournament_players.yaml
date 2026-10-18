@@ -1,0 +1,13 @@
+config_file: 'config/play_local_tournament.yaml'                              # Base tournament config (engine, MCTS, selection, pinning)
+
+tournament:
+  schedule: round_robin                                                       # gauntlet = every player vs baseline | round_robin = every pair
+  baseline: step_100k                                                         # Gauntlet: everyone plays this player. Round robin: Elo anchor only
+  search_depths: [1000, 10000, 100000]                                        # Fixed nodes per move; one independent tournament per depth
+  fixed_overrides: []                                                         # section.key=value applied to BOTH sides of every pairing
+
+players:
+  - name: step_050k                                                           # Player name (used in PGN and ratings)
+    checkpoint: '/app/train_dir/models/checkpoints/step_050000_model.pth'     # Checkpoint to export (or onnx: <path>)
+  - name: step_100k
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
