@@ -567,6 +567,7 @@ class RLOrchestrator:
             CALIB_BATCH_SIZE = self.params_config['training']['calib_batch_size']
 
             calib_batches = []
+            calib_masks = []
             total = 0
             while total < TARGET_CALIB_SAMPLES:
                 slot = self.train_task.prefetcher.ready_queue.get()
@@ -578,12 +579,15 @@ class RLOrchestrator:
                     .astype(np.float16)
                     .copy()
                 )
+                # Legal-move masks, for the masked INT8 vs FP32 check below.
+                mfull = self.train_task.prefetcher.shm_m[slot][:valid_idx].numpy().copy()
                 self.train_task.prefetcher.free_queue.put(slot)
 
                 # Slice the prefetcher batch into calib-sized chunks
                 for start in range(0, valid_idx, CALIB_BATCH_SIZE):
                     chunk = full[start:start + CALIB_BATCH_SIZE]
                     calib_batches.append({"input": chunk})
+                    calib_masks.append(mfull[start:start + CALIB_BATCH_SIZE])
                     total += chunk.shape[0]
                     if total >= TARGET_CALIB_SAMPLES:
                         break
@@ -646,21 +650,40 @@ class RLOrchestrator:
             if bad:
                 self.logger.warning(f"Head layers still quantized: {bad}")
 
-            # Numeric check: INT8 vs FP32 on a real batch of positions.
+            # Numeric check: INT8 vs FP32 on all calibration positions, on GPU,
+            # illegal moves masked exactly as in the training loss.
             try:
-                fp32_sess = ort.InferenceSession(fp32_onnx_path, providers=["CPUExecutionProvider"])
-                int8_sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
-                x = calib_batches[0]["input"]
-                p32, v32 = fp32_sess.run(None, {"input": x})
-                p8, v8 = int8_sess.run(None, {"input": x})
-                value_err = float(np.abs(v32.astype(np.float32) - v8.astype(np.float32)).max())
-                top1 = float((p32.argmax(1) == p8.argmax(1)).mean())
-                self.logger.info(f"INT8 check: max |dWDL|={value_err:.4f}, policy top-1 agreement={top1:.3f}")
-                if value_err > 0.05 or top1 < 0.95:
-                    self.logger.warning(
-                        f"INT8 export deviates from FP32 (max |dWDL|={value_err:.4f}, "
-                        f"top-1={top1:.3f}); continuing anyway."
-                    )
+                prov = [("CUDAExecutionProvider", {"device_id": 0, "gpu_mem_limit": 2 * 1024**3}),
+                        "CPUExecutionProvider"]
+                fp32_sess = ort.InferenceSession(fp32_onnx_path, providers=prov)
+                int8_sess = ort.InferenceSession(onnx_path, providers=prov)
+                top1s, top3s, kls, dEs = [], [], [], []
+                for b, mk in zip(calib_batches, calib_masks):
+                    x = b["input"]
+                    p32, v32 = fp32_sess.run(None, {"input": x})
+                    p8, v8 = int8_sess.run(None, {"input": x})
+                    p32 = np.where(mk, p32.astype(np.float64), -1e9)
+                    p8 = np.where(mk, p8.astype(np.float64), -1e9)
+                    q32 = np.exp(p32 - p32.max(1, keepdims=True)); q32 /= q32.sum(1, keepdims=True)
+                    q8 = np.exp(p8 - p8.max(1, keepdims=True)); q8 /= q8.sum(1, keepdims=True)
+                    best = q32.argmax(1)
+                    top1s.append(q8.argmax(1) == best)
+                    top3s.append((np.argsort(-q8, 1)[:, :3] == best[:, None]).any(1))
+                    kls.append((q32 * (np.log(q32 + 1e-12) - np.log(q8 + 1e-12))).sum(1))
+                    v32 = v32.astype(np.float64); v8 = v8.astype(np.float64)
+                    # Value head outputs WDL probabilities; compare expected score W - L.
+                    dEs.append(np.abs((v32[:, 0] - v32[:, 2]) - (v8[:, 0] - v8[:, 2])))
+                top1 = float(np.concatenate(top1s).mean())
+                top3 = float(np.concatenate(top3s).mean())
+                kl = np.concatenate(kls)
+                dE = np.concatenate(dEs)
+                msg = (f"INT8 check ({len(dE)} pos, {int8_sess.get_providers()[0]}): "
+                       f"top1={top1:.3f} top3={top3:.3f} | "
+                       f"KL mean={kl.mean():.4f} p95={np.percentile(kl, 95):.4f} | "
+                       f"|dE| mean={dE.mean():.4f} p95={np.percentile(dE, 95):.4f} max={dE.max():.4f}")
+                self.logger.info(msg)
+                if top3 < 0.97 or kl.mean() > 0.05 or dE.mean() > 0.06:
+                    self.logger.warning("INT8 export deviates from FP32 beyond thresholds. " + msg)
                 del fp32_sess, int8_sess
             except Exception as e:
                 self.logger.warning(f"INT8 numeric check failed to run: {e}")
@@ -670,6 +693,7 @@ class RLOrchestrator:
 
             del data_reader
             del calib_batches
+            del calib_masks
             gc.collect()
 
             torch.cuda.synchronize()

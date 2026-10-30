@@ -1,5 +1,5 @@
 engine:
-  log_dir: '/app/logs/local_inference'                            # Empty = file logging disabled.
+  log_dir: ''                            # Empty = file logging disabled.
   log_level: 20                                                   # 10=DEBUG 20=INFO 30=WARNING 40=ERROR 50=CRITICAL
 
 inference:
@@ -14,9 +14,9 @@ mcts:
   search_depth: 1000                                              # Fixed node budget when UCI gives no time (and for the first two plies)
   tree_reuse: true                                                # Reuse the previous move's subtree (deficit/puct; halving always starts fresh)
   worker_minibatch_size: 128                                      # Max positions sent to the batcher at once
-  virtual_loss: 1.0                                               # Penalty applied to nodes currently being explored
+  virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored
   contempt: 0.0                                                   # Contempt for playing drawing positions
-  policy_softmax_temp: 1.0                                        # Temperature on the policy logits (prior sharpness)
+  policy_softmax_temp: 1.4                                        # Temperature on the policy logits (prior sharpness)
   early_stop_q_gap: 0.2                                           # Stop early when the top two root moves differ by this much Q (0 = off)
   early_stop_min_visits: 100000                                   # Minimum root visits before early stop may trigger
   early_return_on_forced_win: true                                # Return immediately when a forced win is proven
@@ -28,7 +28,7 @@ mcts:
     explore_c: 0.0                                                # Exploration bonus coefficient, same at every depth (0 = none)
     m: 16                                                         # Root candidates for sequential halving (halving only)
   puct:                                                           # puct only
-    cpuct: 1.5                                                    # Exploration constant, Q on [-1, 1]
+    cpuct: 3.0                                                    # Exploration constant, Q on [-1, 1]
     fpu_reduction: 0.0                                            # Value for unvisited moves = v_mix - this
   
 pool_sizing:

@@ -1,13 +1,75 @@
-config_file: 'config/play_local_tournament.yaml'                              # Base tournament config (engine, MCTS, selection, pinning)
+config_file: 'config/play_local_tournament.yaml'                              # Base tournament config (200 games per pairing; global.search_stats: false)
 
 tournament:
-  schedule: round_robin                                                       # gauntlet = every player vs baseline | round_robin = every pair
-  baseline: step_100k                                                         # Gauntlet: everyone plays this player. Round robin: Elo anchor only
-  search_depths: [1000, 10000, 100000]                                        # Fixed nodes per move; one independent tournament per depth
-  fixed_overrides: []                                                         # section.key=value applied to BOTH sides of every pairing
+  schedule: round_robin                                                       # every pair: 22 players -> 231 pairings
+  baseline: step_005k                                                         # Elo anchor (0): first checkpoint
+  search_depths: [1000]                                                       # 1k new sims per move (1k-tuned PUCT settings)
+  fixed_overrides: [mcts.tree_reuse=true, mcts.puct.cpuct=1.0, mcts.policy_softmax_temp=1.4]   # best 1k PUCT cell; reuse on (policy-only ignores these)
 
 players:
-  - name: step_050k                                                           # Player name (used in PGN and ratings)
-    checkpoint: '/app/train_dir/models/checkpoints/step_050000_model.pth'     # Checkpoint to export (or onnx: <path>)
+  - name: step_000k
+    checkpoint: '/app/train_dir/models/checkpoints/step_000000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_005k
+    checkpoint: '/app/train_dir/models/checkpoints/step_005000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_010k
+    checkpoint: '/app/train_dir/models/checkpoints/step_010000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_015k
+    checkpoint: '/app/train_dir/models/checkpoints/step_015000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_020k
+    checkpoint: '/app/train_dir/models/checkpoints/step_020000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_025k
+    checkpoint: '/app/train_dir/models/checkpoints/step_025000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_030k
+    checkpoint: '/app/train_dir/models/checkpoints/step_030000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_035k
+    checkpoint: '/app/train_dir/models/checkpoints/step_035000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_040k
+    checkpoint: '/app/train_dir/models/checkpoints/step_040000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_045k
+    checkpoint: '/app/train_dir/models/checkpoints/step_045000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_050k
+    checkpoint: '/app/train_dir/models/checkpoints/step_050000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_055k
+    checkpoint: '/app/train_dir/models/checkpoints/step_055000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_060k
+    checkpoint: '/app/train_dir/models/checkpoints/step_060000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_065k
+    checkpoint: '/app/train_dir/models/checkpoints/step_065000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_070k
+    checkpoint: '/app/train_dir/models/checkpoints/step_070000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_075k
+    checkpoint: '/app/train_dir/models/checkpoints/step_075000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_080k
+    checkpoint: '/app/train_dir/models/checkpoints/step_080000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_085k
+    checkpoint: '/app/train_dir/models/checkpoints/step_085000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_090k
+    checkpoint: '/app/train_dir/models/checkpoints/step_090000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_095k
+    checkpoint: '/app/train_dir/models/checkpoints/step_095000_model.pth'
+    overrides: [mcts.search=puct]
   - name: step_100k
     checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.search=puct]
+  - name: step_100k_policy                                                    # final net, no search (argmax of policy)
+    checkpoint: '/app/train_dir/models/checkpoints/step_100000_model.pth'
+    overrides: [mcts.search=policy]

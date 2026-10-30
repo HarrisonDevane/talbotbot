@@ -3,6 +3,7 @@ global:
   log_dir: '/app/logs/local_tournament'                          # Every run goes in <log_dir>/<spec name>_<timestamp>/; ONNX cache in <log_dir>/onnx_cache/
   exe_path: '/app/build/talbot_tournament'                       # Compiled tournament binary (talbot_trt_compile must be in the same folder)
   ordo_path: '/app/data/Ordo/ordo'                               # Ordo binary used to rate each run
+  search_stats: false
   main_logging_level: 50                                         # Logging level for the C++ tournament's main log
 
 inference:
@@ -19,7 +20,7 @@ mcts:
   worker_minibatch_size: 64                                      # Max positions sent to the batcher at once
   virtual_loss: 0.3                                               # Penalty applied to nodes currently being explored
   contempt: 0.0                                                   # Contempt for playing drawing positions
-  policy_softmax_temp: 1.0                                        # Temperature on the policy logits (prior sharpness)
+  policy_softmax_temp: 1.4                                        # Temperature on the policy logits (prior sharpness)
   early_stop_q_gap: 1.0                                           # Stop early when the top two root moves differ by this much Q (0 = off)
   early_stop_min_visits: 100000                                   # Minimum root visits before early stop may trigger
   early_return_on_forced_win: true                                # Return immediately when a forced win is proven

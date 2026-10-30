@@ -24,6 +24,22 @@ RUN wget -q https://download.pytorch.org/libtorch/cu132/libtorch-shared-with-dep
  && git clone --depth 1 https://github.com/Disservin/chess-library.git \
  && git clone --depth 1 https://github.com/cameron314/concurrentqueue.git
 
+# Tools for opponent engines and debugging
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      nodejs \
+      openjdk-21-jre-headless \
+      curl ca-certificates build-essential git \
+      gdb \
+ && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain (for building Rust engines: dual, svart, scarlet, luna)
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+
+# Some engine repos (e.g. scarlet) pull in CUDA build deps; point them at CUDA
+ENV CUDA_PATH=/usr/local/cuda
+
 # Build config
 ENV TALBOT_DEP_ROOT=/opt/talbot_deps \
     TALBOT_CUDA_PATH=/usr/local/cuda-13.3 \

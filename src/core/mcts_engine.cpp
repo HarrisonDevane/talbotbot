@@ -1727,7 +1727,23 @@ int MCTSEngine::run_simulations_timed_inference(std::chrono::steady_clock::time_
 
         no_progress_streak = 0;
 
+        const int count_before = simulation_count;
         _dispatch_selected_leaf(leaf, simulation_path);
+        if (simulation_count == count_before) {
+            // _select returned a node it could not use (already-expanded interior
+            // node whose children are all proven/unavailable). Retrying is pointless
+            // unless an in-flight inference can change the tree, so flush + wait for
+            // one; if nothing is in flight, the search cannot progress -> stop.
+            if (!batch_buffer.empty()) _submit_batch();
+            if (inference_received < inference_sent) {
+                _retrieve_inference(true);
+                continue;
+            }
+            logger.log("WARNING", "Search stuck: _select returned an unusable expanded node "
+                       "with nothing in flight; ending search early at " +
+                       std::to_string(simulation_count) + " sims.");
+            break;
+        }
     }
 
     _drain_pending_inference();
@@ -1834,7 +1850,23 @@ int MCTSEngine::run_simulations_fixed_inference(int search_depth) {
 
         no_progress_streak = 0;
 
+        const int count_before = simulation_count;
         _dispatch_selected_leaf(leaf, simulation_path);
+        if (simulation_count == count_before) {
+            // _select returned a node it could not use (already-expanded interior
+            // node whose children are all proven/unavailable). Retrying is pointless
+            // unless an in-flight inference can change the tree, so flush + wait for
+            // one; if nothing is in flight, the search cannot progress -> stop.
+            if (!batch_buffer.empty()) _submit_batch();
+            if (inference_received < inference_sent) {
+                _retrieve_inference(true);
+                continue;
+            }
+            logger.log("WARNING", "Search stuck: _select returned an unusable expanded node "
+                       "with nothing in flight; ending search early at " +
+                       std::to_string(simulation_count - start_count) + " sims.");
+            break;
+        }
     }
 
     _drain_pending_inference();

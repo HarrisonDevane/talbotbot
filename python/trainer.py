@@ -235,11 +235,17 @@ class TrainTask:
         self.model = ChessAIModel(self.model_config).to(self.device)
         self.model = self.model.to(memory_format=torch.channels_last)
 
+        decay, no_decay = [], []
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            (decay if p.ndim > 1 else no_decay).append(p)
+
         self.optimizer = optim.SGD(
-            self.model.parameters(),
+            [{"params": decay,    "weight_decay": float(self.training_config['weight_decay'])},
+             {"params": no_decay, "weight_decay": 0.0}],
             lr=float(self.training_config['lr_warmup']),
             momentum=self.training_config['momentum_rate'],
-            weight_decay=float(self.training_config['weight_decay'])
         )
 
         self.scaler = GradScaler('cuda')

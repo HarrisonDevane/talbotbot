@@ -441,6 +441,9 @@ struct TournamentConfig {
     std::string opening_file;
     int opening_plies             = 0;     // 0 = play the full book line
 
+    // per-search JSON stats (search_stats_worker_*.jsonl); global.search_stats
+    bool search_stats             = true;
+
     // tablebase
     bool tablebase_enabled        = false;
     std::string tablebase_path;
@@ -456,6 +459,8 @@ static TournamentConfig load_config(const CliArgs& args) {
 
     cfg.base_log_dir       = global["log_dir"].as<std::string>();
     cfg.main_logging_level = global["main_logging_level"].as<int>();
+    // Optional: per-search JSON stats (default on, so existing configs are unchanged).
+    if (global["search_stats"]) cfg.search_stats = global["search_stats"].as<bool>();
 
     const std::string model_yaml_path = global["model_file"].as<std::string>();
     YAML::Node model = YAML::LoadFile(model_yaml_path);
@@ -854,14 +859,18 @@ int main(int argc, char* argv[]) {
 
             // One JSON line per search (see SearchAgent::write_stats). Both
             // agents of this worker run on this thread, so no locking.
-            std::ofstream stats_file(pairing_dir + "/search_stats_worker_" +
-                                     std::to_string(w) + ".jsonl");
+            // Disabled entirely (no file created) when global.search_stats=false.
+            std::ofstream stats_file;
             agent_a.search_label = search_name(cfg.side_a);
             agent_b.search_label = search_name(cfg.side_b);
-            agent_a.stats_out = &stats_file;
             agent_a.player    = name_a;
-            agent_b.stats_out = &stats_file;
             agent_b.player    = name_b;
+            if (cfg.search_stats) {
+                stats_file.open(pairing_dir + "/search_stats_worker_" +
+                                std::to_string(w) + ".jsonl");
+                agent_a.stats_out = &stats_file;
+                agent_b.stats_out = &stats_file;
+            }
 
             for (size_t idx = next_spec.fetch_add(1); idx < specs.size();
                  idx = next_spec.fetch_add(1)) {
